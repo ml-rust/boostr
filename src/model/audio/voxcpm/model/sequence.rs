@@ -1,11 +1,11 @@
-//! Host-side layout of the VoxCPM2 voice-clone prefill sequence: token ids
-//! and the two position masks, built once and uploaded as tensors by
+//! Host-side layout of the VoxCPM2 prefill sequence: token ids and the two
+//! position masks, built once and uploaded as tensors by
 //! [`prefill`](crate::model::audio::voxcpm::model::VoxCpm2Model::prefill).
 //!
-//! # Reference ("voice clone") mode
+//! # Reference ("voice clone") prefix
 //!
-//! The reference TRANSCRIPT is NOT used — only the reference AUDIO. There is
-//! no reference-text parameter anywhere on this path.
+//! The prefix carries the reference AUDIO only. Its transcript never enters
+//! the sequence.
 //!
 //! With `z1 = zeros([1, patch_size, feat_dim])` the reference prefix is:
 //!
@@ -25,6 +25,23 @@
 //! text_mask  = ref_t_mask ++ [1; text_length]
 //! audio_mask = ref_a_mask ++ [0; text_length]
 //! ```
+//!
+//! # Continuation ("Hi-Fi") tail
+//!
+//! A row with `T_prompt > 0` patches of prompt audio appends them AFTER the
+//! text. Its text is `prompt_text ++ target_text`, tokenized by the caller,
+//! so here the prompt transcript IS part of `text_token`:
+//!
+//! ```text
+//! text_token = prefix ++ text_token          ++ [0; T_prompt]
+//! audio_feat = prefix ++ zeros(text_length)  ++ prompt_feat
+//! text_mask  = prefix ++ [1; text_length]    ++ [0; T_prompt]
+//! audio_mask = prefix ++ [0; text_length]    ++ [1; T_prompt]
+//! ```
+//!
+//! `prefix` is the reference prefix above, or nothing when `T_ref == 0`
+//! (continuation-only). `S` grows by `T_prompt`. The last position is then
+//! an AUDIO position, so the prefill's `lm_hidden` comes back fsq'd.
 //!
 //! # No-reference ("zero-shot") mode
 //!
@@ -57,32 +74,35 @@ use crate::model::audio::voxcpm::model::config::{
     AUDIO_START_ID, REF_AUDIO_END_ID, REF_AUDIO_FILLER_ID, REF_AUDIO_START_ID,
 };
 
-/// Token ids and per-position masks for one voice-clone prefill sequence.
+/// Token ids and per-position masks for one prefill sequence.
 ///
 /// `token_ids` is `i64` because that is the index dtype
 /// [`Embedding::forward`](crate::nn::Embedding::forward) normalizes to; the
 /// masks are `f32` and are cast to the model's dtype at upload.
 #[derive(Debug, Clone)]
 pub struct SequenceLayout {
-    /// `[S]` token ids. Reference-audio positions carry
+    /// `[S]` token ids. Reference-audio and prompt-audio positions carry
     /// [`REF_AUDIO_FILLER_ID`], whose embedding is masked out.
     pub token_ids: Vec<i64>,
     /// `[S]`, 1.0 at every text position (the whole prompt, plus the two
     /// delimiters in reference mode), 0.0 elsewhere.
     pub text_mask: Vec<f32>,
-    /// `[S]`, 1.0 at every reference-audio position, 0.0 elsewhere. All zeros
-    /// in no-reference mode.
+    /// `[S]`, 1.0 at every reference-audio and prompt-audio position, 0.0
+    /// elsewhere. All zeros in zero-shot mode.
     pub audio_mask: Vec<f32>,
     /// Reference-audio patches, i.e. `ref_feat`'s leading axis. 0 marks
     /// no-reference mode.
     pub t_ref: usize,
     /// Prompt length, including its trailing [`AUDIO_START_ID`].
     pub text_length: usize,
+    /// Prompt-audio patches in the trailing continuation span, i.e.
+    /// `prompt_feat`'s leading axis. 0 marks no continuation tail.
+    pub prompt_len: usize,
 }
 
 impl SequenceLayout {
-    /// Build the layout for `t_ref` reference-audio patches followed by
-    /// `text_token_ids`.
+    /// Build the layout for `t_ref` reference-audio patches, then
+    /// `text_token_ids`, then `prompt_len` prompt-audio patches.
     ///
     /// `t_ref > 0` gives the reference layout, `S = t_ref + 2 + text_length`:
     ///
@@ -104,6 +124,17 @@ impl SequenceLayout {
     /// the reference VoxCPM implementation's zero-shot packer (`process_tts_data`). It emits no residual
     /// `103`/`104` and no zero-patch bookend.
     ///
+    /// `prompt_len > 0` appends the continuation tail after either form,
+    /// adding `prompt_len` to `S`:
+    ///
+    /// ```text
+    /// tokens ++= [0; prompt_len]
+    /// t_mask ++= [0; prompt_len]
+    /// a_mask ++= [1; prompt_len]
+    /// ```
+    ///
+    /// `prompt_len == 0` emits exactly the layout without a tail.
+    ///
     /// `text_token_ids` must be non-empty and must already end with
     /// [`AUDIO_START_ID`] — boostr does not tokenize on this path, so it
     /// cannot append the terminator itself, and a prompt missing it prefills
@@ -111,7 +142,7 @@ impl SequenceLayout {
     ///
     /// Errors when `text_token_ids` is empty, or when the prompt does not end
     /// with [`AUDIO_START_ID`].
-    pub fn build(t_ref: usize, text_token_ids: &[u32]) -> Result<Self> {
+    pub fn build(t_ref: usize, text_token_ids: &[u32], prompt_len: usize) -> Result<Self> {
         let text_length = text_token_ids.len();
         let last = *text_token_ids
             .last()
@@ -129,7 +160,7 @@ impl SequenceLayout {
             });
         }
 
-        let seq_len = text_length + if t_ref > 0 { t_ref + 2 } else { 0 };
+        let seq_len = text_length + prompt_len + if t_ref > 0 { t_ref + 2 } else { 0 };
         let mut token_ids = Vec::with_capacity(seq_len);
         let mut text_mask = Vec::with_capacity(seq_len);
         let mut audio_mask = Vec::with_capacity(seq_len);
@@ -153,12 +184,22 @@ impl SequenceLayout {
             audio_mask.push(0.0);
         }
 
-        // The prompt: every position is text, none carries audio. The LAST
-        // row of the whole sequence therefore lands here, which is why
-        // `lm_hidden` comes back UN-fsq'd — see `prefill`.
+        // The prompt: every position is text, none carries audio. Without a
+        // continuation tail the LAST row of the sequence lands here, and the
+        // prefill's `lm_hidden` comes back UN-fsq'd.
         token_ids.extend(text_token_ids.iter().map(|&id| i64::from(id)));
         text_mask.extend(std::iter::repeat_n(1.0f32, text_length));
         audio_mask.extend(std::iter::repeat_n(0.0f32, text_length));
+
+        // [0; T_prompt]: the continuation span. Filler ids, audio mask only.
+        // With it the LAST row is an audio position, so `lm_hidden` comes
+        // back fsq'd.
+        token_ids.extend(std::iter::repeat_n(
+            i64::from(REF_AUDIO_FILLER_ID),
+            prompt_len,
+        ));
+        text_mask.extend(std::iter::repeat_n(0.0f32, prompt_len));
+        audio_mask.extend(std::iter::repeat_n(1.0f32, prompt_len));
 
         check_mask_complementarity(&text_mask, &audio_mask)?;
 
@@ -168,10 +209,11 @@ impl SequenceLayout {
             audio_mask,
             t_ref,
             text_length,
+            prompt_len,
         })
     }
 
-    /// `S = text_length + (if t_ref > 0 { t_ref + 2 } else { 0 })`.
+    /// `S = text_length + prompt_len + (if t_ref > 0 { t_ref + 2 } else { 0 })`.
     pub fn seq_len(&self) -> usize {
         self.token_ids.len()
     }
@@ -218,7 +260,7 @@ mod tests {
     #[test]
     fn seq_len_is_t_ref_plus_two_plus_text_length() {
         for t_ref in [1usize, 5, 37] {
-            let layout = SequenceLayout::build(t_ref, &PROMPT).expect("layout");
+            let layout = SequenceLayout::build(t_ref, &PROMPT, 0).expect("layout");
             assert_eq!(layout.seq_len(), t_ref + 2 + PROMPT.len());
             assert_eq!(layout.text_mask.len(), layout.seq_len());
             assert_eq!(layout.audio_mask.len(), layout.seq_len());
@@ -227,7 +269,7 @@ mod tests {
 
     #[test]
     fn masks_are_complementary_and_cover_every_position() {
-        let layout = SequenceLayout::build(5, &PROMPT).expect("layout");
+        let layout = SequenceLayout::build(5, &PROMPT, 0).expect("layout");
         check_mask_complementarity(&layout.text_mask, &layout.audio_mask).expect("complementary");
         assert_eq!(
             layout.audio_mask.iter().sum::<f32>(),
@@ -267,7 +309,7 @@ mod tests {
     #[test]
     fn delimiters_and_prompt_land_at_the_right_positions() {
         let t_ref = 4usize;
-        let layout = SequenceLayout::build(t_ref, &PROMPT).expect("layout");
+        let layout = SequenceLayout::build(t_ref, &PROMPT, 0).expect("layout");
 
         assert_eq!(layout.token_ids[0], i64::from(REF_AUDIO_START_ID));
         assert_eq!(layout.text_mask[0], 1.0);
@@ -295,19 +337,19 @@ mod tests {
 
     #[test]
     fn rejects_prompt_not_ending_in_audio_start() {
-        let err = SequenceLayout::build(2, &[11, 22]).unwrap_err();
+        let err = SequenceLayout::build(2, &[11, 22], 0).unwrap_err();
         assert!(err.to_string().contains("AUDIO_START_ID"), "got {err}");
     }
 
     #[test]
     fn rejects_empty_prompt() {
-        assert!(SequenceLayout::build(2, &[]).is_err());
-        assert!(SequenceLayout::build(0, &[]).is_err());
+        assert!(SequenceLayout::build(2, &[], 0).is_err());
+        assert!(SequenceLayout::build(0, &[], 0).is_err());
     }
 
     #[test]
     fn zero_reference_is_the_prompt_alone() {
-        let layout = SequenceLayout::build(0, &PROMPT).expect("layout");
+        let layout = SequenceLayout::build(0, &PROMPT, 0).expect("layout");
 
         assert_eq!(layout.seq_len(), PROMPT.len(), "S == text_length");
         assert_eq!(layout.t_ref, 0);
@@ -333,5 +375,29 @@ mod tests {
         assert_eq!(layout.text_mask.len(), layout.seq_len());
         assert_eq!(layout.audio_mask.len(), layout.seq_len());
         check_mask_complementarity(&layout.text_mask, &layout.audio_mask).expect("complementary");
+    }
+
+    /// The continuation tail follows the text in both prefix forms: filler
+    /// ids, audio mask only, and the layout before it is unchanged.
+    #[test]
+    fn prompt_tail_follows_the_text_in_both_prefix_forms() {
+        let t_prompt = 3usize;
+        for t_ref in [0usize, 4] {
+            let head = SequenceLayout::build(t_ref, &PROMPT, 0).expect("head");
+            let layout = SequenceLayout::build(t_ref, &PROMPT, t_prompt).expect("layout");
+            let s = head.seq_len();
+            assert_eq!(layout.seq_len(), s + t_prompt);
+            assert_eq!(layout.prompt_len, t_prompt);
+            assert_eq!(&layout.token_ids[..s], head.token_ids.as_slice());
+            assert_eq!(&layout.text_mask[..s], head.text_mask.as_slice());
+            assert_eq!(&layout.audio_mask[..s], head.audio_mask.as_slice());
+            for i in s..layout.seq_len() {
+                assert_eq!(layout.token_ids[i], i64::from(REF_AUDIO_FILLER_ID));
+                assert_eq!(layout.text_mask[i], 0.0, "position {i} must not be text");
+                assert_eq!(layout.audio_mask[i], 1.0, "position {i} must be audio");
+            }
+            check_mask_complementarity(&layout.text_mask, &layout.audio_mask)
+                .expect("complementary");
+        }
     }
 }

@@ -1,16 +1,15 @@
-//! The prefill entry points — one row or a left-padded batch, with or
-//! without captured intermediates — and the tensor body they share.
+//! The prefill body every entry point in `entry` runs.
 
 use super::rows::PaddedBatch;
 use super::state::{PrefillIntermediates, PrefillRow, PrefillState};
-use super::tensors::{last_row, mask_var, row_audio_feat};
+use super::tensors::{batch_audio_feat, last_patch, last_row, mask_var};
 use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::minicpm4::{LanePositions, LeftPad};
 use crate::model::audio::voxcpm::model::loader::VoxCpm2Model;
 use crate::model::traits::ModelClient;
 use crate::ops::FlashAttentionOps;
 use crate::quant::traits::DequantOps;
-use numr::autograd::{Var, var_add, var_cat, var_mul};
+use numr::autograd::{var_add, var_cat, var_mul};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
@@ -20,141 +19,9 @@ use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
 impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
-    /// Prefill both LMs over the reference prefix and the prompt of ONE row.
-    ///
-    /// `ref_feat` and `text_token_ids` are [`PrefillRow`]'s fields.
-    /// `max_length` sizes both KV caches; it must be at least `S` and should
-    /// leave room for however many patches the later sampling loop will
-    /// generate.
-    ///
-    /// This is [`prefill_batch`](Self::prefill_batch) with a single row and
-    /// computes the same bytes it always has: no pad, no `kv_start`.
-    /// [`PrefillState::intermediates`] is `None`; use
-    /// [`prefill_capturing`](Self::prefill_capturing) to get them.
-    pub fn prefill<C>(
-        &self,
-        client: &C,
-        ref_feat: Option<&Tensor<R>>,
-        text_token_ids: &[u32],
-        max_length: usize,
-    ) -> Result<PrefillState<R>>
-    where
-        C: ModelClient<R> + TypeConversionOps<R> + DequantOps<R> + 'static,
-        R::Client: TensorOps<R>
-            + ScalarOps<R>
-            + ReduceOps<R>
-            + IndexingOps<R>
-            + ShapeOps<R>
-            + ActivationOps<R>
-            + BinaryOps<R>
-            + UnaryOps<R>
-            + CompareOps<R>
-            + ConditionalOps<R>
-            + DequantOps<R>
-            + FlashAttentionOps<R>,
-    {
-        let row = PrefillRow {
-            ref_feat,
-            text_token_ids,
-        };
-        self.prefill_inner(client, &[row], max_length, false)
-    }
-
-    /// [`prefill`](Self::prefill), additionally returning the full-sequence
-    /// intermediates in [`PrefillState::intermediates`].
-    ///
-    /// The values are the SAME tensors the plain path computes and drops —
-    /// capturing them keeps them alive, it does not recompute anything.
-    pub fn prefill_capturing<C>(
-        &self,
-        client: &C,
-        ref_feat: Option<&Tensor<R>>,
-        text_token_ids: &[u32],
-        max_length: usize,
-    ) -> Result<PrefillState<R>>
-    where
-        C: ModelClient<R> + TypeConversionOps<R> + DequantOps<R> + 'static,
-        R::Client: TensorOps<R>
-            + ScalarOps<R>
-            + ReduceOps<R>
-            + IndexingOps<R>
-            + ShapeOps<R>
-            + ActivationOps<R>
-            + BinaryOps<R>
-            + UnaryOps<R>
-            + CompareOps<R>
-            + ConditionalOps<R>
-            + DequantOps<R>
-            + FlashAttentionOps<R>,
-    {
-        let row = PrefillRow {
-            ref_feat,
-            text_token_ids,
-        };
-        self.prefill_inner(client, &[row], max_length, true)
-    }
-
-    /// Prefill both LMs over `rows` at once, left-padded to the longest row.
-    ///
-    /// Every row's caches share one `max_length`, which must be at least
-    /// `S_max` and must leave room for the LONGEST patch budget any row will
-    /// generate: the decode loop steps every row at the same position.
-    /// Rows come back in input order, `[B, ...]`, with
-    /// [`PrefillState::kv_start`] set when any row is padded.
-    ///
-    /// A single row, or rows of equal length, run the unpadded kernels and
-    /// match [`prefill`](Self::prefill) exactly.
-    pub fn prefill_batch<C>(
-        &self,
-        client: &C,
-        rows: &[PrefillRow<'_, R>],
-        max_length: usize,
-    ) -> Result<PrefillState<R>>
-    where
-        C: ModelClient<R> + TypeConversionOps<R> + DequantOps<R> + 'static,
-        R::Client: TensorOps<R>
-            + ScalarOps<R>
-            + ReduceOps<R>
-            + IndexingOps<R>
-            + ShapeOps<R>
-            + ActivationOps<R>
-            + BinaryOps<R>
-            + UnaryOps<R>
-            + CompareOps<R>
-            + ConditionalOps<R>
-            + DequantOps<R>
-            + FlashAttentionOps<R>,
-    {
-        self.prefill_inner(client, rows, max_length, false)
-    }
-
-    /// [`prefill_batch`](Self::prefill_batch), additionally returning the
-    /// `[B, S_max, _]` intermediates in [`PrefillState::intermediates`].
-    pub fn prefill_batch_capturing<C>(
-        &self,
-        client: &C,
-        rows: &[PrefillRow<'_, R>],
-        max_length: usize,
-    ) -> Result<PrefillState<R>>
-    where
-        C: ModelClient<R> + TypeConversionOps<R> + DequantOps<R> + 'static,
-        R::Client: TensorOps<R>
-            + ScalarOps<R>
-            + ReduceOps<R>
-            + IndexingOps<R>
-            + ShapeOps<R>
-            + ActivationOps<R>
-            + BinaryOps<R>
-            + UnaryOps<R>
-            + CompareOps<R>
-            + ConditionalOps<R>
-            + DequantOps<R>
-            + FlashAttentionOps<R>,
-    {
-        self.prefill_inner(client, rows, max_length, true)
-    }
-
-    fn prefill_inner<C>(
+    /// Prefill both LMs over `rows`, left-padded to the longest row, and
+    /// capture the intermediates when `capture` is set.
+    pub(super) fn prefill_inner<C>(
         &self,
         client: &C,
         rows: &[PrefillRow<'_, R>],
@@ -179,7 +46,13 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         let (patch_size, feat_dim) = (self.config.patch_size, self.config.feat_dim);
         let host_rows = rows
             .iter()
-            .map(|row| Ok((row.t_ref(patch_size, feat_dim)?, row.text_token_ids)))
+            .map(|row| {
+                Ok((
+                    row.t_ref(patch_size, feat_dim)?,
+                    row.text_token_ids,
+                    row.t_prompt(patch_size, feat_dim)?,
+                ))
+            })
             .collect::<Result<Vec<_>>>()?;
         let padded = PaddedBatch::build(&host_rows)?;
         let (batch, seq_len) = (padded.batch(), padded.seq_len);
@@ -194,37 +67,11 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
 
         let (dtype, device) = self.lm_dtype_device()?;
 
-        // Row b's audio_feat, `[1, S_b, patch_size, feat_dim]`, its pad in
-        // front; rows are stacked only when there is more than one.
-        let mut per_row = Vec::with_capacity(batch);
-        for (b, (row, layout)) in rows.iter().zip(&padded.layouts).enumerate() {
-            let feat = row_audio_feat(
-                client,
-                row.ref_feat,
-                layout.t_ref,
-                layout.text_length,
-                patch_size,
-                feat_dim,
-                dtype,
-                device,
-            )?;
-            let pad = padded.pad(b);
-            per_row.push(if pad == 0 {
-                feat
-            } else {
-                let front = Var::new(
-                    Tensor::<R>::zeros(&[1, pad, patch_size, feat_dim], dtype, device)?,
-                    false,
-                );
-                var_cat(&[&front, &feat], 1, client)?
-            });
-        }
-        let audio_feat = if batch == 1 {
-            per_row.swap_remove(0)
-        } else {
-            let refs: Vec<&Var<R>> = per_row.iter().collect();
-            var_cat(&refs, 0, client)?
-        };
+        let (audio_feat, context) =
+            batch_audio_feat(client, rows, &padded, patch_size, feat_dim, dtype, device)?;
+        // The reference's `prefix_feat_cond = feat[:, -1]`: position S_max - 1
+        // is every row's last real one under left padding.
+        let prefix_feat_cond = last_patch(&audio_feat, seq_len)?;
 
         // feat_encoder runs over ALL S rows, text rows included — their
         // patches are zeros, not absent.
@@ -266,8 +113,8 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
             client,
         )?;
 
-        // LAST row. In both modes this is a text position, hence un-fsq'd
-        // by the blend above; do NOT fsq it again.
+        // LAST row, already blended above: un-fsq'd at a text position,
+        // fsq'd at a continuation tail's audio position. Do NOT fsq it again.
         let lm_hidden = last_row(&enc_outputs, seq_len)?;
 
         // Argument order is (enc_outputs, masked feat_embed) — and
@@ -303,6 +150,8 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
             lanes,
             batch,
             intermediates,
+            prefix_feat_cond: Some(prefix_feat_cond),
+            context,
         })
     }
 }
@@ -310,7 +159,8 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
 #[cfg(test)]
 mod tests {
     //! The no-reference (zero-shot) path, the one-row/batch equivalence and
-    //! the left-padded batch against its rows' own single-row prefills.
+    //! the left-padded batch, mixed modes included, against its rows' own
+    //! single-row prefills.
     //!
     //! The with-reference path is also exercised end to end by
     //! `examples/voxcpm/eval_common.rs`'s `build_prefill_and_target`.
@@ -320,10 +170,80 @@ mod tests {
     use crate::model::audio::voxcpm::model::config::AUDIO_START_ID;
     use crate::model::audio::voxcpm::model::generate::test_support::{fixture, model};
     use crate::test_utils::cpu_setup;
-    use numr::runtime::cpu::CpuRuntime;
+    use numr::autograd::Var;
+    use numr::runtime::cpu::{CpuClient, CpuRuntime};
 
     fn values(v: &Var<CpuRuntime>) -> Vec<f32> {
         v.tensor().contiguous().expect("contiguous").to_vec::<f32>()
+    }
+
+    fn patch(feat: &Tensor<CpuRuntime>, index: usize) -> Vec<f32> {
+        feat.narrow(0, index, 1)
+            .expect("narrow")
+            .contiguous()
+            .expect("contiguous")
+            .to_vec()
+    }
+
+    fn assert_close(got: &[f32], want: &[f32], what: &str, row: usize) {
+        assert_eq!(got.len(), want.len(), "row {row} {what} width");
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < 1e-5, "row {row} {what}: {g} vs {w}");
+        }
+    }
+
+    /// Row `b` of `batch` carries what its own single-row prefill carries:
+    /// both handoff rows, the first patch's condition and the decode context.
+    fn assert_rows_match_own_prefill(
+        client: &CpuClient,
+        m: &VoxCpm2Model<CpuRuntime>,
+        rows: &[PrefillRow<'_, CpuRuntime>],
+        batch: &PrefillState<CpuRuntime>,
+        max_length: usize,
+    ) {
+        let cond_of = |state: &PrefillState<CpuRuntime>| {
+            values(
+                state
+                    .prefix_feat_cond
+                    .as_ref()
+                    .expect("prefill sets the condition"),
+            )
+        };
+        let (lm, res, cond) = (
+            values(&batch.lm_hidden),
+            values(&batch.residual_hidden),
+            cond_of(batch),
+        );
+        let (width, cond_width) = (lm.len() / rows.len(), cond.len() / rows.len());
+        for (b, row) in rows.iter().enumerate() {
+            let one = m
+                .prefill_batch(client, &[*row], max_length)
+                .expect("prefill");
+            let want_lm = values(&one.lm_hidden);
+            assert!(want_lm.iter().any(|v| v.abs() > 1e-6), "degenerate row {b}");
+            let own = |all: &[f32], w: usize| all[b * w..(b + 1) * w].to_vec();
+            assert_close(&own(&lm, width), &want_lm, "lm", b);
+            assert_close(
+                &own(&res, width),
+                &values(&one.residual_hidden),
+                "residual",
+                b,
+            );
+            assert_close(
+                &own(&cond, cond_width),
+                &cond_of(&one),
+                "prefix_feat_cond",
+                b,
+            );
+            assert_eq!(
+                batch.context[b].len(),
+                one.context[0].len(),
+                "row {b} context"
+            );
+            for (got, want) in batch.context[b].iter().zip(&one.context[0]) {
+                assert_close(&values(got), &values(want), "context", b);
+            }
+        }
     }
 
     const LONG: [u32; 3] = [11, 22, AUDIO_START_ID];
@@ -371,6 +291,7 @@ mod tests {
             let row = PrefillRow {
                 ref_feat,
                 text_token_ids: &LONG,
+                prompt_feat: None,
             };
             let batch = m.prefill_batch(&client, &[row], 12).expect("batch");
             assert_eq!(batch.batch, 1);
@@ -394,10 +315,12 @@ mod tests {
             PrefillRow {
                 ref_feat: Some(&ref_feat),
                 text_token_ids: &LONG,
+                prompt_feat: None,
             },
             PrefillRow {
                 ref_feat: None,
                 text_token_ids: &SHORT,
+                prompt_feat: None,
             },
         ];
         let max_length = 12;
@@ -409,25 +332,9 @@ mod tests {
         let starts: Vec<i32> = batch.lanes.pad().expect("padded").host.clone();
         assert_eq!(starts, [0, (batch.lanes.position(1) - SHORT.len()) as i32]);
 
+        assert_rows_match_own_prefill(&client, &m, &rows, &batch, max_length);
         let lm = values(&batch.lm_hidden);
-        let res = values(&batch.residual_hidden);
         let width = lm.len() / 2;
-        for (b, row) in rows.iter().enumerate() {
-            let one = m
-                .prefill(&client, row.ref_feat, row.text_token_ids, max_length)
-                .expect("prefill");
-            let (want_lm, want_res) = (values(&one.lm_hidden), values(&one.residual_hidden));
-            assert!(want_lm.iter().any(|v| v.abs() > 1e-6), "degenerate row {b}");
-            for (got, want) in lm[b * width..(b + 1) * width].iter().zip(&want_lm) {
-                assert!((got - want).abs() < 1e-5, "row {b} lm: {got} vs {want}");
-            }
-            for (got, want) in res[b * width..(b + 1) * width].iter().zip(&want_res) {
-                assert!(
-                    (got - want).abs() < 1e-5,
-                    "row {b} residual: {got} vs {want}"
-                );
-            }
-        }
 
         // Same padded inputs through base_lm with NO kv_start: the short
         // row's last position now attends its zero pad rows and moves.
@@ -451,5 +358,53 @@ mod tests {
             &lm[..width],
             "the unpadded row must not see any difference"
         );
+    }
+
+    /// A batch mixing all four modes — reference, zero-shot,
+    /// ref+continuation, continuation-only — gives every row its own
+    /// single-row prefill. A tail row conditions its first patch on the
+    /// prompt's last patch, and its decode context counts every audio
+    /// position, reaching into the reference when the tail is short.
+    #[test]
+    fn mixed_mode_batch_matches_each_rows_own_prefill() {
+        let (client, device) = cpu_setup();
+        let m = model(fixture(false, &device), &device);
+        let ref_feat = t(&[3, PATCH_SIZE, FEAT_DIM], 0.7, &device);
+        let prompt_feat = t(&[2, PATCH_SIZE, FEAT_DIM], 1.9, &device);
+        let row = |ref_feat, text_token_ids, prompt_feat| PrefillRow {
+            ref_feat,
+            text_token_ids,
+            prompt_feat,
+        };
+        let rows = [
+            row(Some(&ref_feat), &LONG[..], None),
+            row(None, &SHORT[..], None),
+            row(Some(&ref_feat), &SHORT[..], Some(&prompt_feat)),
+            row(None, &LONG[..], Some(&prompt_feat)),
+        ];
+        let max_length = 12;
+        let batch = m.prefill_batch(&client, &rows, max_length).expect("batch");
+        assert_eq!(batch.lanes.position(0), 3 + 2 + SHORT.len() + 2);
+        assert_rows_match_own_prefill(&client, &m, &rows, &batch, max_length);
+
+        let cond = values(batch.prefix_feat_cond.as_ref().expect("condition"));
+        let width = PATCH_SIZE * FEAT_DIM;
+        let last_prompt = patch(&prompt_feat, 1);
+        assert!(
+            cond[..2 * width].iter().all(|v| *v == 0.0),
+            "no tail: zeros"
+        );
+        assert_eq!(&cond[2 * width..3 * width], last_prompt.as_slice());
+        assert_eq!(&cond[3 * width..], last_prompt.as_slice());
+
+        let lens: Vec<usize> = batch.context.iter().map(Vec::len).collect();
+        assert_eq!(lens, [0, 0, 3, 2]);
+        let want = [patch(&ref_feat, 2), patch(&prompt_feat, 0), last_prompt];
+        for (got, want) in batch.context[2].iter().zip(&want) {
+            assert_eq!(&values(got), want);
+        }
+        for (got, want) in batch.context[3].iter().zip(&want[1..]) {
+            assert_eq!(&values(got), want);
+        }
     }
 }

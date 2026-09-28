@@ -73,10 +73,12 @@ mod tests {
             PrefillRow {
                 ref_feat: Some(ref_feat),
                 text_token_ids: &LONG,
+                prompt_feat: None,
             },
             PrefillRow {
                 ref_feat: None,
                 text_token_ids: &SHORT,
+                prompt_feat: None,
             },
         ]
     }
@@ -89,7 +91,7 @@ mod tests {
         opts: &GenerateOptions,
     ) -> (GenerateOutcome, GenerateState<CpuRuntime>) {
         let prefill = m
-            .prefill(client, row.ref_feat, row.text_token_ids, MAX_LENGTH)
+            .prefill_batch(client, &[*row], MAX_LENGTH)
             .expect("prefill");
         let mut st = GenerateState::start(prefill, m.config).expect("start");
         let outcome = m
@@ -269,5 +271,50 @@ mod tests {
         ];
         assert!(fx.generator().generate(&client, &mut st, &opts).is_err());
         assert_eq!(st.emitted(), 0);
+    }
+
+    /// A reference row and a continuation-only row generated together
+    /// reproduce each row's own run. The continuation row opens on its
+    /// prompt's last patch, carries its prompt as decode context, and counts
+    /// generated patches only.
+    #[test]
+    fn a_continuation_row_generates_as_it_does_alone() {
+        let (client, device) = cpu_setup();
+        let m = model(fixture(false, &device), &device);
+        let ref_feat = t(&[3, PATCH_SIZE, FEAT_DIM], 0.7, &device);
+        let prompt_feat = t(&[2, PATCH_SIZE, FEAT_DIM], 1.9, &device);
+        let mut tail = rows(&ref_feat)[1];
+        tail.prompt_feat = Some(&prompt_feat);
+        let pair = [rows(&ref_feat)[0], tail];
+        let opts = options(1, 3);
+
+        let prefill = m.prefill_batch(&client, &pair, MAX_LENGTH).expect("batch");
+        let mut st = GenerateState::start(prefill, m.config).expect("start");
+        assert!(st.prefill.prefix_feat_cond.is_none(), "start takes it");
+        let width = PATCH_SIZE * FEAT_DIM;
+        let last_prompt: Vec<f32> = prompt_feat
+            .narrow(0, 1, 1)
+            .expect("narrow")
+            .contiguous()
+            .expect("contiguous")
+            .to_vec();
+        let cond = values(&st.prefix_feat_cond);
+        assert!(cond[..width].iter().all(|v| *v == 0.0));
+        assert_eq!(&cond[width..], last_prompt.as_slice());
+        assert_eq!(st.context.iter().map(Vec::len).collect::<Vec<_>>(), [0, 2]);
+
+        m.patch_generator()
+            .generate(&client, &mut st, &opts)
+            .expect("generate");
+        assert_eq!(st.patch_len, [3, 3], "context is never counted");
+        for (b, row) in pair.iter().enumerate() {
+            let (_, one) = single(&client, &m, row, &opts);
+            for (k, want) in one.row_patches(0).expect("row 0").iter().enumerate() {
+                let got = values(&st.patches[b][k]);
+                for (g, w) in got.iter().zip(&values(want)) {
+                    assert!((g - w).abs() < 1e-4, "row {b} patch {k}: {g} vs {w}");
+                }
+            }
+        }
     }
 }

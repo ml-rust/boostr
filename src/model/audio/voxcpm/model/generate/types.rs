@@ -157,7 +157,7 @@ pub enum StepOutcome {
 ///
 /// `batch` is what a slot index and the options' `rows` list are checked
 /// against. It is the length of every HOST per-row vector: `patches`,
-/// `outcomes`, `patch_len` and `slot_options`. They are sized at the ceiling
+/// `context`, `outcomes`, `patch_len` and `slot_options`. They are sized at the ceiling
 /// once, so a slot index always addresses them.
 ///
 /// `alloc_width` is what the DEVICE tensors hold: both KV caches,
@@ -173,9 +173,17 @@ pub struct GenerateState<R: Runtime> {
     /// counter both caches follow.
     pub prefill: PrefillState<R>,
     /// `[batch, patch_size, feat_dim]` — the DiT's prefix condition for the
-    /// NEXT iteration. Zeros on entry to iteration 0 (the text-pad patch);
-    /// the previous `pred_feat` on entry to every later iteration.
+    /// NEXT iteration. On entry to iteration 0 it is the row's last raw
+    /// prefill patch: zeros (the text-pad patch) without a continuation
+    /// tail, the prompt's last patch with one. On entry to every later
+    /// iteration it is the previous `pred_feat`.
     pub prefix_feat_cond: Var<R>,
+    /// Per row, the continuation decode context
+    /// ([`PrefillState::context`]): audio patches the decode prepends to the
+    /// row's own patches and trims back off the waveform. Empty for a row
+    /// without a continuation tail. Never counted in `patch_len`, never
+    /// seen by the stop guard or the noise index.
+    pub context: Vec<Vec<Var<R>>>,
     /// Patches emitted so far, per row: `patches[b]` holds row `b`'s own
     /// patches in order, each `[1, patch_size, feat_dim]`. Every row is
     /// pushed a patch on every iteration, so each inner vector is as long as
@@ -260,12 +268,17 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
 impl<R: Runtime<DType = DType>> GenerateState<R> {
     /// Open the loop over a finished prefill.
     ///
-    /// `prefix_feat_cond` is set to the ZERO text-pad patch — the reference
-    /// conditions patch 0 on zeros, not on the reference audio's tail. Dtype
-    /// and device follow `prefill.lm_hidden`, so the condition matches the
-    /// tensors it will meet. Errors when either handoff row is not
-    /// `[prefill.batch, hidden]`.
-    pub fn start(prefill: PrefillState<R>, config: VoxCpm2Config) -> Result<Self> {
+    /// `prefix_feat_cond` and `context` are TAKEN from the prefill. Its
+    /// condition is each row's last raw prefill patch: zeros without a
+    /// continuation tail (the reference conditions patch 0 on zeros, not on
+    /// the reference audio's tail), the prompt's last patch with one. A
+    /// prefill carrying no condition conditions every row on zeros, with
+    /// dtype and device from `prefill.lm_hidden`.
+    ///
+    /// Errors when either handoff row is not `[prefill.batch, hidden]`, when
+    /// the condition is not `[prefill.batch, patch_size, feat_dim]`, or when
+    /// `context` is neither empty nor one entry per row.
+    pub fn start(mut prefill: PrefillState<R>, config: VoxCpm2Config) -> Result<Self> {
         let batch = prefill.batch;
         if batch == 0 {
             return Err(Error::InvalidArgument {
@@ -275,14 +288,43 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
         }
         check_row("prefill.lm_hidden", &prefill.lm_hidden, batch)?;
         check_row("prefill.residual_hidden", &prefill.residual_hidden, batch)?;
-        let hidden = prefill.lm_hidden.tensor();
-        let zeros = zero_patches(batch, config, hidden.dtype(), hidden.device())?;
+        let prefix_feat_cond = match prefill.prefix_feat_cond.take() {
+            Some(cond) => {
+                check_patch(
+                    "prefill.prefix_feat_cond",
+                    &cond,
+                    &[batch, config.patch_size, config.feat_dim],
+                )?;
+                cond
+            }
+            None => {
+                let hidden = prefill.lm_hidden.tensor();
+                Var::new(
+                    zero_patches(batch, config, hidden.dtype(), hidden.device())?,
+                    false,
+                )
+            }
+        };
+        let mut context = std::mem::take(&mut prefill.context);
+        if context.is_empty() {
+            context = (0..batch).map(|_| Vec::new()).collect();
+        } else if context.len() != batch {
+            return Err(Error::InvalidArgument {
+                arg: "prefill.context",
+                reason: format!(
+                    "expected one entry per prefilled row ({batch}) or none, got {}; \
+                     pass the PrefillState a prefill entry point returned",
+                    context.len()
+                ),
+            });
+        }
         // Every row of a prefilled batch holds a request, so the stepped
         // width IS the allocation and there is nothing to narrow. The slot
         // path recomputes the width on every seat and release.
         Ok(Self {
             prefill,
-            prefix_feat_cond: Var::new(zeros, false),
+            prefix_feat_cond,
+            context,
             patches: (0..batch).map(|_| Vec::new()).collect(),
             batch,
             alloc_width: batch,
@@ -350,8 +392,9 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
     }
 }
 
-/// `[rows, patch_size, feat_dim]` of zeros: the text-pad patch iteration 0
-/// is conditioned on.
+/// `[rows, patch_size, feat_dim]` of zeros: the text-pad patch, the
+/// iteration-0 condition of a row without a continuation tail, and the
+/// fallback when a handoff carries no condition.
 ///
 /// The ONE place that shape is built, so a slot seated by
 /// [`GenerateState::admit`] is conditioned on exactly what a row of

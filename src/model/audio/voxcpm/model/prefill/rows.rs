@@ -22,16 +22,20 @@ pub struct PaddedBatch {
     pub token_ids: Vec<i64>,
     /// `[B * S_max]`, 1.0 at every real text position.
     pub text_mask: Vec<f32>,
-    /// `[B * S_max]`, 1.0 at every real reference-audio position.
+    /// `[B * S_max]`, 1.0 at every real reference-audio and prompt-audio
+    /// position.
     pub audio_mask: Vec<f32>,
     /// `[B]`, `S_max - S_b`: the first real position of each row.
     pub kv_start: Vec<i32>,
 }
 
 impl PaddedBatch {
-    /// Lay out `rows` of `(t_ref, text_token_ids)`; errors on an empty batch
-    /// or on any row [`SequenceLayout::build`] rejects.
-    pub fn build(rows: &[(usize, &[u32])]) -> Result<Self> {
+    /// Lay out `rows` of `(t_ref, text_token_ids, t_prompt)`; errors on an
+    /// empty batch or on any row [`SequenceLayout::build`] rejects.
+    ///
+    /// A row's continuation tail counts toward its own length only, so a
+    /// batch mixing modes pads each row by its own `S_b`.
+    pub fn build(rows: &[(usize, &[u32], usize)]) -> Result<Self> {
         if rows.is_empty() {
             return Err(Error::InvalidArgument {
                 arg: "rows",
@@ -40,7 +44,7 @@ impl PaddedBatch {
         }
         let layouts = rows
             .iter()
-            .map(|&(t_ref, ids)| SequenceLayout::build(t_ref, ids))
+            .map(|&(t_ref, ids, t_prompt)| SequenceLayout::build(t_ref, ids, t_prompt))
             .collect::<Result<Vec<_>>>()?;
         let seq_len = layouts
             .iter()
@@ -103,8 +107,8 @@ mod tests {
     /// One row is the plain layout: no pad, no start, ids and masks verbatim.
     #[test]
     fn single_row_is_the_unpadded_layout() {
-        let batch = PaddedBatch::build(&[(2, &LONG)]).expect("batch");
-        let layout = SequenceLayout::build(2, &LONG).expect("layout");
+        let batch = PaddedBatch::build(&[(2, &LONG, 0)]).expect("batch");
+        let layout = SequenceLayout::build(2, &LONG, 0).expect("layout");
         assert_eq!(batch.batch(), 1);
         assert_eq!(batch.seq_len, layout.seq_len());
         assert_eq!(batch.token_ids, layout.token_ids);
@@ -118,7 +122,7 @@ mod tests {
     /// its pad positions carry the filler id and zero in both masks.
     #[test]
     fn shorter_rows_are_padded_in_front() {
-        let batch = PaddedBatch::build(&[(2, &LONG), (0, &SHORT)]).expect("batch");
+        let batch = PaddedBatch::build(&[(2, &LONG, 0), (0, &SHORT, 0)]).expect("batch");
         let s = batch.seq_len;
         assert_eq!(s, 2 + 2 + LONG.len());
         assert_eq!(batch.kv_start, [0, (s - SHORT.len()) as i32]);
@@ -137,7 +141,7 @@ mod tests {
         assert_eq!(batch.text_mask[2 * s - 1], 1.0);
 
         // Row 0 is unpadded and verbatim.
-        let layout = SequenceLayout::build(2, &LONG).expect("layout");
+        let layout = SequenceLayout::build(2, &LONG, 0).expect("layout");
         assert_eq!(&batch.token_ids[..s], layout.token_ids.as_slice());
         assert_eq!(&batch.audio_mask[..s], layout.audio_mask.as_slice());
     }
@@ -146,7 +150,7 @@ mod tests {
     /// and the caller skips the `kv_start` tensor.
     #[test]
     fn equal_rows_are_not_padded() {
-        let batch = PaddedBatch::build(&[(0, &LONG), (0, &LONG)]).expect("batch");
+        let batch = PaddedBatch::build(&[(0, &LONG, 0), (0, &LONG, 0)]).expect("batch");
         assert!(!batch.is_padded());
         assert_eq!(batch.kv_start, [0, 0]);
     }
@@ -154,6 +158,36 @@ mod tests {
     #[test]
     fn empty_batch_and_bad_rows_are_rejected() {
         assert!(PaddedBatch::build(&[]).is_err());
-        assert!(PaddedBatch::build(&[(0, &LONG), (0, &[11u32])]).is_err());
+        assert!(PaddedBatch::build(&[(0, &LONG, 0), (0, &[11u32], 0)]).is_err());
+    }
+
+    /// A continuation row's tail sits at the END of its row: the pad stays
+    /// in front, the tail's positions are audio, and a shorter row in the
+    /// same batch is padded against the longer row's full `S_b`.
+    #[test]
+    fn prompt_tail_ends_its_row_and_sets_its_length() {
+        let t_prompt = 2usize;
+        let batch = PaddedBatch::build(&[(0, &SHORT, 0), (2, &LONG, t_prompt)]).expect("batch");
+        let s = batch.seq_len;
+        assert_eq!(s, 2 + 2 + LONG.len() + t_prompt);
+        assert_eq!(batch.kv_start, [(s - SHORT.len()) as i32, 0]);
+
+        let layout = SequenceLayout::build(2, &LONG, t_prompt).expect("layout");
+        assert_eq!(&batch.token_ids[s..], layout.token_ids.as_slice());
+        assert_eq!(&batch.audio_mask[s..], layout.audio_mask.as_slice());
+        assert!(
+            batch.audio_mask[2 * s - t_prompt..]
+                .iter()
+                .all(|&m| m == 1.0)
+        );
+        assert!(
+            batch.text_mask[2 * s - t_prompt..]
+                .iter()
+                .all(|&m| m == 0.0)
+        );
+
+        // The zero-shot row is untouched by its neighbour's tail.
+        assert_eq!(batch.token_ids[s - 1], i64::from(AUDIO_START_ID));
+        assert_eq!(batch.text_mask[s - 1], 1.0);
     }
 }

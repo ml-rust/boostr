@@ -158,6 +158,8 @@ pub(crate) fn state(fx: &Fixture, device: &CpuDevice) -> GenerateState<CpuRuntim
         lanes: LanePositions::new(None, 1, 0, None, device).expect("lane table"),
         batch: 1,
         intermediates: None,
+        prefix_feat_cond: None,
+        context: Vec::new(),
     };
     GenerateState::start(
         prefill,
@@ -186,10 +188,12 @@ pub(crate) fn slot_rows(ref_feat: &Tensor<CpuRuntime>) -> [PrefillRow<'_, CpuRun
         PrefillRow {
             ref_feat: Some(ref_feat),
             text_token_ids: &LONG,
+            prompt_feat: None,
         },
         PrefillRow {
             ref_feat: None,
             text_token_ids: &SHORT,
+            prompt_feat: None,
         },
     ]
 }
@@ -201,7 +205,7 @@ pub(crate) fn prefill_one(
     m: &VoxCpm2Model<CpuRuntime>,
     row: &PrefillRow<'_, CpuRuntime>,
 ) -> PrefillState<CpuRuntime> {
-    m.prefill(client, row.ref_feat, row.text_token_ids, SLOT_CAPACITY)
+    m.prefill_batch(client, &[*row], SLOT_CAPACITY)
         .expect("prefill")
 }
 

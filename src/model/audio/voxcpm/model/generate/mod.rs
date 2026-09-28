@@ -20,15 +20,20 @@
 //!
 //! # Traps this module exists to get right
 //!
-//! - **`prefix_feat_cond` starts as the ZERO text-pad patch**, `[1,
-//!   patch_size, feat_dim]` of zeros — NOT the last patch of the reference
-//!   audio. [`GenerateState::start`] builds it; [`PrefillState`] never
-//!   feeds it.
-//! - **The initial `lm_hidden` is UN-fsq'd.** It is the post-blend
-//!   `enc_outputs` row at a TEXT position, which the prefill's blend left
-//!   alone. From step 6 onward every `lm_hidden` IS fsq'd. Do not normalise
-//!   the two. Re-fsq'ing the prefill's row, and dropping the fsq in step 6,
-//!   both stay shape-valid.
+//! - **`prefix_feat_cond` starts as each row's last raw prefill patch.**
+//!   Without a continuation tail that is the ZERO text-pad patch — NOT the
+//!   last patch of the reference audio. With a tail it is the prompt's last
+//!   patch. [`PrefillState::prefix_feat_cond`] carries it and
+//!   [`GenerateState::start`] takes it.
+//! - **A continuation row's decode context is not generated output.**
+//!   [`GenerateState::context`] holds it apart from `patches`, so
+//!   `patch_len`, the stop guard, the noise index and `max_len` all count
+//!   generated patches only. The decode prepends the context and trims it.
+//! - **The initial `lm_hidden` is the prefill's blended last row.** At a
+//!   TEXT position the blend left it UN-fsq'd, at a continuation tail's
+//!   AUDIO position it fsq'd it. From step 6 onward every `lm_hidden` IS
+//!   fsq'd. Do not normalise them. Re-fsq'ing the prefill's row, and
+//!   dropping the fsq in step 6, both stay shape-valid.
 //! - **Step 7 consumes the POST-fsq `lm_hidden`**, and the concat order is
 //!   `(lm_hidden, curr_embed)`. That concat is `2 * lm_hidden` wide, so
 //!   swapping the halves is shape-valid and computes a different model.

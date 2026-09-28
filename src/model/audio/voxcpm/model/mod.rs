@@ -2,8 +2,8 @@
 //! [`loader`] ([`VoxCpm2Model`], every sub-model plus its checkpoint loader), [`gguf_loader`]
 //! (the single-file GGUF entry point), [`tcf_loader`] (the single-file TCF entry point),
 //! [`sequence`] (prefix layout and mask complementarity),
-//! [`patches`] (wav padding and the VAE patch fold), [`prefill`] (reference encode and the
-//! two-LM prefill, one row or a left-padded batch), [`generate`] (the per-patch sampling
+//! [`patches`] (wav padding and the VAE patch fold), [`prefill`] (reference and prompt
+//! encode and the two-LM prefill, one row or a left-padded batch), [`generate`] (the per-patch sampling
 //! loop and its stop logic), [`decode`]
 //! (unfolding patches back to a latent and VAE-decoding to a waveform), `chunked_decode`
 //! (windowed VAE decode so peak memory does not scale with utterance length), [`train`] (the
@@ -25,7 +25,8 @@ pub mod train;
 pub mod widths;
 
 pub use config::{
-    AUDIO_START_ID, REF_AUDIO_END_ID, REF_AUDIO_FILLER_ID, REF_AUDIO_START_ID, VoxCpm2Config,
+    AUDIO_START_ID, REF_AUDIO_END_ID, REF_AUDIO_FILLER_ID, REF_AUDIO_START_ID,
+    STREAMING_PREFIX_LEN, VoxCpm2Config,
 };
 pub use decode::{unfold_patches, unfold_patches_row};
 pub use generate::{
@@ -34,7 +35,7 @@ pub use generate::{
 };
 pub use gguf_loader::GGUF_CONFIG_JSON_KEY;
 pub use loader::{DEFAULT_CONFIG_FILE, DEFAULT_WEIGHTS_FILE, LoraAdapterReport, VoxCpm2Model};
-pub use patches::{fold_patches, pad_to_multiple};
+pub use patches::{PadSide, fold_patches, pad_to_multiple};
 pub use prefill::{PaddedBatch, PrefillIntermediates, PrefillRow, PrefillState};
 pub use sequence::{SequenceLayout, check_mask_complementarity};
 pub use widths::{BATCH_WIDTHS, batch_width, clamp_max_batch};

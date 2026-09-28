@@ -19,8 +19,18 @@ pub struct PrefillRow<'a, R: Runtime> {
     pub ref_feat: Option<&'a Tensor<R>>,
     /// The already tokenized prompt; must end with
     /// [`AUDIO_START_ID`](super::super::config::AUDIO_START_ID). boostr does
-    /// not tokenize here.
+    /// not tokenize here. A continuation row carries `prompt_text ++
+    /// target_text` here.
     pub text_token_ids: &'a [u32],
+    /// [`encode_prompt`](super::super::VoxCpm2Model::encode_prompt)'s
+    /// output, `[T_prompt, patch_size, feat_dim]`: the continuation ("Hi-Fi")
+    /// tail, appended after the text as audio positions. `None` selects no
+    /// tail. With `ref_feat` also `Some` the row is ref+continuation, with
+    /// `ref_feat` `None` it is continuation-only.
+    ///
+    /// No tail is a type-level state, never an empty tensor. A `Some`
+    /// holding `T_prompt == 0` is rejected.
+    pub prompt_feat: Option<&'a Tensor<R>>,
 }
 
 // Manual, not derived: a derive would demand `R: Clone`/`R: Copy`, and the
@@ -37,35 +47,64 @@ impl<R: Runtime> PrefillRow<'_, R> {
     /// Reference patch count, after checking `ref_feat`'s shape against the
     /// model's patch geometry. `0` for no-reference mode.
     pub(super) fn t_ref(&self, patch_size: usize, feat_dim: usize) -> Result<usize> {
-        let Some(ref_feat) = self.ref_feat else {
-            return Ok(0);
-        };
-        let ref_shape = ref_feat.shape().to_vec();
-        if ref_shape.len() != 3 || ref_shape[1] != patch_size || ref_shape[2] != feat_dim {
-            return Err(Error::InvalidArgument {
-                arg: "ref_feat",
-                reason: format!("expected [T_ref, {patch_size}, {feat_dim}], got {ref_shape:?}"),
-            });
-        }
-        // No-reference is `None`, never a zero-length tensor: a `Some` here
-        // must carry at least one patch.
-        if ref_shape[0] == 0 {
-            return Err(Error::InvalidArgument {
-                arg: "ref_feat",
-                reason: "expected at least 1 reference patch, got 0; pass None for \
-                         no-reference (zero-shot) mode"
-                    .to_string(),
-            });
-        }
-        Ok(ref_shape[0])
+        patch_count(self.ref_feat, "ref_feat", "T_ref", patch_size, feat_dim)
     }
+
+    /// Continuation prompt patch count, after checking `prompt_feat`'s shape
+    /// against the model's patch geometry. `0` for no continuation tail.
+    pub(super) fn t_prompt(&self, patch_size: usize, feat_dim: usize) -> Result<usize> {
+        patch_count(
+            self.prompt_feat,
+            "prompt_feat",
+            "T_prompt",
+            patch_size,
+            feat_dim,
+        )
+    }
+}
+
+/// Leading-axis length of an optional `[T, patch_size, feat_dim]` feature
+/// tensor, `0` for `None`. `arg` and `axis` name the tensor and its length in
+/// the error.
+fn patch_count<R: Runtime>(
+    feat: Option<&Tensor<R>>,
+    arg: &'static str,
+    axis: &str,
+    patch_size: usize,
+    feat_dim: usize,
+) -> Result<usize> {
+    let Some(feat) = feat else {
+        return Ok(0);
+    };
+    let shape = feat.shape();
+    if shape.len() != 3 || shape[1] != patch_size || shape[2] != feat_dim {
+        return Err(Error::InvalidArgument {
+            arg,
+            reason: format!(
+                "expected [{axis}, {patch_size}, {feat_dim}], got {shape:?}; \
+                 pass the model's own encode output"
+            ),
+        });
+    }
+    // An absent span is `None`, never a zero-length tensor: a `Some` here
+    // must carry at least one patch.
+    if shape[0] == 0 {
+        return Err(Error::InvalidArgument {
+            arg,
+            reason: format!(
+                "expected at least 1 patch, got {axis} == 0; pass None to omit the span"
+            ),
+        });
+    }
+    Ok(shape[0])
 }
 
 /// Everything the per-patch sampling loop needs from the prefill.
 pub struct PrefillState<R: Runtime> {
-    /// `[B, lm_hidden]` — the LAST row of the post-blend `enc_outputs`,
-    /// un-fsq'd because it is a text position. Under left padding row
-    /// `S_max - 1` is the last real position of every batch row.
+    /// `[B, lm_hidden]` — the LAST row of the post-blend `enc_outputs`.
+    /// Un-fsq'd for a row whose last position is text, fsq'd for a row with
+    /// a continuation tail, whose last position is audio. Under left padding
+    /// row `S_max - 1` is the last real position of every batch row.
     pub lm_hidden: Var<R>,
     /// `[B, lm_hidden]` — the LAST row of `residual_lm`'s output.
     pub residual_hidden: Var<R>,
@@ -88,6 +127,28 @@ pub struct PrefillState<R: Runtime> {
     /// Present only when the prefill ran via a `_capturing` entry point;
     /// always `None` on the plain paths, which allocate nothing extra.
     pub intermediates: Option<PrefillIntermediates<R>>,
+    /// `[B, patch_size, feat_dim]` in the LM dtype: each row's last raw
+    /// `audio_feat` patch, the DiT condition of its first generated patch.
+    /// Zeros for a row without a continuation tail, the prompt's last patch
+    /// for a row with one.
+    ///
+    /// `Some` on every prefill output. [`GenerateState::start`] and
+    /// [`GenerateState::admit`] read it; `start` takes it, leaving `None` in
+    /// the running state. `None` conditions every row on zeros.
+    ///
+    /// [`GenerateState::start`]: crate::model::audio::voxcpm::model::GenerateState::start
+    /// [`GenerateState::admit`]: crate::model::audio::voxcpm::model::GenerateState::admit
+    pub prefix_feat_cond: Option<Var<R>>,
+    /// Per row, the decode context of a continuation row: the last
+    /// `min(STREAMING_PREFIX_LEN - 1, audio positions)` audio patches of its
+    /// sequence, each `[1, patch_size, feat_dim]` in the LM dtype, in
+    /// sequence order. Empty for a row without a continuation tail. The
+    /// decode prepends them to the row's generated patches and trims their
+    /// samples off the front.
+    ///
+    /// One entry per prefilled row. `start` takes the vector, leaving it
+    /// empty in the running state; an empty vector means no row has context.
+    pub context: Vec<Vec<Var<R>>>,
 }
 
 /// Full-sequence intermediates, for the gate example to compare against the

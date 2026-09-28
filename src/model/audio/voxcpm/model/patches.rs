@@ -1,5 +1,5 @@
 //! Waveform padding and the AudioVAE patch fold — the two pure reshaping
-//! steps between raw reference audio and `feat_encoder`'s input.
+//! steps between raw reference or prompt audio and `feat_encoder`'s input.
 
 use crate::error::{Error, Result};
 use numr::dtype::DType;
@@ -7,11 +7,22 @@ use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 use std::borrow::Cow;
 
-/// Right-pad `wav` with zeros to a multiple of `multiple`.
+/// Which end of a waveform [`pad_to_multiple`] writes its zeros to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PadSide {
+    /// Zeros go in front, so the real audio ends at the last sample. A
+    /// continuation prompt pads here: its last patch sits flush against the
+    /// first generated one.
+    Left,
+    /// Zeros go after the audio. A reference wav pads here.
+    Right,
+}
+
+/// Pad `wav` with zeros on `side` to a multiple of `multiple`.
 ///
 /// Borrows when `wav` is already a multiple, so the common path copies
 /// nothing. `multiple` must be non-zero.
-pub fn pad_to_multiple(wav: &[f32], multiple: usize) -> Result<Cow<'_, [f32]>> {
+pub fn pad_to_multiple(wav: &[f32], multiple: usize, side: PadSide) -> Result<Cow<'_, [f32]>> {
     if multiple == 0 {
         return Err(Error::InvalidArgument {
             arg: "multiple",
@@ -22,8 +33,13 @@ pub fn pad_to_multiple(wav: &[f32], multiple: usize) -> Result<Cow<'_, [f32]>> {
     if remainder == 0 {
         return Ok(Cow::Borrowed(wav));
     }
-    let mut padded = vec![0.0f32; wav.len() + (multiple - remainder)];
-    padded[..wav.len()].copy_from_slice(wav);
+    let pad = multiple - remainder;
+    let mut padded = vec![0.0f32; wav.len() + pad];
+    let start = match side {
+        PadSide::Left => pad,
+        PadSide::Right => 0,
+    };
+    padded[start..start + wav.len()].copy_from_slice(wav);
     Ok(Cow::Owned(padded))
 }
 
@@ -75,7 +91,7 @@ mod tests {
     #[test]
     fn padding_leaves_an_exact_multiple_untouched() {
         let wav = vec![0.5f32; 2560 * 3];
-        let padded = pad_to_multiple(&wav, 2560).expect("pad");
+        let padded = pad_to_multiple(&wav, 2560, PadSide::Right).expect("pad");
         assert_eq!(padded.len(), wav.len());
         assert!(
             matches!(padded, Cow::Borrowed(_)),
@@ -86,7 +102,7 @@ mod tests {
     #[test]
     fn padding_extends_to_the_next_multiple_with_zeros() {
         let wav = vec![0.5f32; 2560 + 1];
-        let padded = pad_to_multiple(&wav, 2560).expect("pad");
+        let padded = pad_to_multiple(&wav, 2560, PadSide::Right).expect("pad");
         assert_eq!(padded.len(), 2560 * 2);
         assert_eq!(&padded[..wav.len()], wav.as_slice());
         assert!(
@@ -101,13 +117,42 @@ mod tests {
     #[test]
     fn padding_multiple_is_the_patch_multiple_not_the_vae_hop() {
         let wav = vec![0.5f32; 640 * 5];
-        assert_eq!(pad_to_multiple(&wav, 640).expect("pad").len(), 640 * 5);
-        assert_eq!(pad_to_multiple(&wav, 2560).expect("pad").len(), 2560 * 2);
+        let side = PadSide::Right;
+        assert_eq!(
+            pad_to_multiple(&wav, 640, side).expect("pad").len(),
+            640 * 5
+        );
+        assert_eq!(
+            pad_to_multiple(&wav, 2560, side).expect("pad").len(),
+            2560 * 2
+        );
     }
 
     #[test]
     fn padding_rejects_zero_multiple() {
-        assert!(pad_to_multiple(&[0.0f32], 0).is_err());
+        assert!(pad_to_multiple(&[0.0f32], 0, PadSide::Left).is_err());
+        assert!(pad_to_multiple(&[0.0f32], 0, PadSide::Right).is_err());
+    }
+
+    /// Left padding puts the zeros in front, so the audio ends at the last
+    /// sample, and leaves an exact multiple untouched.
+    #[test]
+    fn left_padding_puts_the_zeros_in_front() {
+        let wav = vec![0.5f32; 2560 + 1];
+        let padded = pad_to_multiple(&wav, 2560, PadSide::Left).expect("pad");
+        assert_eq!(padded.len(), 2560 * 2);
+        let pad = padded.len() - wav.len();
+        assert!(
+            padded[..pad].iter().all(|&v| v == 0.0),
+            "the head must be zeros"
+        );
+        assert_eq!(&padded[pad..], wav.as_slice());
+
+        let exact = vec![0.5f32; 2560];
+        assert!(matches!(
+            pad_to_multiple(&exact, 2560, PadSide::Left).expect("pad"),
+            Cow::Borrowed(_)
+        ));
     }
 
     /// Every value encodes its own `(channel, frame)` index, so a wrong

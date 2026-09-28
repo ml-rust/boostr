@@ -14,7 +14,7 @@
 //! The allocation NEVER shrinks.
 //!
 //! Only DEVICE tensors grow. The HOST per-row vectors — `patches`,
-//! `outcomes`, `patch_len`, `slot_options` — are sized at the CEILING from
+//! `context`, `outcomes`, `patch_len`, `slot_options` — are sized at the CEILING from
 //! `open` and stay there, and their length is what a slot index is checked
 //! against. Read a device tensor's rows off `alloc_width` and a slot index's
 //! bound off `batch`.

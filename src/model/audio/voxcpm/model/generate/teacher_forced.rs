@@ -229,19 +229,25 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
 
         let curr_embed = var_reshape(&var_contiguous(&curr_embed_full)?, &[t, lm_width])?;
 
-        // Step 4, batched, WITH THE SAME SHIFT AS `mu`: cond_i is zeros for
-        // i = 0 (the text-pad patch, never the reference audio's tail — see
-        // `generate.rs`'s module docs) and `target_patches[i - 1]` for
-        // i >= 1.
-        let zeros = Var::new(
-            Tensor::<R>::zeros(&[1, patch_size, feat_dim], dtype, device)?,
-            false,
-        );
+        // Step 4, batched, WITH THE SAME SHIFT AS `mu`: cond_0 is the
+        // prefill's last raw patch (zeros without a continuation tail, never
+        // the reference audio's tail — see `generate`'s module docs) and
+        // cond_i is `target_patches[i - 1]` for i >= 1.
+        let first = match &prefill.prefix_feat_cond {
+            Some(cond) => {
+                check_patch("prefill.prefix_feat_cond", cond, &[1, patch_size, feat_dim])?;
+                cond.clone()
+            }
+            None => Var::new(
+                Tensor::<R>::zeros(&[1, patch_size, feat_dim], dtype, device)?,
+                false,
+            ),
+        };
         let cond = if t > 1 {
             let head = var_contiguous(&var_narrow(&patches, 0, 0, t - 1)?)?;
-            var_cat(&[&zeros, &head], 0, client)?
+            var_cat(&[&first, &head], 0, client)?
         } else {
-            zeros
+            first
         };
 
         Ok(TeacherForcedConditioning {

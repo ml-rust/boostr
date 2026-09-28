@@ -1,6 +1,6 @@
 //! Config constants for the VoxCPM2 end-to-end orchestrator: the patch
-//! geometry the reference-audio prefix is built from, and the three special
-//! token ids that delimit it.
+//! geometry the reference-audio prefix is built from, the special token ids
+//! that delimit it, and the continuation decode context length.
 //!
 //! Everything here is read from the checkpoint's TOP-level `config.json`
 //! (`patch_size`, `feat_dim`), never hardcoded — see
@@ -31,6 +31,13 @@ pub const AUDIO_START_ID: u32 = 101;
 /// embedding is multiplied out before it reaches `base_lm`.
 pub const REF_AUDIO_FILLER_ID: u32 = 0;
 
+/// The reference's `streaming_prefix_len` default (`_generate`, `_inference`).
+///
+/// A continuation row decodes its generated patches behind the last
+/// `STREAMING_PREFIX_LEN - 1` audio patches of its prefill, then trims those
+/// context patches' samples off the front. `config.json` has no key for it.
+pub const STREAMING_PREFIX_LEN: usize = 4;
+
 /// Patch geometry for the VoxCPM2 orchestrator.
 #[derive(Debug, Clone, Copy)]
 pub struct VoxCpm2Config {
@@ -56,8 +63,9 @@ impl Default for VoxCpm2Config {
 }
 
 impl VoxCpm2Config {
-    /// Samples of 16 kHz reference audio the wav must be right-padded to a
-    /// multiple of BEFORE the VAE encode: `patch_size * 640` (2560).
+    /// Samples of 16 kHz audio a wav is padded to a multiple of BEFORE the
+    /// VAE encode: `patch_size * 640` (2560). A reference wav pads on the
+    /// right, a continuation prompt wav on the left.
     ///
     /// This is NOT the AudioVAE's own modulus. `AudioVaeEncoder::forward`
     /// already right-pads to a multiple of [`HOP_LENGTH`] (640) on its own,

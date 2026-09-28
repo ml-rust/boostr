@@ -54,6 +54,8 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
             lanes: LanePositions::empty(alloc, model.lane_rope_positions()?, device)?,
             batch: alloc,
             intermediates: None,
+            prefix_feat_cond: None,
+            context: Vec::new(),
         };
         let mut state = Self {
             prefill,
@@ -61,6 +63,7 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
                 super::super::types::zero_patches(alloc, model.config, dtype, device)?,
                 false,
             ),
+            context: (0..width).map(|_| Vec::new()).collect(),
             patches: (0..width).map(|_| Vec::new()).collect(),
             batch: width,
             alloc_width: alloc,

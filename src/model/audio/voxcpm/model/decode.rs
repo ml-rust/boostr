@@ -13,14 +13,21 @@
 //! time, so this file mirrors `fold_patches`'s reshape/permute rather than
 //! reinventing the unfold.
 //!
-//! # Reference mode only
+//! # Continuation context trim
 //!
-//! In REFERENCE (voice-clone) mode `context_len == 0`, so the reference does
-//! NOT trim the decoded waveform. A trim applies only in continuation mode,
-//! which this orchestrator does not implement, so [`VoxCpm2Model::decode_patches`]
-//! never trims for that reason. (`chunked_decode` does trim internally, per
-//! window, to remove the overlap context added for chunking — an unrelated,
-//! purely-internal trim that leaves the total sample count unchanged.)
+//! Without a continuation tail the reference's `context_len` is 0 and it
+//! does NOT trim the decoded waveform. A continuation row decodes its
+//! generated patches behind its [`GenerateState::context`] patches (the last
+//! `min(STREAMING_PREFIX_LEN - 1, audio positions)` prefill audio patches)
+//! and drops `context_len * samples_per_patch` samples off the front.
+//! [`VoxCpm2Model::decode_row`] and [`VoxCpm2Model::decode_row_from`] apply
+//! it through the same suffix decode as [`VoxCpm2Model::decode_patches_from`],
+//! so a row's waveform never contains its context. The slice entry points
+//! ([`VoxCpm2Model::decode_patches`], [`VoxCpm2Model::decode_patches_from`])
+//! take the patches they are given and trim nothing. (`chunked_decode` also
+//! trims internally, per window, to remove the overlap context added for
+//! chunking — an unrelated, purely-internal trim that leaves the total
+//! sample count unchanged.)
 //!
 //! # The one device read
 //!
@@ -145,7 +152,8 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
     /// decoder activation memory is bounded by a fixed number of latent
     /// frames rather than growing linearly with the utterance length.
     /// Returns `[1, 1, samples]` at [`crate::model::audio::voxcpm::vae::decoder::SAMPLE_RATE`]
-    /// Hz, un-trimmed (reference/voice-clone mode has no context to trim).
+    /// Hz, un-trimmed. For a continuation row decode through
+    /// [`decode_row`](Self::decode_row), which applies the context trim.
     pub fn decode_patches<C>(&self, client: &C, patches: &[Var<R>]) -> Result<Tensor<R>>
     where
         C: VoxCpmClient<R>,
@@ -159,6 +167,10 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
     /// [`GenerateState`]: decodes that row's own patches
     /// ([`GenerateState::row_patches`]), which the loop already stored as
     /// `[1, patch_size, feat_dim]` slices of that row alone.
+    ///
+    /// A continuation row decodes behind its [`GenerateState::context`] and
+    /// returns only its own patches' samples: `[1, 1, row_patches.len() *
+    /// samples_per_patch]`. Errors when the row has no patches.
     pub fn decode_row<C>(
         &self,
         client: &C,
@@ -170,8 +182,16 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         R::Client: ShapeOps<R> + TypeConversionOps<R>,
     {
         let patches = state.row_patches(row)?;
-        let latent = unfold_patches(patches, self.config.patch_size, self.config.feat_dim)?;
-        self.decode_latent(client, &latent)
+        match row_context(state, row)? {
+            [] => {
+                let latent = unfold_patches(patches, self.config.patch_size, self.config.feat_dim)?;
+                self.decode_latent(client, &latent)
+            }
+            context => {
+                let joined = with_context(context, patches);
+                self.decode_row_patches_from(client, &joined, context.len())
+            }
+        }
     }
 
     /// Decode an unfolded latent `[1, feat_dim, frames]` to `[1, 1, samples]`
@@ -239,7 +259,10 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
 
     /// [`decode_patches_from`](Self::decode_patches_from) for row `row` of
     /// a [`GenerateState`]: the waveform for that row's patches `from..`.
-    /// Errors when `from` is not below the row's own patch count.
+    /// `from` counts the row's own patches, never its
+    /// [`GenerateState::context`]; a continuation row decodes behind its
+    /// context and never returns the context's samples. Errors when `from`
+    /// is not below the row's own patch count.
     pub fn decode_row_from<C>(
         &self,
         client: &C,
@@ -251,7 +274,24 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         C: VoxCpmClient<R>,
         R::Client: ShapeOps<R> + TypeConversionOps<R>,
     {
-        self.decode_row_patches_from(client, state.row_patches(row)?, from)
+        let patches = state.row_patches(row)?;
+        match row_context(state, row)? {
+            [] => self.decode_row_patches_from(client, patches, from),
+            context => {
+                if from >= patches.len() {
+                    return Err(Error::InvalidArgument {
+                        arg: "from",
+                        reason: format!(
+                            "expected a patch index below row {row}'s {} patches, got {from}; \
+                             step the row before decoding it",
+                            patches.len()
+                        ),
+                    });
+                }
+                let joined = with_context(context, patches);
+                self.decode_row_patches_from(client, &joined, context.len() + from)
+            }
+        }
     }
 
     /// Shared body of [`decode_patches_from`](Self::decode_patches_from) and
@@ -293,6 +333,28 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
     pub const fn samples_per_patch(&self) -> usize {
         self.config.patch_size * HOP_LENGTH
     }
+}
+
+/// Row `row`'s continuation decode context, empty for a row without one.
+/// Errors on a row outside the state's ceiling.
+fn row_context<R: Runtime>(state: &GenerateState<R>, row: usize) -> Result<&[Var<R>]> {
+    state
+        .context
+        .get(row)
+        .map(Vec::as_slice)
+        .ok_or_else(|| Error::InvalidArgument {
+            arg: "row",
+            reason: format!(
+                "expected a row below {} (the state's context rows), got {row}",
+                state.context.len()
+            ),
+        })
+}
+
+/// `context ++ patches`, the sequence a continuation row decodes. `Var`
+/// clones share their device storage, so nothing is copied.
+fn with_context<R: Runtime>(context: &[Var<R>], patches: &[Var<R>]) -> Vec<Var<R>> {
+    context.iter().chain(patches).cloned().collect()
 }
 
 /// The first patch a suffix decode from latent frame `from_frame` must

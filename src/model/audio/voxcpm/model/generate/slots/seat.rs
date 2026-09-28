@@ -23,13 +23,18 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
     /// with an empty key range. A widened allocation adds free rows and
     /// nothing else, so a refusal after it leaves the state usable.
     ///
+    /// The slot's first patch is conditioned on `prefilled`'s own
+    /// `prefix_feat_cond` (zeros when it carries none), and its continuation
+    /// decode context is `prefilled`'s.
+    ///
     /// # Errors
     ///
     /// [`Error::InvalidArgument`] when `slot` is outside the ceiling, when
     /// it already holds a request, when `prefilled` carries more than one
     /// row or carries left padding, when its two caches disagree on length,
-    /// or when its handoff rows are not `[1, hidden]`. A cache, copy or
-    /// allocation error propagates.
+    /// when its handoff rows are not `[1, hidden]`, or when its condition is
+    /// not `[1, patch_size, feat_dim]`. A cache, copy or allocation error
+    /// propagates.
     pub fn admit<C>(
         &mut self,
         client: &C,
@@ -68,6 +73,14 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
             self.alloc_width,
         )?;
         let len = check_prefilled(prefilled, hidden)?;
+        let config = self.config_of();
+        if let Some(cond) = &prefilled.prefix_feat_cond {
+            check_patch(
+                "prefilled.prefix_feat_cond",
+                cond,
+                &[1, config.patch_size, config.feat_dim],
+            )?;
+        }
         // Every check is done, so widening here leaves no grown allocation
         // behind a refusal. The writes below need this slot's own row.
         self.ensure_alloc(client, slot + 1)?;
@@ -92,16 +105,21 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
             slot,
         )?;
 
-        // The reference conditions a row's FIRST patch on zeros, never on
-        // whatever the previous occupant left here.
-        let zeros = super::super::types::zero_patches::<R>(1, self.config_of(), dtype, &device)?;
+        // A row's FIRST patch is conditioned on its own last prefill patch
+        // (zeros without a continuation tail), never on whatever the
+        // previous occupant left here.
+        let own = match &prefilled.prefix_feat_cond {
+            Some(cond) => cond.tensor().clone(),
+            None => super::super::types::zero_patches::<R>(1, config, dtype, &device)?,
+        };
         self.prefix_feat_cond = Var::new(
             client
-                .slice_assign(self.prefix_feat_cond.tensor(), &zeros, 0, slot)
+                .slice_assign(self.prefix_feat_cond.tensor(), &own, 0, slot)
                 .map_err(Error::Numr)?,
             false,
         );
 
+        self.context[slot] = prefilled.context.first().cloned().unwrap_or_default();
         self.patches[slot] = Vec::new();
         self.patch_len[slot] = 0;
         self.outcomes[slot] = None;
@@ -143,6 +161,7 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
         // Dropped here, not at the end of the batch. A finished request's
         // patches are the largest thing a slot holds.
         self.patches[slot] = Vec::new();
+        self.context[slot] = Vec::new();
         self.patch_len[slot] = 0;
         self.outcomes[slot] = None;
         self.slot_options[slot] = None;
@@ -318,6 +337,40 @@ mod tests {
             &before[..width],
             "the other slot must not move"
         );
+    }
+
+    /// A continuation request seats with its own prompt-tail condition and
+    /// decode context, exactly as `start` builds them, and a release drops
+    /// the context.
+    #[test]
+    fn admit_carries_a_continuation_rows_condition_and_context() {
+        let (client, device) = cpu_setup();
+        let m = model(fixture(false, &device), &device);
+        let ref_feat = t(&[3, PATCH_SIZE, FEAT_DIM], 0.7, &device);
+        let prompt_feat = t(&[2, PATCH_SIZE, FEAT_DIM], 1.9, &device);
+        let mut row = slot_rows(&ref_feat)[0];
+        row.prompt_feat = Some(&prompt_feat);
+        let width = PATCH_SIZE * FEAT_DIM;
+
+        let mut state = GenerateState::open(&m, 2, SLOT_CAPACITY).expect("open");
+        state
+            .admit(&client, 1, &prefill_one(&client, &m, &row), row_opts(2, 7))
+            .expect("admit");
+        let started =
+            GenerateState::start(prefill_one(&client, &m, &row), m.config).expect("start");
+
+        let want = values(&started.prefix_feat_cond);
+        assert!(want.iter().any(|v| v.abs() > 1e-6), "the tail's last patch");
+        assert_eq!(&values(&state.prefix_feat_cond)[width..], want.as_slice());
+        assert_eq!(state.context[1].len(), started.context[0].len());
+        assert_eq!(state.context[1].len(), 3);
+        for (got, want) in state.context[1].iter().zip(&started.context[0]) {
+            assert_eq!(values(got), values(want));
+        }
+        assert!(state.context[0].is_empty(), "the free slot has no context");
+
+        state.release(&client, 1).expect("release");
+        assert!(state.context[1].is_empty(), "a release drops the context");
     }
 
     /// An occupied slot, a slot outside the width, and a padded handoff are

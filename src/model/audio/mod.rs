@@ -2,7 +2,7 @@
 //! per-architecture model trees behind their feature gates.
 //!
 //! Sample-level DSP, file codecs, voices and product pipelines live in the
-//! `boostr-audio` crate, which depends on this module and never the reverse.
+//! `voxr` crate, which depends on this module and never the reverse.
 
 #[cfg(feature = "kokoro")]
 pub mod kokoro;

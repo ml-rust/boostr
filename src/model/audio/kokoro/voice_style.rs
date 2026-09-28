@@ -1,7 +1,7 @@
 //! Voice-pack tensor helpers: pick the style row for an utterance and split
 //! it into the decoder and predictor halves the model consumes.
 //!
-//! Finding and reading the pack file is `boostr-audio`'s `VoiceResolver`;
+//! Finding and reading the pack file is `voxr`'s `VoiceResolver`;
 //! these two functions only slice the loaded tensor.
 
 use crate::error::{Error, Result};

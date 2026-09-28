@@ -1,3 +1,0 @@
-1
-not a timestamp line
-Some text.

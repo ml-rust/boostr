@@ -1,6 +1,3 @@
-[workspace]
-members = ["crates/boostr-audio"]
-
 [package]
 name = "boostr"
 version = "0.3.0"
@@ -57,7 +54,7 @@ memmap2 = "0.9"
 # BLAKE3: the digests the TCF container (`boostr::tcf`) stores.
 blake3 = "1.8"
 # Whisper variant detection and the GGUF/encoder tokenizer plumbing. No
-# vocabulary data: the bundled Whisper vocabulary is loaded by boostr-audio.
+# vocabulary data: the bundled Whisper vocabulary is loaded by voxr.
 splintr = "0.20"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
@@ -77,7 +74,7 @@ default = ["cpu"]
 # Speech and audio: `model::audio`, the tensor-level signal ops (`stft`/`istft`,
 # `mel`, `reflection_pad`). Off by default; a text-only training or serving
 # build pays nothing for it. Sample-level DSP, codecs, voices, the VAD
-# segmenter and the Whisper bundle live in the `boostr-audio` crate on top of
+# segmenter and the Whisper bundle live in the `voxr` crate on top of
 # this.
 #
 # `model::speech_lm` is NOT gated. It is token packing and layout — no audio
@@ -101,7 +98,7 @@ vits = ["audio"]
 # spaCy's CNN part-of-speech tagger (`model::text::spacy_tagger`): the
 # `tok2vec` + `tagger` network of `en_core_web_sm`. Text only; implies no
 # other gate. The tokenizer and attribute IDs that feed it live in
-# boostr-audio.
+# voxr.
 spacy-tagger = []
 
 # Backend features (passed through to numr)
@@ -129,8 +126,8 @@ fp8 = ["numr/fp8"]
 # family costs 2.6-6.4 MB (all of them, ~42 MB). A consumer loading a
 # checkpoint's own `tokenizer.json` should pay for none of it.
 #
-# `vocab-whisper` is NOT here — `boostr_audio::WhisperBundle::from_dir` loads
-# the bundled multilingual Whisper vocabulary, so boostr-audio's own splintr
+# `vocab-whisper` is NOT here — `voxr::WhisperBundle::from_dir` loads
+# the bundled multilingual Whisper vocabulary, so voxr's own splintr
 # dependency enables it unconditionally.
 vocab-cl100k = ["splintr/vocab-cl100k"]
 vocab-o200k = ["splintr/vocab-o200k"]

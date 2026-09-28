@@ -10,7 +10,7 @@
 //! ```
 //!
 //! The tokenizer, `generation_config.json` and the transcription front end are
-//! not read here. They belong to `boostr_audio::whisper::WhisperBundle`, which
+//! not read here. They belong to `voxr::whisper::WhisperBundle`, which
 //! wraps the [`WhisperCheckpoint`] this module produces.
 //!
 //! Auto-detects the [`WhisperVariant`] from config.json:

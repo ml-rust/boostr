@@ -4,7 +4,7 @@
 //!
 //! The input is one row of `u64` attribute IDs per token, as spaCy's
 //! `FeatureExtractor` builds them. Turning token text into those IDs is the
-//! text pipeline's job (`boostr_audio::g2p::spacy_tagger`).
+//! text pipeline's job (`voxr::g2p::spacy_tagger`).
 
 pub mod config;
 mod embed;

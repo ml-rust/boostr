@@ -1,4 +1,0 @@
-Line one with CRLF.
-Line two.
-
-New beat after CRLF.

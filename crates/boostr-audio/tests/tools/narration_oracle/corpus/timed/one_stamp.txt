@@ -1,2 +1,0 @@
-0:00 Only one line carries a time.
-The rest is plain script.

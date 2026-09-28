@@ -1,7 +1,7 @@
 //! Phoneme-string to token-id lookup, the contract a G2P front end and a
 //! phoneme-driven model agree on.
 //!
-//! Lives with the models rather than the G2P pipeline: `boostr-audio`'s
+//! Lives with the models rather than the G2P pipeline: `voxr`'s
 //! phonemizer produces the strings, a model's vocabulary (see
 //! `KokoroPhonemeVocab`) owns the ids.
 

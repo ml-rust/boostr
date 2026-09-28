@@ -105,7 +105,7 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
     /// wastes a reshape + contiguous. This is the entry point that lets a
     /// multi-step caller tokenize once and pass the same `mu_tok` to every
     /// step; [`forward`] itself does the one-shot tokenization and delegates
-    /// here so single-call sites (training, tests, `boostr-audio`) keep the
+    /// here so single-call sites (training, tests, `voxr`) keep the
     /// original signature.
     ///
     /// `mu_tok`'s middle dimension IS `mu_tokens` — read from its shape, never

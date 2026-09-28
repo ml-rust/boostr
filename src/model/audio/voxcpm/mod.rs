@@ -7,7 +7,7 @@
 //! per-patch generation loop), [`weights`] (which files the stack loads from),
 //! [`gguf_keys`] (the metadata keys a single-file GGUF carries).
 //! Both transformers get LongRoPE via `crate::nn::RoPE::precompute_freqs`.
-//! The clone engine, voice directory and tokenizer live in `boostr-audio`.
+//! The clone engine, voice directory and tokenizer live in `voxr`.
 
 pub mod bidirectional;
 pub mod client;

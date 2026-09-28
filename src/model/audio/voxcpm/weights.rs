@@ -3,7 +3,7 @@
 //! A pure source selector: it names files and finds the tokenizer inside or
 //! beside them, and every loader entry point on `VoxCpm2Model` takes one.
 //! The engine that turns it into a running clone pipeline lives in
-//! `boostr-audio`.
+//! `voxr`.
 
 use std::path::{Path, PathBuf};
 

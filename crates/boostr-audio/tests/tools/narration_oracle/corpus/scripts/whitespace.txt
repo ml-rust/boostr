@@ -1,2 +1,0 @@
-Tabs	and no-break　spaces.   Second sentence! Line separator here.
-﻿A BOM mid text.

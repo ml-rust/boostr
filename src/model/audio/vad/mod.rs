@@ -5,7 +5,7 @@
 //! [`config`] for the 8 kHz / 16 kHz geometry, and [`loader`] for checkpoint
 //! loading. The layer above the model — thresholding and duration rules that
 //! turn per-chunk probabilities into utterance boundaries — is
-//! `boostr_audio::vad`, which operates on sample buffers rather than tensors.
+//! `voxr::vad`, which operates on sample buffers rather than tensors.
 
 pub mod config;
 mod forward;

@@ -168,7 +168,8 @@ mod tests {
     }
 
     /// THE equivalence gate: reading the published `audiovae.pth` must give
-    /// the same tensors the reference `convert_audiovae.py` wrote, for EVERY
+    /// the same tensors voxr's
+    /// `crates/voxr/tests/tools/voxcpm/convert_audiovae.py` writes, for EVERY
     /// key that script emitted — folded pairs included.
     ///
     /// Both paths are supplied by the environment because neither file is in

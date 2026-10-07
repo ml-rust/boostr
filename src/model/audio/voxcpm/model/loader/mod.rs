@@ -10,8 +10,8 @@
 //! a second argument. That `.pth` is read as published, `weight_norm` folded
 //! at load time
 //! ([`VaeCheckpoint`](crate::model::audio::voxcpm::vae::VaeCheckpoint)); an
-//! `audiovae.safetensors` converted by the reference repo's
-//! `convert_audiovae.py` is still accepted, so a tree that already holds one
+//! `audiovae.safetensors` converted by voxr's
+//! `crates/voxr/tests/tools/voxcpm/convert_audiovae.py` is still accepted, so a tree that already holds one
 //! keeps loading.
 //!
 //! A GGUF or TCF written by `compressr convert` from a directory that holds

@@ -20,7 +20,7 @@
 //! (dec_s, pred_s) = split_voice_style(ref_s, 128)
 //! d          = predictor.text_encoder(d_en, pred_s)      [B, T_phon, 512+128]
 //! dur_logits = predictor.duration_proj(predictor.lstm(d))[B, T_phon, 50]
-//! durations  = decode_prosody_durations(...)             Vec<u32>
+//! durations  = decode_prosody_durations(..., speed)      Vec<u32>
 //! en         = length_regulator(d, durations)            [B, T_frames, d_model]
 //! (f0, n)    = predictor.predict_f0_n(en, pred_s)        [B, T_frames] × 2
 //! t_en       = text_encoder(ids)                         [B, T_phon, 512]
@@ -63,13 +63,17 @@ impl<R: Runtime> KokoroModelV2<R> {
     /// (which is CPU-only for now because overlap-add needs `scatter_add`).
     /// Use [`KokoroModelV2::synthesize_cpu`] for end-to-end synthesis on
     /// `CpuRuntime`.
+    ///
+    /// `speed` divides every phoneme's duration before rounding: `1.0` is
+    /// the voice's natural pace, `2.0` twice as fast. Returns the durations
+    /// in frames with the spectrogram.
     #[allow(clippy::type_complexity)]
     pub fn forward_to_spectrogram<C>(
         &self,
         client: &C,
         token_ids: &Tensor<R>,
         voice_row: &Tensor<R>,
-        min_frames_per_phoneme: u32,
+        speed: f32,
     ) -> Result<(Tensor<R>, Tensor<R>, Vec<u32>)>
     where
         R: Runtime<DType = DType>,
@@ -97,9 +101,9 @@ impl<R: Runtime> KokoroModelV2<R> {
         let d_en = self.bert.forward(client, token_ids)?; // [B, T_phon, 512]
 
         // 3. Duration prediction.
-        let dur_logits = self
-            .predictor
-            .predict_duration(client, &d_en, &predictor_style)?;
+        let (dur_logits, d) =
+            self.predictor
+                .predict_duration_features(client, &d_en, &predictor_style)?;
         let logits_shape = dur_logits.shape();
         let (b, t_phon) = (logits_shape[0], logits_shape[1]);
         if b != 1 {
@@ -109,15 +113,11 @@ impl<R: Runtime> KokoroModelV2<R> {
             });
         }
         let logits_flat: Vec<f32> = dur_logits.contiguous()?.to_vec();
-        let durations = decode_prosody_durations(
-            &logits_flat,
-            t_phon,
-            self.config.max_dur,
-            min_frames_per_phoneme,
-        );
+        let durations = decode_prosody_durations(&logits_flat, t_phon, self.config.max_dur, speed)?;
 
-        // 4. Length regulator on BERT features (d_en) → frame-rate hidden.
-        let frames = length_regulator(client, &d_en, &durations)?;
+        // 4. Length regulator on the duration encoder's features (`d`) →
+        // frame-rate hidden, as reference Kokoro expands `d` into `en`.
+        let frames = length_regulator(client, &d, &durations)?;
 
         // 5. F0 + N branches.
         let (f0, n_energy) = self
@@ -146,20 +146,21 @@ impl<R: Runtime> KokoroModelV2<R> {
 impl KokoroModelV2<CpuRuntime> {
     /// CPU-specialized spectrogram forward — runs the decoder through its
     /// `forward_cpu_full` path so the generator's noise conditioning is
-    /// applied when the checkpoint provided it.
+    /// applied when the checkpoint provided it. `speed` reads as
+    /// [`forward_to_spectrogram`](Self::forward_to_spectrogram) reads it.
     #[allow(clippy::type_complexity)]
     pub fn forward_to_spectrogram_cpu(
         &self,
         client: &CpuClient,
         token_ids: &Tensor<CpuRuntime>,
         voice_row: &Tensor<CpuRuntime>,
-        min_frames_per_phoneme: u32,
+        speed: f32,
     ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>, Vec<u32>)> {
         let (decoder_style, predictor_style) = split_voice_style(voice_row, self.config.style_dim)?;
         let d_en = self.bert.forward(client, token_ids)?;
-        let dur_logits = self
-            .predictor
-            .predict_duration(client, &d_en, &predictor_style)?;
+        let (dur_logits, d) =
+            self.predictor
+                .predict_duration_features(client, &d_en, &predictor_style)?;
         let logits_shape = dur_logits.shape();
         let (b, t_phon) = (logits_shape[0], logits_shape[1]);
         if b != 1 {
@@ -169,13 +170,8 @@ impl KokoroModelV2<CpuRuntime> {
             });
         }
         let logits_flat: Vec<f32> = dur_logits.contiguous()?.to_vec();
-        let durations = decode_prosody_durations(
-            &logits_flat,
-            t_phon,
-            self.config.max_dur,
-            min_frames_per_phoneme,
-        );
-        let frames = length_regulator(client, &d_en, &durations)?;
+        let durations = decode_prosody_durations(&logits_flat, t_phon, self.config.max_dur, speed)?;
+        let frames = length_regulator(client, &d, &durations)?;
         let (f0, n_energy) = self
             .predictor
             .predict_f0_n(client, &frames, &predictor_style)?;
@@ -194,16 +190,17 @@ impl KokoroModelV2<CpuRuntime> {
     /// CPU end-to-end synthesis.
     ///
     /// `token_ids [1, T_phon]` i64 + `voice_row [1, 256]` f32 → waveform
-    /// `[1, N_samples]` f32.
+    /// `[1, N_samples]` f32, at `speed` (`1.0` is the voice's natural
+    /// pace).
     pub fn synthesize_cpu(
         &self,
         client: &CpuClient,
         token_ids: &Tensor<CpuRuntime>,
         voice_row: &Tensor<CpuRuntime>,
-        min_frames_per_phoneme: u32,
+        speed: f32,
     ) -> Result<Tensor<CpuRuntime>> {
         let (mag, phase, _durations) =
-            self.forward_to_spectrogram_cpu(client, token_ids, voice_row, min_frames_per_phoneme)?;
+            self.forward_to_spectrogram_cpu(client, token_ids, voice_row, speed)?;
         let window = hann_window(self.config.n_fft, voice_row.device())?;
         let opts = IStftOptions {
             hop_length: self.config.hop_length,

@@ -35,16 +35,19 @@ pub struct IStftNetGenerator<R: Runtime> {
     pub leaky_slope: f64,
     /// STFT parameters used by the CPU-specialized noise-path forward.
     pub stft: GeneratorStftParams,
-    /// Reflection-pad size applied to `x` on the last upsample stage, just
-    /// before `+ x_source`. Matches the reference Kokoro implementation's
-    /// `ReflectionPad1d(p)` where
-    /// `p = (conv_post_kernel - 1) / 2`. Set to 0 to skip (legacy callers).
+    /// Frames of reflection padding added on the LEFT of `x` on the last
+    /// upsample stage, just before `+ x_source`: reference Kokoro's
+    /// `ReflectionPad1d((p, 0))`, `p = 1`. Set to 0 to skip.
     pub last_stage_reflect_pad: usize,
     /// Total audio-rate upsample factor applied to f0 before the noise-path
     /// STFT. Equals `prod(upsample_rates)` — for Kokoro-82M that's
     /// `10 * 6 = 60`. Only used when the noise path is active.
     pub f0_upsample_factor: usize,
 }
+
+/// The slope of the leaky ReLU before `conv_post`: `F.leaky_relu`'s
+/// default, which upstream's generator calls without one.
+pub(super) const POST_LEAKY_SLOPE: f64 = 0.01;
 
 /// Options controlling how an `IStftNetGenerator` is constructed — gathers
 /// all the scalar knobs (kernel count, activation slope, STFT geometry,
@@ -54,8 +57,8 @@ pub struct IStftNetGeneratorOpts {
     pub num_kernels: usize,
     pub leaky_slope: f64,
     pub stft: GeneratorStftParams,
-    /// Reflection-pad size for the last upsample stage. The reference Kokoro
-    /// implementation uses `(conv_post_kernel - 1) / 2 = 3` (kernel 7). Set to 0 to skip.
+    /// Left reflection-pad size for the last upsample stage. Reference
+    /// Kokoro uses `ReflectionPad1d((1, 0))`. Set to 0 to skip.
     pub last_stage_reflect_pad: usize,
     /// Audio-rate upsample factor for the noise path (see struct field).
     pub f0_upsample_factor: usize,
@@ -70,7 +73,7 @@ impl Default for IStftNetGeneratorOpts {
                 n_fft: 20,
                 hop_length: 5,
             },
-            last_stage_reflect_pad: 3,
+            last_stage_reflect_pad: 1,
             f0_upsample_factor: 60,
         }
     }
@@ -203,14 +206,19 @@ impl<R: Runtime> IStftNetGenerator<R> {
                     Some(prev) => client.add(&prev, &out).map_err(Error::Numr)?,
                 });
             }
-            let summed = xs.expect("at least one resblock per stage — validated in new()");
+            let summed = xs.ok_or_else(|| Error::InvalidArgument {
+                arg: "num_kernels",
+                reason: "each upsample stage needs at least one resblock".into(),
+            })?;
             x = client
                 .mul_scalar(&summed, 1.0 / self.num_kernels as f64)
                 .map_err(Error::Numr)?;
         }
 
+        // Upstream's last `F.leaky_relu(x)` takes torch's default slope,
+        // not the per-stage one.
         let x = client
-            .leaky_relu(&x, self.leaky_slope)
+            .leaky_relu(&x, POST_LEAKY_SLOPE)
             .map_err(Error::Numr)?;
         self.conv_post.forward(client, &x)
     }
@@ -240,7 +248,7 @@ mod tests {
                 0,
                 1,
                 1,
-                0.1,
+                None,
             ),
             UpsampleBlock::new(
                 zeros(&[4, 4, 1], device),
@@ -250,7 +258,7 @@ mod tests {
                 0,
                 1,
                 1,
-                0.1,
+                None,
             ),
         ];
         // 2 stages × 2 kernels = 4 resblocks. Stage 0 ch=4, stage 1 ch=4.
@@ -309,7 +317,7 @@ mod tests {
             0,
             1,
             1,
-            0.1,
+            None,
         )];
         // 1 stage × 3 kernels = 3 expected, give 2.
         let resblocks = vec![resblock(4, 2, &device), resblock(4, 2, &device)];

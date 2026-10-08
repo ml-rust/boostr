@@ -29,19 +29,16 @@
 //! for each upsample stage i:
 //!     x = leaky_relu(x)
 //!     x_source = noise_res[i](noise_convs[i](har), style)
-//!     x = ups[i](x) + x_source                  # cropped to trunk length
+//!     x = ups[i](x)                             # last stage: reflect-pad 1 left
+//!     x = x + x_source
 //!     x = mean(resblocks[i*K .. (i+1)*K](x, style))
-//! x = leaky_relu(x)
+//! x = leaky_relu(x, 0.01)
 //! (mag, phase) = conv_post(x)
 //! ```
 //!
-//! # Known limitation
-//!
-//! **Reflection padding.** Upstream applies `ReflectionPad1d(3)` to the last
-//! upsample stage before the residual add; this build uses the STFT
-//! `center=True` framing plus right-cropping to align trunk and source lengths,
-//! which matches output length but differs from reflection padding at the
-//! boundary by a few samples. See [`IStftNetGenerator::forward_cpu_full`].
+//! The last stage pads the trunk with one reflected frame on the left
+//! before the excitation add, as upstream's `ReflectionPad1d((1, 0))` does,
+//! so the trunk meets the excitation's `center=True` frame count.
 
 mod core;
 mod cpu_full;

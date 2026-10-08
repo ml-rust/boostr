@@ -27,7 +27,7 @@
 //!    x = encode(x, style)                     [B, 1024, T']
 //!
 //! 3. for block in decode[0..3]:
-//!        x = cat([x, f0, n, asr], dim=1)     [B, 1090, T']
+//!        x = cat([x, asr, f0, n], dim=1)     [B, 1090, T']  (until a block upsamples)
 //!        x = block(x, style)                  [B, 1024, T'] (block 0..2) or [B, 512, 2·T'] (block 3)
 //!
 //! 4. return generator(x, style, F0_curve) → (mag, phase)
@@ -46,6 +46,7 @@ use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConvOps, MatmulOps, NormalizationOps, ReduceOps,
     ScalarOps, ShapeOps, TensorOps, TypeConversionOps, UnaryOps, UtilityOps,
 };
+use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
@@ -124,6 +125,44 @@ impl<R: Runtime> Decoder<R> {
             + TypeConversionOps<R>
             + UtilityOps<R>,
     {
+        let x = self.trunk(client, asr_feats, f0_curve, n_curve, style)?;
+        let (b, t_f0) = (f0_curve.shape()[0], f0_curve.shape()[1]);
+
+        // Generator takes the original frame-rate f0_curve for source-filter
+        // excitation (not the strided f0 tensor). Promote to [B, T_f0, 1].
+        let f0_for_gen = f0_curve.reshape(&[b, t_f0, 1]).map_err(Error::Numr)?;
+        self.generator.forward(client, &x, style, &f0_for_gen)
+    }
+
+    /// The decoder up to the generator: the F0 and energy convolutions,
+    /// `encode`, and every `decode` block with its residuals. Shared by
+    /// [`forward`](Self::forward) and the CPU noise-path forward. It holds no
+    /// random draw, so it is the decoder's deterministic half.
+    pub fn trunk<C>(
+        &self,
+        client: &C,
+        asr_feats: &Tensor<R>,
+        f0_curve: &Tensor<R>,
+        n_curve: &Tensor<R>,
+        style: &Tensor<R>,
+    ) -> Result<Tensor<R>>
+    where
+        R: Runtime<DType = DType>,
+        C: RuntimeClient<R>
+            + ConvOps<R>
+            + NormalizationOps<R>
+            + ActivationOps<R>
+            + TensorOps<R>
+            + MatmulOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + ReduceOps<R>
+            + ScalarOps<R>
+            + ShapeOps<R>
+            + CompareOps<R>
+            + TypeConversionOps<R>
+            + UtilityOps<R>,
+    {
         let f0_shape = f0_curve.shape();
         let n_shape = n_curve.shape();
         if f0_shape != n_shape || f0_shape.len() != 2 {
@@ -151,62 +190,42 @@ impl<R: Runtime> Decoder<R> {
 
         let asr_res_proj = self.asr_res.forward_inference(client, asr_feats)?;
 
-        // Each decode block re-concatenates `[x, F0, N, asr_res]`.
+        // Each decode block re-concatenates `[x, asr_res, F0, N]`, in the
+        // reference's channel order, until a block upsamples: the time axis
+        // then doubles and no residual follows.
+        let mut residual = true;
         for block in &self.decode {
-            let cat = client
-                .cat(&[&x, &f0, &n, &asr_res_proj], 1)
-                .map_err(Error::Numr)?;
-            x = block.forward(client, &cat, style)?;
+            let input = if residual {
+                client
+                    .cat(&[&x, &asr_res_proj, &f0, &n], 1)
+                    .map_err(Error::Numr)?
+            } else {
+                x
+            };
+            x = block.forward(client, &input, style)?;
+            if block.upsamples() {
+                residual = false;
+            }
         }
-
-        // Generator takes the original frame-rate f0_curve for source-filter
-        // excitation (not the strided f0 tensor). Promote to [B, T_f0, 1].
-        let f0_for_gen = f0_curve.reshape(&[b, t_f0, 1]).map_err(Error::Numr)?;
-        self.generator.forward(client, &x, style, &f0_for_gen)
+        Ok(x)
     }
 }
 
-impl Decoder<numr::runtime::cpu::CpuRuntime> {
+impl Decoder<CpuRuntime> {
     /// CPU forward that uses the generator's full noise-conditioned path
     /// (`forward_cpu_full`) when the checkpoint supplied `noise_convs` /
     /// `noise_res`. Falls back to the noise-free `forward` otherwise.
     #[allow(clippy::type_complexity)]
     pub fn forward_cpu_full(
         &self,
-        client: &numr::runtime::cpu::CpuClient,
-        asr_feats: &numr::tensor::Tensor<numr::runtime::cpu::CpuRuntime>,
-        f0_curve: &numr::tensor::Tensor<numr::runtime::cpu::CpuRuntime>,
-        n_curve: &numr::tensor::Tensor<numr::runtime::cpu::CpuRuntime>,
-        style: &numr::tensor::Tensor<numr::runtime::cpu::CpuRuntime>,
-    ) -> Result<(
-        numr::tensor::Tensor<numr::runtime::cpu::CpuRuntime>,
-        numr::tensor::Tensor<numr::runtime::cpu::CpuRuntime>,
-    )> {
-        let f0_shape = f0_curve.shape();
-        let n_shape = n_curve.shape();
-        if f0_shape != n_shape || f0_shape.len() != 2 {
-            return Err(Error::InvalidArgument {
-                arg: "f0_curve/n_curve",
-                reason: format!(
-                    "both must be [B, T_f0] with matching shapes, got {f0_shape:?} vs {n_shape:?}"
-                ),
-            });
-        }
-        let (b, t_f0) = (f0_shape[0], f0_shape[1]);
-
-        let f0 = f0_curve.reshape(&[b, 1, t_f0]).map_err(Error::Numr)?;
-        let n = n_curve.reshape(&[b, 1, t_f0]).map_err(Error::Numr)?;
-        let f0 = self.f0_conv.forward_inference(client, &f0)?;
-        let n = self.n_conv.forward_inference(client, &n)?;
-        let x = client.cat(&[asr_feats, &f0, &n], 1).map_err(Error::Numr)?;
-        let mut x = self.encode.forward(client, &x, style)?;
-        let asr_res_proj = self.asr_res.forward_inference(client, asr_feats)?;
-        for block in &self.decode {
-            let cat = client
-                .cat(&[&x, &f0, &n, &asr_res_proj], 1)
-                .map_err(Error::Numr)?;
-            x = block.forward(client, &cat, style)?;
-        }
+        client: &CpuClient,
+        asr_feats: &Tensor<CpuRuntime>,
+        f0_curve: &Tensor<CpuRuntime>,
+        n_curve: &Tensor<CpuRuntime>,
+        style: &Tensor<CpuRuntime>,
+    ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
+        let x = self.trunk(client, asr_feats, f0_curve, n_curve, style)?;
+        let (b, t_f0) = (f0_curve.shape()[0], f0_curve.shape()[1]);
         let f0_for_gen = f0_curve.reshape(&[b, t_f0, 1]).map_err(Error::Numr)?;
         self.generator
             .forward_cpu_full(client, &x, style, &f0_for_gen)
@@ -222,7 +241,6 @@ mod tests {
     };
     use crate::test_utils::cpu_setup;
     use numr::ops::PaddingMode;
-    use numr::runtime::cpu::CpuRuntime;
 
     fn zeros(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
@@ -357,7 +375,7 @@ mod tests {
             0,
             1,
             1,
-            0.1,
+            None,
         )];
         let resblocks = vec![
             resblock1(4, style_dim, &device),
@@ -414,7 +432,7 @@ mod tests {
             0,
             1,
             1,
-            0.1,
+            None,
         )];
         let resblocks = vec![resblock1(4, 2, &device)];
         let mag_phase = MagPhaseHead::new(conv(6, 4, 3, 1, &device), 4).unwrap();
@@ -457,7 +475,7 @@ mod tests {
             0,
             1,
             1,
-            0.1,
+            None,
         )];
         let resblocks = vec![resblock1(4, 2, &device)];
         let mag_phase = MagPhaseHead::new(conv(6, 4, 3, 1, &device), 4).unwrap();

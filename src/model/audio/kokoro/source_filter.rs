@@ -12,9 +12,10 @@
 //! Flow per f0 sample:
 //!
 //! 1. For each harmonic `h ∈ {1, 2, …, harmonic_num+1}`, generate a sine wave
-//!    at `h · f0 / sample_rate` cycles per sample. Phase is the cumulative
-//!    sum of per-sample angular increments, wrapped to `[0, 1)` to stay
-//!    numerically stable over long sequences.
+//!    at `h · f0 / sample_rate` cycles per sample, as upstream's `_f02sine`
+//!    does: the per-sample increments are linearly downsampled by the
+//!    upsample scale, summed at that rate, scaled back up, and linearly
+//!    interpolated to the sample rate.
 //! 2. Stack harmonics along a new last axis → `[B, T, harmonic_num+1]`.
 //! 3. Voiced/unvoiced mask `uv = (f0 > threshold)`; voiced frames carry the
 //!    harmonics plus a small amount of Gaussian noise, while unvoiced frames
@@ -47,6 +48,30 @@ pub struct SineGen {
     /// driven by `sine_amp / 3` noise instead of harmonics.
     pub noise_std: f32,
     pub voiced_threshold: f32,
+    /// Samples per frame the phase is summed at: upstream's
+    /// `upsample_scale`, `prod(upsample_rates) * gen_istft_hop_size` (300 for
+    /// Kokoro-82M). `1` sums per sample.
+    pub upsample_scale: usize,
+}
+
+/// `F.interpolate(..., mode="linear", align_corners=False)` along one axis
+/// of `in_len` samples to `out_len`, at `scale_factor`: for each output
+/// sample, the two input samples it reads and the weight of the second.
+/// The source index is computed in f32 as PyTorch computes it.
+fn linear_taps(in_len: usize, out_len: usize, scale_factor: f64) -> (Vec<i32>, Vec<i32>, Vec<f32>) {
+    let scale = (1.0 / scale_factor) as f32;
+    let mut lo = Vec::with_capacity(out_len);
+    let mut hi = Vec::with_capacity(out_len);
+    let mut w = Vec::with_capacity(out_len);
+    for j in 0..out_len {
+        let src = (scale * (j as f32 + 0.5) - 0.5).max(0.0);
+        let i0 = (src as usize).min(in_len.saturating_sub(1));
+        let i1 = (i0 + 1).min(in_len.saturating_sub(1));
+        lo.push(i0 as i32);
+        hi.push(i1 as i32);
+        w.push(src - i0 as f32);
+    }
+    (lo, hi, w)
 }
 
 impl SineGen {
@@ -57,7 +82,48 @@ impl SineGen {
             sine_amp: 0.1,
             noise_std: 0.003,
             voiced_threshold: 0.0,
+            upsample_scale: 1,
         }
+    }
+
+    /// The same generator summing its phase every `upsample_scale` samples.
+    pub fn with_upsample_scale(self, upsample_scale: usize) -> Self {
+        Self {
+            upsample_scale,
+            ..self
+        }
+    }
+
+    /// `x` `[B, T, h]` linearly resampled along time to `out_len` at
+    /// `scale_factor`, as `F.interpolate(x.transpose(1, 2), ...)` does.
+    fn interpolate<R, C>(
+        &self,
+        client: &C,
+        x: &Tensor<R>,
+        out_len: usize,
+        scale_factor: f64,
+    ) -> Result<Tensor<R>>
+    where
+        R: Runtime<DType = DType>,
+        C: RuntimeClient<R> + BinaryOps<R> + TypeConversionOps<R> + numr::ops::IndexingOps<R>,
+    {
+        let in_len = x.shape()[1];
+        let (lo, hi, w) = linear_taps(in_len, out_len, scale_factor);
+        let device = x.device();
+        let lo = Tensor::<R>::from_slice(&lo, &[out_len], device)?;
+        let hi = Tensor::<R>::from_slice(&hi, &[out_len], device)?;
+        let one_minus: Vec<f32> = w.iter().map(|v| 1.0 - v).collect();
+        let mut w_hi = Tensor::<R>::from_slice(&w, &[1, out_len, 1], device)?;
+        let mut w_lo = Tensor::<R>::from_slice(&one_minus, &[1, out_len, 1], device)?;
+        if x.dtype() != DType::F32 {
+            w_hi = client.cast(&w_hi, x.dtype()).map_err(Error::Numr)?;
+            w_lo = client.cast(&w_lo, x.dtype()).map_err(Error::Numr)?;
+        }
+        let a = client.index_select(x, 1, &lo).map_err(Error::Numr)?;
+        let b = client.index_select(x, 1, &hi).map_err(Error::Numr)?;
+        let a = client.mul(&a, &w_lo).map_err(Error::Numr)?;
+        let b = client.mul(&b, &w_hi).map_err(Error::Numr)?;
+        client.add(&a, &b).map_err(Error::Numr)
     }
 
     /// Generate `[B, T, harmonic_num + 1]` harmonic-plus-noise excitation from
@@ -81,6 +147,7 @@ impl SineGen {
             + TypeConversionOps<R>
             + numr::ops::RandomOps<R>
             + numr::ops::ReduceOps<R>
+            + numr::ops::IndexingOps<R>
             + UtilityOps<R>,
     {
         let shape = f0.shape();
@@ -91,6 +158,15 @@ impl SineGen {
             });
         }
         let (b, t) = (shape[0], shape[1]);
+        let scale = self.upsample_scale.max(1);
+        if t % scale != 0 || t == 0 {
+            return Err(Error::InvalidArgument {
+                arg: "f0",
+                reason: format!(
+                    "{t} samples is not a whole number of {scale}-sample frames; upsample the frame-rate f0 by {scale}"
+                ),
+            });
+        }
         let h = self.harmonic_num + 1;
         let dtype = f0.dtype();
 
@@ -108,30 +184,52 @@ impl SineGen {
         let rad_values = client
             .cat(&harmonics.iter().collect::<Vec<_>>(), 2)
             .map_err(Error::Numr)?; // [B, T, h]
+        // `(f0 / sr) % 1`: the whole cycles drop out of the phase.
+        let rad_floor = client.floor(&rad_values).map_err(Error::Numr)?;
+        let rad_values = client.sub(&rad_values, &rad_floor).map_err(Error::Numr)?;
 
-        // Random initial phase per (batch, harmonic), fundamental fixed at 0.
-        // Upstream adds it to `rad_values[:, 0, :]` before the cumsum; since a
-        // constant added to the first step propagates to every later step, this
-        // is equivalent to adding the offset (broadcast over time) to the
-        // cumulative phase.
+        // Random initial phase per (batch, harmonic), fundamental fixed at 0,
+        // added to the first sample's increment as upstream adds it.
         let rand_phase = client.rand(&[b, 1, h - 1], dtype).map_err(Error::Numr)?;
         let zero_col = client.fill(&[b, 1, 1], 0.0, dtype).map_err(Error::Numr)?;
         let rand_ini = client
             .cat(&[&zero_col, &rand_phase], 2)
             .map_err(Error::Numr)?; // [B, 1, h]
+        let first = rad_values.narrow(1, 0, 1).map_err(Error::Numr)?;
+        let first = client.add(&first, &rand_ini).map_err(Error::Numr)?;
+        let rad_values = if t > 1 {
+            let rest = rad_values.narrow(1, 1, t - 1).map_err(Error::Numr)?;
+            client.cat(&[&first, &rest], 1).map_err(Error::Numr)?
+        } else {
+            first
+        };
 
-        // Cumulative sum along time axis → per-sample phase in cycles, plus the
-        // random initial phase. Wrap to [0, 1) via `x - floor(x)` for precision.
-        let phase = client.cumsum(&rad_values, 1).map_err(Error::Numr)?;
-        let phase = client.add(&phase, &rand_ini).map_err(Error::Numr)?;
-        let phase_floor = client.floor(&phase).map_err(Error::Numr)?;
-        let phase_frac = client.sub(&phase, &phase_floor).map_err(Error::Numr)?;
-
-        // sin(2π · phase_frac)
-        let two_pi_phase = client
-            .mul_scalar(&phase_frac, 2.0 * std::f64::consts::PI)
+        // Upstream's phase: increments linearly downsampled by `scale`, summed
+        // at that rate, scaled back up by `scale`, and linearly interpolated
+        // to the sample rate.
+        let frames = t / scale;
+        let rad_frames = if scale == 1 {
+            rad_values
+        } else {
+            self.interpolate(client, &rad_values, frames, 1.0 / scale as f64)?
+        };
+        // PyTorch's CPU cumsum accumulates f32 in f64, which keeps the
+        // phase of a long take exact to the f32 it ends in.
+        let wide = client.cast(&rad_frames, DType::F64).map_err(Error::Numr)?;
+        let phase = client.cumsum(&wide, 1).map_err(Error::Numr)?;
+        let phase = client.cast(&phase, dtype).map_err(Error::Numr)?;
+        let phase = client
+            .mul_scalar(&phase, 2.0 * std::f64::consts::PI)
             .map_err(Error::Numr)?;
-        let sine = client.sin(&two_pi_phase).map_err(Error::Numr)?;
+        let phase = if scale == 1 {
+            phase
+        } else {
+            let phase = client
+                .mul_scalar(&phase, scale as f64)
+                .map_err(Error::Numr)?;
+            self.interpolate(client, &phase, t, scale as f64)?
+        };
+        let sine = client.sin(&phase).map_err(Error::Numr)?;
 
         // Voiced/unvoiced mask from the fundamental. (f0 > threshold) as f32.
         let threshold_tensor = client
@@ -217,6 +315,7 @@ impl<R: Runtime> SourceModuleHnNSF<R> {
             + TypeConversionOps<R>
             + numr::ops::RandomOps<R>
             + numr::ops::ReduceOps<R>
+            + numr::ops::IndexingOps<R>
             + UtilityOps<R>,
     {
         let sines = self.sine_gen.forward(client, f0)?; // [B, T, h]
@@ -242,6 +341,47 @@ mod tests {
     fn zeros(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
         Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; n], shape, device).unwrap()
+    }
+
+    #[test]
+    fn linear_taps_read_as_pytorch_interpolates() {
+        // Down by 4: output i reads the middle of input frame i.
+        let (lo, hi, w) = linear_taps(8, 2, 0.25);
+        assert_eq!((lo, hi, w), (vec![1, 5], vec![2, 6], vec![0.5, 0.5]));
+        // Up by 2: the first output clamps to input 0. The last reads the
+        // last input through both taps, so its weight changes nothing.
+        let (lo, hi, w) = linear_taps(2, 4, 2.0);
+        assert_eq!(lo, vec![0, 0, 0, 1]);
+        assert_eq!(hi, vec![1, 1, 1, 1]);
+        assert_eq!(w, vec![0.0, 0.25, 0.75, 0.25]);
+    }
+
+    #[test]
+    fn a_constant_f0_summed_per_frame_keeps_its_frequency() {
+        // At 100 Hz and 24 kHz the fundamental advances r = 1/240 cycle a
+        // sample. Summed per 4-sample frame, frame k ends at 4r(k + 1)
+        // cycles, and the interpolation back puts sample j at r(j + 2.5)
+        // away from the clamped edges.
+        let (client, device) = cpu_setup();
+        let mut sg = SineGen::new(24_000.0, 1).with_upsample_scale(4);
+        sg.noise_std = 0.0;
+        let t = 64;
+        let f0 = Tensor::<CpuRuntime>::from_slice(&vec![100.0f32; t], &[1, t, 1], &device).unwrap();
+        let out: Vec<f32> = sg.forward(&client, &f0).unwrap().to_vec();
+        let r = 1.0f64 / 240.0;
+        for j in 2..t - 2 {
+            let want = 0.1 * (2.0 * std::f64::consts::PI * r * (j as f64 + 2.5)).sin();
+            let got = f64::from(out[j * 2]);
+            assert!((got - want).abs() < 1e-4, "sample {j}: {got} vs {want}");
+        }
+    }
+
+    #[test]
+    fn f0_that_is_not_whole_frames_is_refused() {
+        let (client, device) = cpu_setup();
+        let sg = SineGen::new(24_000.0, 2).with_upsample_scale(4);
+        let f0 = zeros(&[1, 6, 1], &device);
+        assert!(sg.forward(&client, &f0).is_err());
     }
 
     #[test]

@@ -73,13 +73,45 @@ impl<R: Runtime> ProsodyPredictor<R> {
     /// Predict duration logits from the BERT-encoded text.
     ///
     /// `texts [B, T, d_model]`, `style [B, style_dim]` → `[B, T, max_dur]`
-    /// logits (apply softmax + argmax / expected-value + round for durations).
+    /// logits. [`decode_prosody_durations`](super::decode_prosody_durations)
+    /// turns them into frames.
     pub fn predict_duration<C>(
         &self,
         client: &C,
         texts: &Tensor<R>,
         style: &Tensor<R>,
     ) -> Result<Tensor<R>>
+    where
+        R: Runtime<DType = DType>,
+        C: RuntimeClient<R>
+            + MatmulOps<R>
+            + TensorOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + ActivationOps<R>
+            + ReduceOps<R>
+            + ScalarOps<R>
+            + NormalizationOps<R>
+            + UtilityOps<R>
+            + ShapeOps<R>,
+    {
+        Ok(self.predict_duration_features(client, texts, style)?.0)
+    }
+
+    /// Predict duration logits, and the duration encoder's features the F0
+    /// and energy branches read once they are expanded to frames.
+    ///
+    /// `texts [B, T, d_model]`, `style [B, style_dim]` → `([B, T, max_dur]`
+    /// logits, `[B, T, d_model]` features`)`. The features are the encoder
+    /// output without the style channels it carries: reference Kokoro's `d`
+    /// minus its last `style_dim` channels, which
+    /// [`predict_f0_n`](Self::predict_f0_n) appends again.
+    pub fn predict_duration_features<C>(
+        &self,
+        client: &C,
+        texts: &Tensor<R>,
+        style: &Tensor<R>,
+    ) -> Result<(Tensor<R>, Tensor<R>)>
     where
         R: Runtime<DType = DType>,
         C: RuntimeClient<R>
@@ -111,7 +143,12 @@ impl<R: Runtime> ProsodyPredictor<R> {
         let out = client
             .matmul_bias(&flat, &w_t, &self.duration_proj_bias)
             .map_err(Error::Numr)?;
-        out.reshape(&[b, t, self.max_dur]).map_err(Error::Numr)
+        let logits = out.reshape(&[b, t, self.max_dur]).map_err(Error::Numr)?;
+        let features = enc_out
+            .narrow(2, 0, self.d_model)
+            .map_err(Error::Numr)?
+            .contiguous()?;
+        Ok((logits, features))
     }
 
     /// Predict F0 and energy from duration-expanded frame features.

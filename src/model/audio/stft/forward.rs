@@ -21,6 +21,7 @@ use crate::error::{Error, Result};
 use crate::model::traits::ModelClient;
 use numr::algorithm::fft::{FftAlgorithms, FftNormalization};
 use numr::dtype::DType;
+use numr::ops::PadMode;
 use numr::ops::traits::ComplexOps;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
@@ -38,20 +39,30 @@ where
 {
 }
 
+/// What fills the `n_fft/2` samples a centered STFT adds at each end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CenterPad {
+    /// Zeros: librosa's `pad_mode='constant'`.
+    #[default]
+    Zeros,
+    /// The signal mirrored without its edge sample: `torch.stft`'s default
+    /// `pad_mode='reflect'`, which Kokoro's `TorchSTFT` takes. The signal
+    /// must be longer than `n_fft/2`.
+    Reflect,
+}
+
 /// Options controlling the forward STFT.
 #[derive(Debug, Clone, Copy)]
 pub struct StftOptions {
     pub n_fft: usize,
     pub hop_length: usize,
-    /// If true, pad the input with `n_fft/2` zeros on each end so the output
+    /// If true, pad the input with `n_fft/2` samples on each end, filled as
+    /// [`pad`](Self::pad) says, so the output
     /// `T_spec = 1 + T_time / hop_length`, matching `torch.stft(center=True)`.
     /// If false, no padding; `T_spec` is smaller.
-    ///
-    /// Kokoro's `TorchSTFT` helper sets `pad_mode='reflect'`. Zero
-    /// padding gives the border frames a small amplitude bias and is what the
-    /// matching [`crate::model::audio::stft::IStftPadding::Center`] trim
-    /// undoes.
     pub center: bool,
+    /// What a centered STFT pads with. Ignored when `center` is false.
+    pub pad: CenterPad,
 }
 
 impl Default for StftOptions {
@@ -60,8 +71,34 @@ impl Default for StftOptions {
             n_fft: 20,
             hop_length: 5,
             center: true,
+            pad: CenterPad::Zeros,
         }
     }
+}
+
+/// `imag` `[B, T, F]` with the DC bin, and the Nyquist bin of an even
+/// `n_fft`, set to `+0.0`: the spectrum of a real signal holds no imaginary
+/// part there, and pocketfft (`torch.stft`) gives exactly zero. A rounding
+/// residue, or a `-0.0`, would turn a negative bin's phase from `π` to `-π`.
+/// Multiplying by 0 keeps the sign of a negative residue, and adding `+0.0`
+/// then clears it.
+fn real_signal_imag<R, C>(client: &C, imag: &Tensor<R>, n_fft: usize) -> Result<Tensor<R>>
+where
+    R: Runtime<DType = DType>,
+    C: StftClient<R>,
+{
+    let f_bins = n_fft / 2 + 1;
+    let mut keep = vec![1.0f32; f_bins];
+    keep[0] = 0.0;
+    if n_fft.is_multiple_of(2) {
+        keep[f_bins - 1] = 0.0;
+    }
+    let mut mask = Tensor::<R>::from_slice(&keep, &[1, 1, f_bins], imag.device())?;
+    if imag.dtype() != DType::F32 {
+        mask = client.cast(&mask, imag.dtype())?;
+    }
+    let kept = client.mul(imag, &mask)?;
+    Ok(client.add_scalar(&kept, 0.0)?)
 }
 
 /// Run forward STFT, returning `(magnitude, phase)`, each `[B, F, T_spec]`.
@@ -104,10 +141,25 @@ where
     let dtype = waveform.dtype();
     let half = opts.n_fft / 2;
 
-    // `center=True` pads `n_fft/2` zeros on each side.
+    // `center=True` pads `n_fft/2` samples on each side.
     let (padded_t, padded) = if opts.center {
-        let pad = Tensor::<R>::zeros(&[b, half], dtype, device)?;
-        let joined = client.cat(&[&pad, &waveform.contiguous()?, &pad], 1)?;
+        let joined = match opts.pad {
+            CenterPad::Zeros => {
+                let pad = Tensor::<R>::zeros(&[b, half], dtype, device)?;
+                client.cat(&[&pad, &waveform.contiguous()?, &pad], 1)?
+            }
+            CenterPad::Reflect => {
+                if t_time <= half {
+                    return Err(Error::InvalidArgument {
+                        arg: "waveform",
+                        reason: format!(
+                            "reflect padding of {half} samples needs more than {half} samples, got {t_time}"
+                        ),
+                    });
+                }
+                client.pad_mode(&waveform.contiguous()?, &[half, half], PadMode::Reflect)?
+            }
+        };
         (t_time + 2 * half, joined)
     } else {
         (t_time, waveform.contiguous()?)
@@ -150,10 +202,10 @@ where
     let spectrum = client.rfft(&windowed.contiguous()?, FftNormalization::None)?;
 
     let real = client.real(&spectrum)?;
-    let imag = client.imag(&spectrum)?;
+    let imag = real_signal_imag(client, &client.imag(&spectrum)?, opts.n_fft)?;
     let power = client.add(&client.mul(&real, &real)?, &client.mul(&imag, &imag)?)?;
     let mag = client.sqrt(&power)?;
-    let phase = client.angle(&spectrum)?;
+    let phase = client.angle(&client.make_complex(&real, &imag)?)?;
 
     // [B, T_spec, F] -> [B, F, T_spec].
     debug_assert_eq!(mag.shape(), [b, t_spec, f_bins]);
@@ -200,6 +252,7 @@ mod tests {
                 n_fft,
                 hop_length: 4,
                 center: false,
+                pad: CenterPad::Zeros,
             },
         )
         .unwrap();
@@ -222,6 +275,7 @@ mod tests {
                 n_fft,
                 hop_length: 4,
                 center: true,
+                pad: CenterPad::Zeros,
             },
         )
         .unwrap();
@@ -242,6 +296,7 @@ mod tests {
                 n_fft: 8,
                 hop_length: 4,
                 center: false,
+                pad: CenterPad::Zeros,
             },
         )
         .unwrap();
@@ -263,6 +318,7 @@ mod tests {
                 n_fft: 4,
                 hop_length: 2,
                 center: false,
+                pad: CenterPad::Zeros,
             },
         )
         .unwrap();
@@ -301,6 +357,7 @@ mod tests {
                 n_fft,
                 hop_length: n_fft,
                 center: false,
+                pad: CenterPad::Zeros,
             },
         )
         .unwrap();
@@ -321,9 +378,8 @@ mod tests {
 
     #[test]
     fn non_power_of_two_n_fft_works() {
-        // Kokoro's generator uses n_fft = 20. The direct-DFT implementation this
-        // replaced existed because `rfft` once rejected such sizes; numr's
-        // Bluestein path now takes them, and this test is what pins that.
+        // Kokoro's generator uses n_fft = 20. numr's Bluestein path takes
+        // sizes that are not a power of two, and this test pins that.
         let (client, device) = cpu_setup();
         let n_fft = 20usize;
         let samples: Vec<f32> = (0..200)
@@ -339,6 +395,7 @@ mod tests {
                 n_fft,
                 hop_length: n_fft,
                 center: false,
+                pad: CenterPad::Zeros,
             },
         )
         .unwrap();
@@ -378,6 +435,7 @@ mod tests {
                 n_fft,
                 hop_length: hop,
                 center: true,
+                pad: CenterPad::Zeros,
             },
         )
         .unwrap();
@@ -423,11 +481,45 @@ mod tests {
                 StftOptions {
                     n_fft: 8,
                     hop_length: 4,
-                    center: false
+                    center: false,
+                    pad: CenterPad::Zeros,
                 }
             )
             .is_err()
         );
+    }
+
+    /// A real signal's DC and Nyquist bins hold no imaginary part, so a
+    /// negative one's phase is exactly `π`, as `torch.stft` gives it, never
+    /// `-π`. An alternating signal is all Nyquist and a negative constant
+    /// all DC.
+    #[test]
+    fn dc_and_nyquist_bins_of_a_negative_signal_have_phase_pi() {
+        let (client, device) = cpu_setup();
+        let n_fft = 8;
+        let win = tensor(&vec![1.0f32; n_fft], &[n_fft], &device);
+        let opts = StftOptions {
+            n_fft,
+            hop_length: 4,
+            center: false,
+            pad: CenterPad::Zeros,
+        };
+        let dc = tensor(&vec![-0.5f32; 16], &[1, 16], &device);
+        let (_, phase) = stft(&client, &dc, &win, opts).unwrap();
+        let phase: Vec<f32> = phase.to_vec();
+        let frames = phase.len() / (n_fft / 2 + 1);
+        assert!(
+            phase[..frames].iter().all(|&p| p == std::f32::consts::PI),
+            "{phase:?}"
+        );
+        let alternating: Vec<f32> = (0..16)
+            .map(|i| if i % 2 == 0 { -0.5 } else { 0.5 })
+            .collect();
+        let nyquist = tensor(&alternating, &[1, 16], &device);
+        let (_, phase) = stft(&client, &nyquist, &win, opts).unwrap();
+        let phase: Vec<f32> = phase.to_vec();
+        let last = &phase[phase.len() - frames..];
+        assert!(last.iter().all(|&p| p == std::f32::consts::PI), "{last:?}");
     }
 
     #[test]
@@ -443,7 +535,8 @@ mod tests {
                 StftOptions {
                     n_fft: 8,
                     hop_length: 4,
-                    center: false
+                    center: false,
+                    pad: CenterPad::Zeros,
                 }
             )
             .is_err()

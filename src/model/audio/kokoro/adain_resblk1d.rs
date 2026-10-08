@@ -112,6 +112,11 @@ pub struct PoolParams<R: Runtime> {
 }
 
 impl<R: Runtime> AdainResBlk1d<R> {
+    /// Whether this block upsamples its time axis: it holds a pool.
+    pub fn upsamples(&self) -> bool {
+        self.pool.is_some()
+    }
+
     pub fn new(
         adain1: KokoroAdaIn1d<R>,
         adain2: KokoroAdaIn1d<R>,

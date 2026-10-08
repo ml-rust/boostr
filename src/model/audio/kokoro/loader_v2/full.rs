@@ -21,6 +21,10 @@ use super::super::loader::{
     load_weight_normed_conv1d,
 };
 
+/// The f0, in Hz, at or under which upstream Kokoro's source module reads a
+/// sample as unvoiced.
+const KOKORO_VOICED_THRESHOLD: f32 = 10.0;
+
 /// Load a full Kokoro checkpoint into [`KokoroModelV2`]. Reads
 /// `config.json` from `model_dir`, then the safetensors in the same directory.
 pub fn load_kokoro_v2<R, C>(
@@ -206,7 +210,9 @@ where
         &mut st,
         "decoder.F0_conv",
         2,
-        PaddingMode::Same,
+        // Upstream `padding=1`: one frame each side. `Same` at stride 2
+        // pads only the right and shifts every window by one frame.
+        PaddingMode::Custom(1, 1, 0, 0),
         1,
         1,
         device,
@@ -216,7 +222,8 @@ where
         &mut st,
         "decoder.N_conv",
         2,
-        PaddingMode::Same,
+        // Upstream `padding=1`, as `F0_conv`.
+        PaddingMode::Custom(1, 1, 0, 0),
         1,
         1,
         device,
@@ -259,11 +266,12 @@ where
     // Generator under decoder.generator.*
     let source_w = st.load_tensor::<R>("decoder.generator.m_source.l_linear.weight", device)?;
     let source_b = st.load_tensor::<R>("decoder.generator.m_source.l_linear.bias", device)?;
-    let m_source = SourceModuleHnNSF::new(
-        SineGen::new(config.sample_rate as f32, config.harmonic_num),
-        source_w,
-        source_b,
-    )?;
+    // Upstream builds its source with `voiced_threshod=10`: f0 at or under
+    // 10 Hz is unvoiced and drives noise only.
+    let mut sine_gen = SineGen::new(config.sample_rate as f32, config.harmonic_num)
+        .with_upsample_scale(config.total_upsample() * config.hop_length);
+    sine_gen.voiced_threshold = KOKORO_VOICED_THRESHOLD;
+    let m_source = SourceModuleHnNSF::new(sine_gen, source_w, source_b)?;
 
     let num_upsamples = config.upsample_ratios.len();
     let mut ups = Vec::with_capacity(num_upsamples);
@@ -288,7 +296,7 @@ where
             0,
             1,
             1,
-            0.1,
+            None,
         ));
     }
 
@@ -427,9 +435,9 @@ where
                 n_fft: config.n_fft,
                 hop_length: config.hop_length,
             },
-            // Upstream Kokoro uses `ReflectionPad1d((conv_post_kernel-1)/2)`.
-            // `conv_post_kernel = 7` → pad = 3.
-            last_stage_reflect_pad: 3,
+            // Upstream Kokoro's `ReflectionPad1d((1, 0))`: one frame on the
+            // left of the last stage's trunk.
+            last_stage_reflect_pad: 1,
             // The noise-path waveform is at audio-sample rate, which equals
             // `total_upsample * hop_length` samples per frame-rate input. For
             // Kokoro-82M: 60 * 5 = 300.

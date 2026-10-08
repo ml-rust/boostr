@@ -102,12 +102,13 @@ impl<R: Runtime> DecoderBlock<R> {
     }
 }
 
-/// Upsample stage: transposed Conv1d + optional leaky-ReLU activation.
+/// Upsample stage: transposed Conv1d, then an optional leaky-ReLU.
 ///
 /// Kokoro's generator typically alternates between `UpsampleBlock`s
 /// (doubling the time axis) and stacks of `DecoderBlock`s. This wrapper keeps
 /// the upsample config explicit (stride, padding, output_padding) so callers
-/// can line it up with the checkpoint's recipe.
+/// can line it up with the checkpoint's recipe. Kokoro's `ups` take no
+/// activation after the conv: the generator applies its leaky ReLU before.
 pub struct UpsampleBlock<R: Runtime> {
     weight: Tensor<R>,
     bias: Option<Tensor<R>>,
@@ -116,7 +117,8 @@ pub struct UpsampleBlock<R: Runtime> {
     output_padding: usize,
     dilation: usize,
     groups: usize,
-    leaky_slope: f64,
+    /// Slope of the leaky ReLU after the conv. `None` applies none.
+    leaky_slope: Option<f64>,
 }
 
 impl<R: Runtime> UpsampleBlock<R> {
@@ -129,7 +131,7 @@ impl<R: Runtime> UpsampleBlock<R> {
         output_padding: usize,
         dilation: usize,
         groups: usize,
-        leaky_slope: f64,
+        leaky_slope: Option<f64>,
     ) -> Self {
         Self {
             weight,
@@ -160,9 +162,10 @@ impl<R: Runtime> UpsampleBlock<R> {
                 self.groups,
             )
             .map_err(Error::Numr)?;
-        client
-            .leaky_relu(&up, self.leaky_slope)
-            .map_err(Error::Numr)
+        match self.leaky_slope {
+            Some(slope) => client.leaky_relu(&up, slope).map_err(Error::Numr),
+            None => Ok(up),
+        }
     }
 }
 
@@ -292,11 +295,13 @@ mod tests {
             0,
             1,
             1,
-            0.0,
+            None,
         );
-        let x = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[1, 1, 3], &device).unwrap();
+        let x =
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, -2.0, 3.0], &[1, 1, 3], &device).unwrap();
         let y = block.forward(&client, &x).unwrap();
-        // L_out = (3-1)*2 + 2 = 6.
+        // L_out = (3-1)*2 + 2 = 6, and no activation touches the negatives.
         assert_eq!(y.shape(), &[1, 1, 6]);
+        assert_eq!(y.to_vec::<f32>(), [1.0, 1.0, -2.0, -2.0, 3.0, 3.0]);
     }
 }

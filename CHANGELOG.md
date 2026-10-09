@@ -7,6 +7,26 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.4.0] - 2026-10-09
+
+### ⚠️ Breaking changes
+
+- **Minimum Rust** — 1.95.
+- **Dependencies** — boostr requires numr 0.9. With the `wgpu` feature, the WebGPU
+  types that `boostr::runtime::wgpu` re-exports from numr come from wgpu 30. A caller
+  that passes or receives these types must depend on wgpu 30.
+
+### Changed
+
+- **Dependencies** — wgpu 30, zip 9 and serde-saphyr 1.3.
+
+### Fixed
+
+- **WebGPU** — a failed buffer mapping during the fused FP8 unscale-and-clip readback
+  returns an error instead of panicking.
+
+---
+
 ## [0.3.0] - 2026-10-09
 
 ### ⚠️ Breaking changes

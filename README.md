@@ -170,13 +170,13 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-boostr = "0.3"
+boostr = "0.4"
 
 # With CUDA support (requires CUDA 12.8+ or 13.x)
-# boostr = { version = "0.3", features = ["cuda"] }
+# boostr = { version = "0.4", features = ["cuda"] }
 
 # With WebGPU support
-# boostr = { version = "0.3", features = ["wgpu"] }
+# boostr = { version = "0.4", features = ["wgpu"] }
 ```
 
 ### Build
@@ -351,7 +351,7 @@ boostr is part of the [ml-rust](https://github.com/ml-rust) organization:
 
 ### Requirements
 
-- Rust 1.89+
+- Rust 1.95+
 - For CUDA: CUDA 12.8+ or 13.x, with `nvcc` on `PATH`
 - For WebGPU: wgpu and platform GPU drivers
 

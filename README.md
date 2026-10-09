@@ -94,6 +94,10 @@ boostr extends [numr](https://github.com/ml-rust/numr) with production-grade ML 
 - **LLaMA** — standard and tensor-parallelized
 - **Mamba2** — state space models with SSD kernels
 - **Hybrid** — mixed transformer/SSM models
+- **Qwen3.5** — Gated DeltaNet + attention hybrid, with the **Qwen3-VL** vision encoder for image input
+- **Encoder** — BERT-family text embedding models (BERT, Nomic BERT, Jina v2/v3, Qwen3-Embedding, EmbeddingGemma) with varlen batching and an embedding pipeline
+- **Audio** (one feature gate each) — Whisper ASR, Kokoro and VITS (MMS-TTS) speech synthesis, NeuCodec, VoxCPM2, Silero VAD, and CLAP
+- **spaCy tagger** — the `en_core_web_sm` CNN part-of-speech tagger
 - Extensible architecture system for custom models
 
 ### Neural Network Modules
@@ -131,7 +135,7 @@ boostr extends [numr](https://github.com/ml-rust/numr) with production-grade ML 
 ### Multi-Backend
 
 - **CPU**: SIMD kernels (AVX2, NEON), native ops
-- **CUDA**: PTX kernels, Flash Attention v2/v3, fused ops (CUDA 12.x)
+- **CUDA**: PTX kernels, Flash Attention v2/v3, fused ops (CUDA 12.8+ or 13.x)
 - **WebGPU**: WGSL shaders, cross-platform GPU support
 
 ## Architecture
@@ -166,13 +170,13 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-boostr = "<latest-version>"
+boostr = "0.3"
 
-# With CUDA support (requires CUDA 12.x)
-# boostr = { version = "0.1", features = ["cuda"] }
+# With CUDA support (requires CUDA 12.8+ or 13.x)
+# boostr = { version = "0.3", features = ["cuda"] }
 
 # With WebGPU support
-# boostr = { version = "0.1", features = ["wgpu"] }
+# boostr = { version = "0.3", features = ["wgpu"] }
 ```
 
 ### Build
@@ -181,8 +185,11 @@ boostr = "<latest-version>"
 # CPU build
 cargo build --release
 
-# CUDA support (requires CUDA 12.x)
+# CUDA support (requires CUDA 12.8+ or 13.x)
 cargo build --release --features cuda
+
+# CUDA build to run on other machines: native code for every supported GPU
+NUMR_CUDA_ARCH=all cargo build --release --features cuda
 
 # WebGPU support
 cargo build --release --features wgpu
@@ -269,27 +276,50 @@ for token_idx in 0..seq_len {
 
 ## Feature Flags
 
-| Feature       | Purpose                            | Dependencies            |
-| ------------- | ---------------------------------- | ----------------------- |
-| `cpu`         | CPU backend (default)              | numr                    |
-| `cuda`        | CUDA GPU acceleration (CUDA 12.x)  | numr/cuda, cudarc       |
-| `nccl`        | Multi-GPU via NCCL                 | numr/nccl               |
-| `wgpu`        | WebGPU cross-platform GPU          | numr/wgpu               |
-| `distributed` | Distributed inference over nexar   | nexar, anyhow, bytemuck |
-| `f16`         | Half-precision float support       | numr/f16                |
-| `fp8`         | FP8 precision support              | numr/fp8                |
-| `audio`       | Tensor-level signal ops (STFT, mel) | —                       |
+| Feature        | Purpose                                                   | Dependencies            |
+| -------------- | --------------------------------------------------------- | ----------------------- |
+| `cpu`          | CPU backend (default)                                     | numr                    |
+| `cuda`         | CUDA GPU acceleration (CUDA 12.8+ or 13.x)                | numr/cuda, cudarc       |
+| `nccl`         | Multi-GPU via NCCL                                        | numr/nccl               |
+| `wgpu`         | WebGPU cross-platform GPU                                 | numr/wgpu, wgpu         |
+| `distributed`  | Distributed inference over nexar (implies `f16`)          | nexar, anyhow, bytemuck |
+| `f16`          | Half-precision float support                              | numr/f16                |
+| `fp8`          | FP8 precision support                                     | numr/fp8                |
+| `audio`        | Tensor-level signal ops (STFT, iSTFT, mel)                | —                       |
+| `whisper`      | Whisper speech recognition model (implies `audio`)        | —                       |
+| `kokoro`       | Kokoro speech synthesis model (implies `audio`)           | —                       |
+| `vits`         | VITS / MMS-TTS speech synthesis model (implies `audio`)   | —                       |
+| `neucodec`     | NeuCodec audio codec (implies `audio`)                    | —                       |
+| `voxcpm`       | VoxCPM2 speech synthesis model (implies `audio`, `f16`)   | —                       |
+| `silero-vad`   | Silero voice activity detection (implies `audio`)         | —                       |
+| `clap`         | CLAP audio and text towers (implies `audio`)              | —                       |
+| `spacy-tagger` | spaCy CNN part-of-speech tagger                           | —                       |
+| `vocab-*`      | One bundled splintr vocabulary each (see below)           | splintr                 |
+| `vocabs`       | Every bundled splintr vocabulary                          | splintr                 |
 
-Grapheme-to-phoneme via espeak-ng lives in the `voxr` crate
-(feature `g2p`), together with the audio codecs, the
-enhancement chain and the TTS engines.
+The `vocab-*` features are `vocab-cl100k`, `vocab-o200k`, `vocab-gpt-oss`,
+`vocab-phi4`, `vocab-olmo2`, `vocab-llama3`, `vocab-llama2`, `vocab-deepseek`,
+`vocab-qwen`, `vocab-glm`, `vocab-gemma2`, `vocab-gemma3`, `vocab-gemma4`,
+`vocab-kimi`, `vocab-mistral` and `vocab-modernbert`. None is on by default.
+
+### CUDA builds
+
+The `cuda` feature needs CUDA 12.8 or newer; 13.x also works. The GPU needs
+compute capability 7.5 (Turing) or newer. By default `build.rs` builds native
+code only for the GPUs on the build host. Set `NUMR_CUDA_ARCH=all` for any
+binary that runs on another machine: release builds, containers, and CI
+artifacts. `BOOSTR_CUDA_ARCH` overrides `NUMR_CUDA_ARCH` for boostr's kernels.
+
+boostr holds tensor code only. Audio decoding, resampling, grapheme-to-phoneme,
+voices, and the TTS, ASR and VAD pipelines live in the [`voxr`](https://github.com/ml-rust/voxr) crate, on top
+of boostr's models.
 
 ## Module Overview
 
 - **`ops/`** — ML-specific operations (attention, RoPE, MoE, etc.)
 - **`quant/`** — Quantized tensors and kernels (26 formats)
 - **`nn/`** — Neural network modules (Linear, Embedding, LayerNorm, RMSNorm, MoE)
-- **`model/`** — Model architectures (LLaMA, Mamba2, Hybrid)
+- **`model/`** — Model architectures (LLaMA, Mamba2, Hybrid, Qwen3.5, Qwen3-VL, encoders, audio models, spaCy tagger)
 - **`format/`** — Model loaders (SafeTensors, GGUF)
 - **`inference/`** — Inference infrastructure (KV cache, scheduling, batching)
 - **`optimizer/`** — Training optimizers (AdamW, Lamb, SGD)
@@ -321,8 +351,8 @@ boostr is part of the [ml-rust](https://github.com/ml-rust) organization:
 
 ### Requirements
 
-- Rust 1.85+
-- For CUDA: CUDA 12.x and cudarc dependencies
+- Rust 1.89+
+- For CUDA: CUDA 12.8+ or 13.x, with `nvcc` on `PATH`
 - For WebGPU: wgpu and platform GPU drivers
 
 ### Clone and Build
@@ -337,8 +367,8 @@ cargo build --release
 # CUDA
 cargo build --release --features cuda
 
-# Run tests
-cargo test --all-features
+# Run tests (every CPU-buildable gate)
+cargo test --features whisper,kokoro,neucodec,voxcpm,silero-vad,vits,clap,spacy-tagger,f16
 
 # Format and lint
 cargo fmt --all
@@ -353,14 +383,17 @@ cargo clippy --all-targets
 ## Testing
 
 ```bash
-# Run all tests
-cargo test --all-features
+# CPU tests, no model gates
+cargo test
 
-# Specific test suite
-cargo test ops::attention --all-features
+# Every model gate on the CPU backend
+cargo test --features whisper,kokoro,neucodec,voxcpm,silero-vad,vits,clap,spacy-tagger,f16
+
+# CUDA tests
+cargo test --features cuda,f16
 
 # Verbose output
-cargo test --all-features -- --nocapture
+cargo test -- --nocapture
 ```
 
 ## Contributing
@@ -370,6 +403,9 @@ Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for architectu
 ## License
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
+
+Parts of boostr port code from other open-source projects. Their copyright
+lines and licenses are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Acknowledgments
 

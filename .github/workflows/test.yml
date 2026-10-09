@@ -39,11 +39,40 @@ jobs:
       - name: Run clippy (all CI-safe features)
         run: cargo clippy --all-targets --features f16 -- -D warnings
 
-      - name: Build docs
-        run: cargo doc --no-deps --features f16
+      - name: Build docs (docs.rs feature set)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --features cpu,whisper,kokoro,neucodec,voxcpm,silero-vad,vits,clap,spacy-tagger,f16,fp8,distributed
 
       - name: Run doctests
         run: cargo test --doc --features f16
+
+  model-gates:
+    name: Model Gates (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      GATES: whisper,kokoro,neucodec,voxcpm,silero-vad,vits,clap,spacy-tagger,fp8,distributed
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: model-gates
+
+      - name: "Compile: every model gate"
+        run: cargo check --all-targets --features ${{ env.GATES }}
+
+      - name: "Clippy: every model gate"
+        run: cargo clippy --all-targets --features ${{ env.GATES }} -- -D warnings
 
   test:
     name: Test (${{ matrix.os }})

@@ -229,7 +229,6 @@ dependencies = [
  "nexar",
  "numr",
  "rayon",
- "rustc-hash 2.1.3",
  "rustls",
  "serde",
  "serde-saphyr",
@@ -457,9 +456,9 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "cudarc"
-version = "0.19.9"
+version = "0.19.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "804764d10e844da09765a7b2ca9641a0851523d1702efb0d7299d73e31b86e80"
+checksum = "7359bf1de037ddada72729c3acec9b040f3468400c6e9e740b01ba0cd2e89562"
 dependencies = [
  "half",
  "libloading 0.9.0",
@@ -1243,6 +1242,8 @@ dependencies = [
 [[package]]
 name = "nexar"
 version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dac038912d8e0f36309f3368c0980377730edd4ad5d082627227277cdd870c3a"
 dependencies = [
  "bytes",
  "crossbeam-queue",
@@ -1310,14 +1311,16 @@ dependencies = [
 
 [[package]]
 name = "numr"
-version = "0.7.0"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f5e7de139686abb745a6c786100fe932b7f65ddce640bf93bdd2921caf52de4"
 dependencies = [
  "bytemuck",
  "cudarc",
  "half",
  "num-traits",
  "parking_lot",
- "paste",
+ "pastey",
  "pollster",
  "rayon",
  "rkyv",
@@ -1442,10 +1445,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "paste"
-version = "1.0.15"
+name = "pastey"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "pem"
@@ -1838,7 +1841,9 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "regexr"
-version = "0.5.0"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1dc7d7bd6a78cbb6945d786c6394bd2c7766fa8a7ba0e2ae38920043a3938bf"
 dependencies = [
  "aho-corasick",
  "dynasm",
@@ -2251,10 +2256,12 @@ dependencies = [
 
 [[package]]
 name = "splintr"
-version = "0.20.0"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0931f148d9bde5cf6abee5d94cec51052d16d9cadd3b592d82c3e98fe33981f"
 dependencies = [
  "aho-corasick",
- "base64 0.22.1",
+ "base64 0.23.1",
  "lru",
  "memchr",
  "rayon",
@@ -2285,6 +2292,8 @@ dependencies = [
 [[package]]
 name = "splintr-vocab-cl100k"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ab174e6f6fda76aef83361badce0aa50ef26dd7be2d1b5cfa43e9e09571c7ea"
 dependencies = [
  "splintr-vocab-pack",
 ]
@@ -2292,6 +2301,8 @@ dependencies = [
 [[package]]
 name = "splintr-vocab-deepseek"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0926ccba51a4fdafec408b3d13415041cad225e6ea757fa1aa5b136c946d5cf3"
 dependencies = [
  "splintr-vocab-pack",
 ]
@@ -2299,14 +2310,20 @@ dependencies = [
 [[package]]
 name = "splintr-vocab-gemma2"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5649b01019c59e45541a80d5bdc644367dfdc2c24bf10ee0bd935d2744ce1124"
 
 [[package]]
 name = "splintr-vocab-gemma3"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a24151741927c4556f732bef02bc37bd4e5f8ebf2b4a252eca5cf5e7041a5df"
 
 [[package]]
 name = "splintr-vocab-gemma4"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78589daadaa24ee8a731e5910bc28cb9428fef0b68b7a9505dd63b6d650db6c5"
 dependencies = [
  "splintr-vocab-pack",
 ]
@@ -2314,6 +2331,8 @@ dependencies = [
 [[package]]
 name = "splintr-vocab-glm"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68d9203a62a7958ed2bb1e79fe070b46d9cb8d6eafffe54a2a67601a43b13f52"
 dependencies = [
  "splintr-vocab-pack",
 ]
@@ -2321,6 +2340,8 @@ dependencies = [
 [[package]]
 name = "splintr-vocab-kimi"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f246d725b9fe63f2c4cf9bad097c89e48cc2a57f8c3634daa5ef2b74158a071c"
 dependencies = [
  "splintr-vocab-pack",
 ]
@@ -2328,10 +2349,14 @@ dependencies = [
 [[package]]
 name = "splintr-vocab-llama2"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb1e75c3c3225da9c9225dfa1ed750b80118a29e32a489742e266dcbe1259331"
 
 [[package]]
 name = "splintr-vocab-llama3"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc071e39030b2bf2456d79f37f74a682fbdccf1ceefbfe0ef3ea21d5aa448cf1"
 dependencies = [
  "splintr-vocab-pack",
 ]
@@ -2339,6 +2364,8 @@ dependencies = [
 [[package]]
 name = "splintr-vocab-mistral"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de023e72e3526986ea002db1ccbc8fb1abb07df2949a7712c37e109672918bc2"
 dependencies = [
  "splintr-vocab-pack",
 ]
@@ -2346,6 +2373,8 @@ dependencies = [
 [[package]]
 name = "splintr-vocab-modernbert"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "299931c6b3dcf259e4309812668ba15d7910b1f9c505814a750e4b2e81fd6ef9"
 dependencies = [
  "splintr-vocab-pack",
 ]
@@ -2353,21 +2382,27 @@ dependencies = [
 [[package]]
 name = "splintr-vocab-o200k"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06286415c13d412a73228bfe769be6948dac54ee8ebc078d32d0f894493f08ca"
 dependencies = [
  "splintr-vocab-pack",
 ]
 
 [[package]]
 name = "splintr-vocab-pack"
-version = "1.2.0"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64e2865376308f2b02f127a46fa4530cf0921e75d732c88f904c8a75120667fe"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "serde_json",
 ]
 
 [[package]]
 name = "splintr-vocab-qwen"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db47a8789446ff25418cb503abccd27ad8bb65c8e92e507b62478e27fbb6648e"
 dependencies = [
  "splintr-vocab-pack",
 ]
@@ -2375,6 +2410,8 @@ dependencies = [
 [[package]]
 name = "splintr-vocab-whisper"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a2ada363a88833d6cb54e094eaa1d6478ef8e22932157fad8865936e44d43c1"
 dependencies = [
  "splintr-vocab-pack",
 ]

@@ -7,45 +7,108 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.3.0] - 2026-08-02
+## [0.3.0] - 2026-10-09
 
 ### ⚠️ Breaking changes
 
-- **Tokenizer ownership moved to splintr.** `GgufTokenizer` is removed. boostr no longer
-  decides how to interpret `tokenizer.ggml.*` metadata — it lifts the metadata into a
-  plain `splintr::GgufVocab` via the new `format::extract_gguf_vocab`, and
-  `splintr::from_gguf_vocab` owns every dialect decision (algorithm dispatch, defaults
-  for absent flags). Both crates previously guessed at defaults like `add_space_prefix`,
-  and their answers had drifted apart silently.
-- **`WhisperTokenizer` is removed**; `WhisperBundle.tokenizer` is now a
-  `splintr::AnyTokenizer`. The enum existed only to paper over `from_vocab` returning a
-  concrete `Tokenizer` while `from_json_path` returned an `AnyTokenizer`; both now
-  return the latter.
-- **`EmbeddingPipeline<R, T: Tokenize>` is now `EmbeddingPipeline<R>`**, holding a
-  concrete `splintr::AnyTokenizer`. After the removals above the trait had no
-  implementors in boostr and every instantiation was already an `AnyTokenizer`.
-- **Requires splintr 0.11.** Special-token wrapping now goes through splintr's
-  `SpecialPolicy` rather than a hand-rolled `cls_sep_ids` lookup, and Unigram scores are
-  `f64` end to end.
+- **Dependencies** — boostr requires numr 0.8 and splintr 0.21. The minimum Rust
+  version is 1.89.
+- **Tokenizers move to splintr.** `GgufTokenizer` and `WhisperTokenizer` are removed.
+  `format::extract_gguf_vocab` lifts `tokenizer.ggml.*` metadata into a
+  `splintr::GgufVocab`, and splintr builds the tokenizer from it.
+  `EmbeddingPipeline<R, T: Tokenize>` becomes `EmbeddingPipeline<R>` and holds a
+  `splintr::AnyTokenizer`.
+- **Encoder** — `HiddenAct` is removed. Encoder configs use `nn::Activation`.
+- **MoE** — `MoEActivation::GeLU` becomes `MoEActivation::Gelu` and now means the
+  exact erf form. `MoEActivation::GeluTanh` is the tanh approximation.
+- **Audio is gated per architecture.** `model::audio` models sit behind the `whisper`,
+  `kokoro`, `neucodec`, `voxcpm`, `silero-vad`, `vits` and `clap` features. `audio`
+  gates only the tensor-level signal ops (`stft`, `istft`, `mel`).
+- **Sample-level audio moves to voxr.** boostr no longer holds `g2p`, `wav_encode`,
+  `tts_bundle`, `fft` or `reflection_pad`. WAV and codec I/O, resampling, G2P, voices
+  and the TTS, ASR and VAD pipelines live in the `voxr` crate. `WhisperBundle` is
+  replaced by `WhisperCheckpoint`; voxr builds the bundle with its tokenizer.
+- **Fallible allocation** — model, ops, KV cache, SSM and data APIs that allocate
+  tensors return `Result` instead of panicking.
+- **LoRA** — `LoraLinear` implements `Module`, gains merge and a trainable flag, and
+  MoE `Expert` projections accept LoRA adapters. Code that builds these types by
+  field changes.
+- **Quantization** — the `prism` low-bit quant family is renamed `lowbit`.
 
 ### Added
 
-- **Format** — `extract_gguf_vocab(&GgufMetadata) -> Result<splintr::GgufVocab>`, the
-  public seam a downstream crate uses to build a tokenizer from an already-parsed GGUF
-  header. `GgufValue::as_u8` and `GgufMetadata::get_u8_array` support it.
-- **GGUF** — `tokenizer.ggml.precompiled_charsmap` is now extracted. It never was
-  before, so SentencePiece normalization was skipped and vocabularies that depend on it
-  emitted `<unk>` for inputs the table folds (tabs, NBSP, fullwidth punctuation).
-- **Encoder** — a regression test pinning that a BERT-family sequence keeps `[CLS]` and
-  `[SEP]` through truncation; there was no coverage of that invariant.
+- **Model gates** — `whisper`, `kokoro`, `neucodec`, `voxcpm`, `silero-vad`, `vits`
+  and `clap` model features, plus `spacy-tagger` and the `vocab-*` / `vocabs`
+  features that forward splintr's bundled vocabularies.
+- **Audio models**
+  - VITS / MMS-TTS: text encoder, duration predictors, flows and HiFi-GAN, with
+    end-to-end synthesis.
+  - VoxCPM2: AudioVAE, MiniCPM4 `base_lm`, local DiT, FSQ layer and the end-to-end
+    orchestrator. It loads from SafeTensors, GGUF and TCF. It supports batched and
+    continuous-batched generation, streaming windowed decode, zero-shot rendering,
+    LoRA / QLoRA fine-tuning and CUDA graph replay.
+  - NeuCodec: semantic and acoustic encoders, FSQ quantizer and decoder.
+  - CLAP: HTSAT audio tower and RoBERTa text tower.
+  - Silero VAD with a streaming LSTM step.
+  - Whisper: language detection, cross-attention capture and the word-timestamp
+    alignment matrix.
+- **spaCy tagger** — `model::text::spacy_tagger`, the `tok2vec` + `tagger` network of
+  `en_core_web_sm`.
+- **Qwen3.5** — `Qwen35Model`: Gated DeltaNet and full-attention layers with
+  interleaved MRoPE, GGUF loading, and the Qwen3-VL vision tower for image input.
+- **Encoder** — Qwen3-Embedding and Jina-BERT v2/v3 support (ALiBi, QK-norm, RoPE
+  base), and `EmbeddingPipeline` over any splintr tokenizer.
+- **Mamba** — Mamba1 and Mamba3 variants next to Mamba2, with `init()` for training
+  from scratch.
+- **Inference**
+  - Multi-lane batched decode: `LaneDecodeSession`, a lane driver, and per-lane KV
+    ranges and GDN state.
+  - Per-row KV ends and per-row RoPE positions in paged and flash decode.
+  - CUDA graph decode for Qwen3.5 (`Qwen35DecodeGraph`) with one replay serving lanes
+    of different lengths.
+  - `SamplingScratch`: allocation-free sampling into caller-owned buffers.
+  - `generate_greedy` for autoregressive generation.
+- **Attention and KV cache** — FP8 and INT4 KV-cache flash attention, per-tensor and
+  per-head FP8 KV quantization, `copy_blocks` / `swap_blocks`, multi-layer batched KV
+  update, fused ALiBi flash forward, sliding-window flash backward, per-row `kv_start`
+  padding, and a token-major output layout.
+- **Quantization**
+  - Low-bit formats Q1_0, Q2_0, PQ2_0 and PTQ1_0 with CPU, CUDA GEMV and MMQ kernels.
+  - CPU quantizers for the K-quants, IQ4_NL and IQ4_XS, checked against llama.cpp.
+  - Importance-matrix (imatrix) weighted quantization and AWQ-style smoothing.
+  - Feature-major tensor-core MMQ kernels for the GGUF formats, with a per-device
+    split-K or tile-parallel schedule.
+  - Hadamard-rotated linear and embedding layers and the GGUF rotation contract.
+- **TCF** — `boostr::tcf`, the tensor contract file container, and `TcfLoader`, with
+  CPU, CUDA and WebGPU kernels for its native quantized encodings.
+- **nn** — LoRA and QLoRA adapters with named loading, conditional flow-matching loss,
+  finite scalar quantizer, tanh-approximate and QuickGELU activations, LongRoPE and
+  YaRN scaling, and seeded weight initialization.
+- **CUDA build** — kernels compile to multi-arch fatbins embedded in the binary.
+  `BOOSTR_CUDA_ARCH` (falling back to `NUMR_CUDA_ARCH`) selects the architectures.
 
 ### Fixed
 
-- **Encoder (CUDA)** — the graph-replay H2D path called `cast_i64`/`cast_f32`, which
-  existed nowhere; `--features cuda` had not compiled. They are host-side byte views for
-  `copy_to_device`, which takes raw bytes.
-- **Encoder** — special-token wrapping truncates content *before* applying the boundary
-  template, so the trailing `[SEP]` is no longer severed on an over-length input.
+- **Paged attention** — prefill applies the causal mask. Block tables narrower than
+  `seq_len_k` are rejected.
+- **Encoder** — batches pad with the model's pad token id. Special-token wrapping
+  truncates content before it adds `[CLS]` / `[SEP]`. GGUF
+  `tokenizer.ggml.precompiled_charsmap` is now read.
+- **Activations** — Whisper and the Qwen3-VL merger use exact GELU.
+- **Kokoro** — vocoder, source and STFT padding match the reference.
+- **Mamba2** — a shared causal conv1d removes conv window drift, and `dt_bias` applies
+  inside softplus.
+- **CUDA attention** — bottom-right causal alignment in varlen, paged, MQA/GQA and
+  KV-cache flash kernels. GQA/MQA out-of-bounds writes and dQ accumulation in flash
+  backward. Rounding of per-element atomic adds in the backward kernels.
+- **Quantization** — IQ1_M type id, IQ4_XS scale layout, Q4/Q5/Q5_K nibble indexing,
+  TQ1_0/TQ2_0 scale offset and trit order, and CUDA GGUF dequant for four formats.
+- **Optimizers** — LAMB, AdaGrad and SGD keep F32 master weights. Gradient clipping
+  covers only the optimized parameters and accepts strided gradients.
+- **Autograd** — `Embedding::forward`, MoE routing, `repeat_kv` and `Conv2d::forward`
+  keep their gradient edges.
+- **nn** — seeded Kaiming / Xavier init reads `fan_in` from the correct dimension.
+- **Format** — SafeTensors writes each dtype at its native byte width.
 
 ---
 

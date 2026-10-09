@@ -2,7 +2,7 @@
 name = "boostr"
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "ML framework built on numr - attention, quantization, model architectures"
 license = "Apache-2.0"
 repository = "https://github.com/ml-rust/boostr"
@@ -15,6 +15,15 @@ keywords = [
   "quantization",
 ]
 categories = ["science", "mathematics"]
+# Integration tests read model directories and binary fixtures that do not
+# ship, so the whole `tests/` tree stays out of the package.
+exclude = [
+  "tests/",
+  ".github/",
+  ".cargo/",
+  ".config/",
+  ".gitignore",
+]
 
 [lib]
 # `cargo bench` would otherwise also start the library's libtest harness, which
@@ -22,9 +31,7 @@ categories = ["science", "mathematics"]
 bench = false
 
 [dependencies]
-numr = "0.7"
-# Matches splintr's hasher: `Tokenizer::with_merge_ranks` takes an FxHashMap.
-rustc-hash = "2.0"
+numr = "0.8"
 half = { version = "2", features = ["bytemuck"] }
 thiserror = "2.0"
 serde = { version = "1", features = ["derive"] }
@@ -55,7 +62,7 @@ memmap2 = "0.9"
 blake3 = "1.8"
 # Whisper variant detection and the GGUF/encoder tokenizer plumbing. No
 # vocabulary data: the bundled Whisper vocabulary is loaded by voxr.
-splintr = "0.20"
+splintr = "0.21"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
@@ -63,7 +70,7 @@ bytemuck = { version = "1.25", features = ["derive"] }
 # Tests tokenize with cl100k_base. Declaring it here rather than on the main
 # dependency keeps the ~3 MB payload out of every downstream build: dev-dependency
 # features unify only when building boostr's own tests.
-splintr = { version = "0.20", features = ["vocab-cl100k"] }
+splintr = { version = "0.21", features = ["vocab-cl100k"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 rustls = "0.23"
@@ -153,7 +160,22 @@ vocab-modernbert = ["splintr/vocab-modernbert"]
 vocabs = ["splintr/vocabs"]
 
 [package.metadata.docs.rs]
-no-default-features = true
+# docs.rs has no CUDA toolkit, so `cuda` and `nccl` stay off. Every gate listed
+# here builds on the CPU backend alone.
+features = [
+  "cpu",
+  "whisper",
+  "kokoro",
+  "neucodec",
+  "voxcpm",
+  "silero-vad",
+  "vits",
+  "clap",
+  "spacy-tagger",
+  "f16",
+  "fp8",
+  "distributed",
+]
 
 # Targets that need `model::audio`. Without these entries a default
 # `cargo check --all-targets` tries to build them against a boostr that has

@@ -31,7 +31,7 @@ pub fn load_tensor_pt<R: Runtime<DType = DType>>(
         ),
     })?;
 
-    let (pkl_name, data_prefix) = find_archive_layout(&mut archive)?;
+    let (pkl_name, data_prefix) = find_archive_layout(&archive)?;
     let pkl_bytes = read_zip_entry(&mut archive, &pkl_name)?;
     let contents = parse_pickle(&pkl_bytes)?;
 
@@ -131,7 +131,7 @@ impl TorchStateDict {
                 path.display()
             ),
         })?;
-        let (pkl_name, data_prefix) = find_archive_layout(&mut archive)?;
+        let (pkl_name, data_prefix) = find_archive_layout(&archive)?;
         let pkl_bytes = read_zip_entry(&mut archive, &pkl_name)?;
         let contents = parse_pickle(&pkl_bytes)?;
         Ok(Self {

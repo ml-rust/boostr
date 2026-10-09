@@ -7,13 +7,14 @@ use numr::tensor::Tensor;
 use std::io::Read;
 
 pub(super) fn find_archive_layout(
-    archive: &mut zip::ZipArchive<std::fs::File>,
+    archive: &zip::ZipArchive<std::fs::File>,
 ) -> Result<(String, String)> {
     // The archive name is the single top-level directory. Find any entry
     // matching `*/data.pkl` — that tells us both the pkl path and the prefix
     // for storage entries (`{prefix}/data/0`, etc.).
-    let names: Vec<String> = (0..archive.len())
-        .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_string()))
+    let names: Vec<String> = archive
+        .file_names()
+        .filter_map(|name| name.ok().map(|n| n.into_owned()))
         .collect();
     for name in &names {
         if let Some(prefix) = name.strip_suffix("/data.pkl") {

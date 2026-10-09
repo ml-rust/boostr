@@ -141,7 +141,9 @@ impl FusedFp8TrainingOps<WgpuRuntime> for WgpuClient {
                 reason: format!("readback map error: {:?}", e),
             })?;
 
-        let data = slice.get_mapped_range();
+        let data = slice.get_mapped_range().map_err(|e| Error::KernelError {
+            reason: format!("readback get_mapped_range error: {e}"),
+        })?;
         let results: &[u32] = bytemuck::cast_slice(&data);
         let found_inf = results[0] != 0;
         let norm_sq = f32::from_bits(results[1]);

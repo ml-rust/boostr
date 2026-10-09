@@ -115,21 +115,8 @@ impl<R: Runtime<DType = DType>> EmbeddingPipeline<R> {
             return Ok(vec![vec![]; texts.len()]);
         }
 
-        // Pad to max_len (pad token = 0) and build attention mask.
-        //
-        // The attention mask is a [B, S] float32 tensor: 1.0 for real tokens,
-        // 0.0 for padding positions.  Passing it to `encode` prevents padded
-        // positions from contaminating the attention scores of real tokens.
         let batch_size = texts.len();
-        let mut flat: Vec<i64> = Vec::with_capacity(batch_size * max_len);
-        let mut mask_flat: Vec<f32> = Vec::with_capacity(batch_size * max_len);
-        for ids in &all_ids {
-            let real_len = ids.len();
-            flat.extend(ids.iter().map(|&t| t as i64));
-            flat.extend(std::iter::repeat_n(0i64, max_len - real_len));
-            mask_flat.extend(std::iter::repeat_n(1.0f32, real_len));
-            mask_flat.extend(std::iter::repeat_n(0.0f32, max_len - real_len));
-        }
+        let (flat, mask_flat) = pad_rows(&all_ids, max_len, cfg.padding_token_id);
 
         let input_tensor = Tensor::<R>::from_slice(&flat, &[batch_size, max_len], &self.device)?;
         let mask_tensor =
@@ -146,9 +133,38 @@ impl<R: Runtime<DType = DType>> EmbeddingPipeline<R> {
     }
 }
 
+/// Each row's ids right-padded to `max_len` with `pad_id`, flattened, and
+/// the matching `[B, S]` attention mask: 1.0 for real tokens, 0.0 for pads.
+///
+/// The pad must be the model's own pad token. XLM-RoBERTa numbers positions
+/// by token value, so a pad written as any other id would take a real
+/// position. The mask keeps pads out of the attention scores of real tokens.
+pub(crate) fn pad_rows(rows: &[Vec<u32>], max_len: usize, pad_id: i64) -> (Vec<i64>, Vec<f32>) {
+    let mut flat: Vec<i64> = Vec::with_capacity(rows.len() * max_len);
+    let mut mask: Vec<f32> = Vec::with_capacity(rows.len() * max_len);
+    for ids in rows {
+        let real_len = ids.len();
+        flat.extend(ids.iter().map(|&t| i64::from(t)));
+        flat.extend(std::iter::repeat_n(pad_id, max_len - real_len));
+        mask.extend(std::iter::repeat_n(1.0f32, real_len));
+        mask.extend(std::iter::repeat_n(0.0f32, max_len - real_len));
+    }
+    (flat, mask)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::embed::tests::{make_pipeline_with_distinct_positions, make_test_pipeline};
+    use super::pad_rows;
+
+    /// Pads carry the model's pad id, so XLM-RoBERTa's position ids treat
+    /// them as padding.
+    #[test]
+    fn rows_are_padded_with_the_model_pad_id() {
+        let (flat, mask) = pad_rows(&[vec![0, 7, 2], vec![0, 2]], 4, 1);
+        assert_eq!(flat, [0, 7, 2, 1, 0, 2, 1, 1]);
+        assert_eq!(mask, [1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0]);
+    }
 
     #[test]
     fn test_embed_texts_batch() {

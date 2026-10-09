@@ -8,7 +8,7 @@
 //! let batch = pipeline.embed_texts(&client, &["Hello", "World"])?; // Vec<Vec<f32>>
 //! ```
 
-mod batch;
+pub(crate) mod batch;
 mod embed;
 mod load;
 mod varlen;

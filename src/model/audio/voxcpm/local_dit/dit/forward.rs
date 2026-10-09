@@ -104,7 +104,7 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
     /// step loop), so re-deriving `mu_tok` from it on every estimator call
     /// wastes a reshape + contiguous. This is the entry point that lets a
     /// multi-step caller tokenize once and pass the same `mu_tok` to every
-    /// step; [`forward`] itself does the one-shot tokenization and delegates
+    /// step; [`forward`](Self::forward) itself does the one-shot tokenization and delegates
     /// here so single-call sites (training, tests, `voxr`) keep the
     /// original signature.
     ///

@@ -181,7 +181,7 @@ mod tests {
     }
 
     // from_gguf must select F16 on CUDA (WMMA) when the f16 feature is on, so the
-    // embed forward uses tensor cores instead of the ~50-100x slower F32 matmul.
+    // embed forward uses tensor cores instead of the slower F32 matmul.
     // No GPU needed: R::name() is a pure identifier.
     #[cfg(all(feature = "cuda", feature = "f16"))]
     #[test]

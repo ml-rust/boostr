@@ -7,8 +7,7 @@
 //! defined here.
 //!
 //! Holds `KokoroConfig`. VITS (`facebook/mms-tts-*`) has its own config in
-//! `vits.rs` — split out rather than added here to stay under the file's
-//! line cap; a new TTS family gets its own file the same way.
+//! `vits.rs`. Each TTS family gets its own file.
 //!
 //! Kokoro defaults match the `hexgrad/Kokoro-82M` checkpoint shipped on
 //! HuggingFace (82M parameters, 24 kHz output, 178-symbol phoneme
@@ -226,7 +225,7 @@ impl KokoroConfig {
 
     /// Basic sanity checks applied after parsing. Separate from
     /// `from_json_*` so that callers can decide whether to enforce (e.g.
-    /// during `load_kokoro`) or skip (e.g. during CLI `blazr list`).
+    /// during `load_kokoro`) or skip (e.g. while listing model directories).
     pub fn validate(&self) -> Result<()> {
         if self.hidden_dim == 0 || !self.hidden_dim.is_multiple_of(2) {
             return Err(Error::ModelError {

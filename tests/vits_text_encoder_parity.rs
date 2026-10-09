@@ -27,12 +27,10 @@ use std::path::PathBuf;
 mod common;
 use common::{model_fixture, skip_notice};
 
-/// The three cases measured 4.2e-6, 5.1e-6 and 6.8e-6 max abs diff — f32
-/// rounding across ~192-wide dot products, nothing structural. Keeps ~15x
-/// headroom: a wrong split point, a missing embedding scale, or a wrong
-/// attention window would all move this by 1e-2 or more (see the module
-/// docs), so anything above 1e-4 means a formula is wrong, not that the
-/// tolerance is tight.
+/// Max abs diff bound. f32 rounding across ~192-wide dot products stays far
+/// below it. A wrong split point, a missing embedding scale, or a wrong
+/// attention window moves the output by 1e-2 or more (see the module docs).
+/// Anything above 1e-4 means a formula is wrong.
 const TOL: f32 = 1e-4;
 
 fn max_abs_diff(a: &[f32], b: &[f32]) -> (f32, usize) {

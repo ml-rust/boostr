@@ -111,8 +111,8 @@ impl<R: Runtime<DType = DType>> WeightSource<R> for TcfSource<'_> {
 
     /// Keeps a block-encoded tensor PACKED: its payload reaches the device
     /// verbatim as the `QuantTensor` a GGUF file would give, which
-    /// `quant_matmul` consumes directly. A 1.2 GB Q4 file costs 1.2 GB, not
-    /// the 10 GB its f32 expansion would.
+    /// `quant_matmul` consumes directly. A Q4 file costs its quantized size,
+    /// not its f32 expansion.
     ///
     /// The ENCODING decides, never the name: a raw encoding has no packed
     /// form to hold (Section 12), so it takes the dense path. That is the

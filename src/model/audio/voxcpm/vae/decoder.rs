@@ -93,7 +93,8 @@ impl<R: Runtime<DType = DType>> AudioVaeDecoder<R> {
     /// `None` at load time keeps this at the checkpoint's own F32 (verified
     /// against PyTorch fixtures); `Some(vae_decoder_dtype)` casts every
     /// weight, so a caller feeding this decoder a latent from another dtype
-    /// must convert to THIS dtype first — see [`super::super::model::decode::VoxCpm2Model::decode_patches`].
+    /// must convert to THIS dtype first — see
+    /// [`VoxCpm2Model::decode_patches`](crate::model::audio::voxcpm::VoxCpm2Model::decode_patches).
     pub fn dtype(&self) -> DType {
         self.front_dw.dtype()
     }

@@ -12,9 +12,8 @@ use serde::{Deserialize, Serialize};
 /// value.  A single document that is longer than this limit is still
 /// processed in one forward (documents cannot be split).
 ///
-/// Tuned per hardware: 16 384 tokens fits comfortably on most 24 GB GPUs
-/// when hidden_size ≤ 768 and up to 12 layers.  Reduce to 8 192 on
-/// smaller GPUs or larger models.
+/// Sized for an encoder with hidden_size ≤ 768 and up to 12 layers.
+/// Reduce to 8 192 on smaller GPUs or larger models.
 pub const DEFAULT_MAX_TOKENS_PER_FORWARD: usize = 16384;
 
 /// Default RoPE base for local (windowed) blocks of an interleaved
@@ -152,8 +151,8 @@ pub struct EncoderConfig {
     ///
     /// Getting this wrong reads every token's position embedding two slots
     /// late. Nothing about the shapes objects (the table is longer than any
-    /// real sequence) and the model keeps working — measured against llama.cpp
-    /// on bge-m3, the sentence embedding sat at cosine 0.989 instead of 0.999.
+    /// real sequence) and the model keeps working, but the sentence embedding
+    /// drifts away from llama.cpp's on the same file.
     #[serde(default)]
     pub position_embd_offset: i64,
 
@@ -163,8 +162,7 @@ pub struct EncoderConfig {
     /// `None` means the file said nothing and the architecture default applies.
     /// This is not decorative: `bge-m3` ships a `bert`-namespace GGUF declaring
     /// `pooling_type = 2`, and mean-pooling it instead returns a usable-looking
-    /// vector that is simply not the one the model was trained to produce
-    /// (measured against llama.cpp on the same file: cosine 0.74).
+    /// vector that is simply not the one the model was trained to produce.
     #[serde(default)]
     pub declared_pooling_type: Option<u32>,
 

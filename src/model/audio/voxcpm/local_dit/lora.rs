@@ -20,7 +20,7 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
     /// every target up front with [`LoraTargets::ensure_all_match`] against
     /// this tree's OWN full candidate set — [`Self::lora_projection_names`],
     /// NOT `self.named_parameters()` — before delegating to
-    /// [`Self::apply_lora_unchecked`].
+    /// `Self::apply_lora_unchecked`.
     pub fn apply_lora(
         &mut self,
         targets: &LoraTargets,
@@ -44,7 +44,7 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
     /// EMPTY for all of them and a valid target would be rejected as
     /// matching nothing. `norm`/`rope`/`time_embeddings` carry no
     /// [`crate::nn::MaybeLoraLinear`] projections, so none contributes a
-    /// name. Matches [`Self::apply_lora_unchecked`]'s walk exactly: each
+    /// name. Matches `Self::apply_lora_unchecked`'s walk exactly: each
     /// name is joined via the SAME [`push_projection_name`] helper or the
     /// SAME [`LoraTargets::join`]-built prefix `apply_lora_unchecked` passes
     /// to each child, so a path here is never built by separately

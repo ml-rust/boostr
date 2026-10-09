@@ -187,7 +187,7 @@ impl<R: Runtime<DType = DType>> LocalEncoder<R> {
     /// every target up front with [`LoraTargets::ensure_all_match`] against
     /// this tree's OWN full candidate set (`self.named_parameters()`,
     /// joined with `prefix`) before delegating to
-    /// [`Self::apply_lora_unchecked`].
+    /// `Self::apply_lora_unchecked`.
     pub fn apply_lora(
         &mut self,
         targets: &LoraTargets,
@@ -210,7 +210,7 @@ impl<R: Runtime<DType = DType>> LocalEncoder<R> {
     /// EMPTY for all of them and a valid target would be rejected as
     /// matching nothing. `special_token`/`norm` carry no
     /// [`MaybeLoraLinear`] projections, so neither contributes a name.
-    /// Matches [`Self::apply_lora_unchecked`]'s walk exactly: `in_proj` is
+    /// Matches `Self::apply_lora_unchecked`'s walk exactly: `in_proj` is
     /// joined straight onto `prefix` via the SAME
     /// [`crate::nn::push_projection_name`] helper `apply_lora`'s
     /// [`adapt_if_targeted`] call uses, and each layer is joined at the

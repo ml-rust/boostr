@@ -37,7 +37,7 @@ pub trait WeightSource<R: Runtime<DType = DType>> {
     /// dense tensor", this means "give me whatever you have, quantized if
     /// that is how it is stored". A GGUF source returns
     /// [`Weight::Quantized`] for a block-quantized tensor, which is what
-    /// keeps a 1.2 GB Q4_K file from expanding to a full-size F32 weight set
+    /// keeps a Q4_K file from expanding to a full-size F32 weight set
     /// in memory; the caller then multiplies it with `quant_matmul` instead
     /// of `matmul`.
     ///

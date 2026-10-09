@@ -40,7 +40,7 @@ fn super_pair(precision: SuperPrecision, max_d: f32, max_abs_m: f32) -> Option<(
     Some((super_d, super_m, pre_divided))
 }
 
-/// Quantizes then dequantizes one super-block (up to [`SUPER_BLOCK`]
+/// Quantizes then dequantizes one super-block (up to `SUPER_BLOCK`
 /// elements, grouped into up to [`GROUPS_PER_SUPER`] groups of
 /// `GROUP_SIZE`) under `precision`.
 ///
@@ -102,9 +102,9 @@ fn quantize_super_block(values: &[f32], weights: &[f32], precision: SuperPrecisi
 }
 
 /// Quantizes then dequantizes every value in `values` against `precision`,
-/// grouping [`SUPER_BLOCK`] consecutive elements per row exactly like
+/// grouping `SUPER_BLOCK` consecutive elements per row exactly like
 /// [`super::super::two_level::two_level_codebook_round_trip`] — same tail
-/// handling (a super-block shorter than [`SUPER_BLOCK`] is quantized on its
+/// handling (a super-block shorter than `SUPER_BLOCK` is quantized on its
 /// own actual groups, never padded), same never-crosses-a-row-boundary
 /// rule, same `in_features == 0` no-op.
 ///

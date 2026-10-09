@@ -47,7 +47,7 @@ where
         Ok(Self { layers })
     }
 
-    /// Convenience constructor matching the positional-arg API used by blazr.
+    /// Convenience constructor taking every dimension as a positional argument.
     #[allow(clippy::too_many_arguments)]
     pub fn new_positional(
         num_layers: usize,

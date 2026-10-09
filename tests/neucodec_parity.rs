@@ -5,13 +5,14 @@
 //! `ResidualFSQ`,
 //! `VocosBackbone` and `ISTFTHead` on the released weights and dumping raw
 //! little-endian f32 blobs. They are NOT checked in (the decoder weights alone
-//! are ~560 MB and the checkpoint lives outside the repo), so these tests are
+//! are large and the checkpoint lives outside the repo), so these tests are
 //! skipped unless both of these are present:
 //!
 //! * `NEUCODEC_REF_DIR` — directory holding `ref_input.f32`, `ref_x_pred.f32`,
 //!   `ref_waveform.f32`, `ref_fsq_indices.f32`, `ref_fsq_out.f32`,
 //!   `ref_e2e_waveform.f32`
-//! * the checkpoint at `NEUCODEC_CHECKPOINT` (defaults to the local path)
+//! * the checkpoint at `NEUCODEC_CHECKPOINT` (defaults to
+//!   `neucodec/model.safetensors` under `BOOSTR_MODELS_DIR`)
 //!
 //! Regenerate with `dump_reference.py` (see that script's docstring).
 //!

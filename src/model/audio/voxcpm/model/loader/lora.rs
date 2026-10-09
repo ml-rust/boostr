@@ -50,15 +50,15 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
     /// dense `Var<R>`", which on a QUANTIZED (GGUF) checkpoint is nearly
     /// EMPTY: `MaybeQuantLinear::named_parameters()` returns nothing for a
     /// block-quantized projection (the weight has no `Var<R>`, only packed
-    /// bytes `quant_matmul` reads directly). Measured on a real VoxCPM2
-    /// GGUF, that shrank the candidate set from 577 (dense) to 131,
+    /// bytes `quant_matmul` reads directly). On a real VoxCPM2 GGUF, that
+    /// shrinks the candidate set to a fraction of the dense one,
     /// rejecting a perfectly valid `["q_proj", "v_proj"]` target with
     /// "matched no projection by dot-segment name" — QLoRA's entire
     /// reason to exist is adapting a quantized base, so that checkpoint is
     /// exactly the one this validation must not reject.
     /// [`Self::lora_projection_names`] instead answers "which projections
     /// this tree's `MaybeLoraLinear` FIELDS structurally are", which is the
-    /// same 577-projection set on every checkpoint dtype: dense,
+    /// same projection set on every checkpoint dtype: dense,
     /// block-quantized, or decomposed-quantized. The wrapping itself was
     /// never the bug — [`LoraLinear::new`](crate::nn::LoraLinear::new) sizes
     /// its adapter from [`MaybeQuantLinear::shape`](crate::nn::MaybeQuantLinear::shape),

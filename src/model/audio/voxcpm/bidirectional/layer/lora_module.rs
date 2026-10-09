@@ -79,7 +79,7 @@ impl<R: Runtime<DType = DType>> BidirectionalLayer<R> {
 /// Names ARE the field names (`input_layernorm`, `self_attn.*`,
 /// `post_attention_layernorm`, `mlp.*`) — this matches the shared
 /// `{layer_prefix}.*` checkpoint layout
-/// ([`crate::model::audio::voxcpm::bidirectional::loader`]) exactly, so the
+/// (`crate::model::audio::voxcpm::bidirectional::loader`) exactly, so the
 /// owning `LocalEncoder`/`LocalDit` need only prefix by `{layer_prefix}` (a
 /// numeric layer index under `encoder.layers`/`decoder.layers`) to reach the
 /// full checkpoint key.

@@ -40,10 +40,9 @@ impl<R: Runtime<DType = DType>> EmbeddingPipeline<R> {
     ///
     /// BERT-family encoders are trained on `[CLS] tokens [SEP]` and never on a
     /// bare token run, so feeding one is out-of-distribution input. It does not
-    /// fail loudly — it quietly degrades the representation. Measured on
-    /// `all-MiniLM-L6-v2`, mean-pooled embeddings of four unrelated sentences
-    /// sat at ~0.029 cosine distance without the wrapper and spread to ~0.20
-    /// with it: without this, dense retrieval ranks near-randomly while looking
+    /// fail loudly — it quietly degrades the representation. Without the
+    /// wrapper, mean-pooled embeddings of unrelated sentences collapse close
+    /// together, so dense retrieval ranks near-randomly while looking
     /// perfectly healthy end to end.
     ///
     /// The tokenizer's own [`splintr::SpecialPolicy`] owns which tokens those

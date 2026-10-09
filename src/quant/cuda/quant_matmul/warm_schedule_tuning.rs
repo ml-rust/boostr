@@ -5,7 +5,7 @@
 //! or caching when `client`'s stream is inside a capture — a probe records
 //! events and synchronizes, which would invalidate the capture. Call
 //! [`warm_schedule_tuning`] once per device after the model loads and
-//! before the first capture; blazr's warmup does this. Every probe it runs
+//! before the first capture, e.g. in an inference server's warmup. Every probe it runs
 //! is idempotent: a key already in the tune cache is read, not re-measured,
 //! so calling it more than once, or on a device the checkpoint's formats
 //! turn out not to need, costs one cache read and nothing else.

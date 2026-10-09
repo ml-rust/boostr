@@ -97,8 +97,8 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
     /// Every row's caches share one `max_length`, which must be at least
     /// `S_max` and must leave room for the LONGEST patch budget any row will
     /// generate: the decode loop steps every row at the same position.
-    /// Rows come back in input order, `[B, ...]`, with
-    /// [`PrefillState::kv_start`] set when any row is padded.
+    /// Rows come back in input order, `[B, ...]`, with the left padding of
+    /// [`PrefillState::lanes`] set when any row is padded.
     ///
     /// A single row, or rows of equal length, run the unpadded kernels and
     /// match [`prefill`](Self::prefill) exactly.

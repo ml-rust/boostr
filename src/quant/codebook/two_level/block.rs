@@ -48,7 +48,7 @@ pub enum SuperPrecision {
     /// TCF's `Q6S16D_T64` as originally specified, before its code
     /// reservation was retired: the `Bf16` arm minus its
     /// most-negative code, so 63 levels not 64. The only arm on
-    /// [`RESERVED_63`], against `Bf16` it isolates the retired reservation's
+    /// `RESERVED_63`, against `Bf16` it isolates the retired reservation's
     /// cost with the super-scale held fixed.
     Bf16Reserved,
 }
@@ -79,7 +79,7 @@ pub(in crate::quant::codebook) fn round_f16(x: f32) -> f32 {
     f16::from_f32(x).to_f32()
 }
 
-/// Quantizes then dequantizes one super-block (up to [`SUPER_BLOCK`]
+/// Quantizes then dequantizes one super-block (up to `SUPER_BLOCK`
 /// elements, grouped into up to [`GROUPS_PER_SUPER`] groups of
 /// [`GROUP_SIZE`]) under `precision`.
 ///
@@ -161,9 +161,9 @@ fn quantize_super_block(values: &[f32], weights: &[f32], precision: SuperPrecisi
 }
 
 /// Quantizes then dequantizes every value in `values` against `precision`,
-/// grouping [`SUPER_BLOCK`] consecutive elements per row exactly like
+/// grouping `SUPER_BLOCK` consecutive elements per row exactly like
 /// [`super::super::roundtrip::codebook_round_trip`] — same tail handling (a
-/// super-block shorter than [`SUPER_BLOCK`] is quantized on its own actual
+/// super-block shorter than `SUPER_BLOCK` is quantized on its own actual
 /// groups, never padded), same never-crosses-a-row-boundary rule, same
 /// `in_features == 0` no-op.
 pub fn two_level_codebook_round_trip(

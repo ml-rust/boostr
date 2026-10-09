@@ -379,9 +379,9 @@ fn assert_matmul_parity_m(
     );
 }
 
-/// Lossy-but-correct scores near 1.0. A wrong block layout collapses toward 0:
-/// `tests/quant_vs_f16_matrix.rs` measured 0.03 for one. The formats measured
-/// here score 0.999884 and above, so the floor sits in the empty gap between.
+/// Lossy-but-correct scores near 1.0. A wrong block layout collapses toward 0
+/// (see `tests/quant_vs_f16_matrix.rs`). Every format here scores above this
+/// floor, so the floor sits in the empty gap between.
 const COSINE_FLOOR: f64 = 0.999;
 
 /// Cosine gate for formats whose CUDA `quant_matmul` quantizes the activation

@@ -1,7 +1,7 @@
 //! SwiGLU MLP over [`MaybeRotatedLinear`] projections: the `qwen35` FFN.
 //!
 //! `forward(x) = down(silu(gate(x)) * up(x))`, the same shape as
-//! [`crate::model::llama::model::blocks::mlp::LlamaMlp`].
+//! `crate::model::llama::model::blocks::mlp::LlamaMlp`.
 //!
 //! The fused `quant_swiglu` kernel `LlamaMlp` reaches for still is not used
 //! here: `gate` and `up` may be Hadamard-rotated, and that kernel reads the

@@ -20,7 +20,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// with [`LoraTargets::ensure_all_match`] against this tree's OWN full
     /// candidate set — [`Self::lora_projection_names`], NOT
     /// `self.named_parameters()` — before delegating to
-    /// [`Self::apply_lora_unchecked`].
+    /// `Self::apply_lora_unchecked`.
     ///
     /// The candidate set MUST be structural (every projection this model
     /// COULD adapt), not parameter-derived (every projection that HAPPENS
@@ -46,9 +46,9 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// `prefix` — INDEPENDENT of whether each layer's projections are
     /// dense, block-quantized, or decomposed-quantized. `embed_tokens`/
     /// `norm` carry no [`crate::nn::MaybeLoraLinear`] projections, so
-    /// neither contributes a name, matching [`Self::apply_lora_unchecked`]'s
+    /// neither contributes a name, matching `Self::apply_lora_unchecked`'s
     /// walk exactly: each layer is joined at the SAME `"layers.{i}"` prefix
-    /// [`Self::apply_lora_unchecked`] passes to
+    /// `Self::apply_lora_unchecked` passes to
     /// [`crate::model::audio::voxcpm::minicpm4::layer::MiniCpm4Layer::apply_lora`],
     /// so a path here is never built by separately hand-written logic.
     pub fn lora_projection_names(&self, prefix: &str) -> Vec<String> {
@@ -294,9 +294,9 @@ mod tests {
         assert!(err.to_string().contains("roj"), "got {err}");
     }
 
-    /// The regression this fix targets: measured on a real VoxCPM2 GGUF,
-    /// `named_parameters()` shrank from 577 candidates (dense) to 131
-    /// (quantized), rejecting a valid `["q_proj", "v_proj"]` target as matching
+    /// The regression this fix targets: on a real VoxCPM2 GGUF,
+    /// `named_parameters()` shrinks to a fraction of the dense candidate set,
+    /// rejecting a valid `["q_proj", "v_proj"]` target as matching
     /// nothing — QLoRA's entire reason to exist is adapting a quantized base, so
     /// that checkpoint is exactly the one `apply_lora` must not reject. Pinned
     /// here at the smallest reproducing shape: every projection in every layer

@@ -70,11 +70,10 @@ __global__ void quant_matmul_q4_0_f32(
 //
 // One thread per output element re-reads the ENTIRE weight row from global
 // memory for every batch row, so a batch of M costs M full passes over the
-// weight. That is invisible at M = 1 and ruinous at M = 512: measured against
-// llama.cpp's tiled path at N = 4096, K = 14336, the untiled form was 192x
-// slower at M = 512 while matching it at M = 1. The weight is the largest
-// operand in a quantized matmul, so reading it once per BLOCK rather than once
-// per OUTPUT is the whole game.
+// weight. That is invisible at M = 1 and ruinous at large M: the untiled form
+// matches llama.cpp's tiled path at M = 1 and falls far behind it at M = 512.
+// The weight is the largest operand in a quantized matmul, so reading it once
+// per BLOCK rather than once per OUTPUT is the whole game.
 //
 // # The tiling
 //
@@ -110,11 +109,10 @@ __global__ void quant_matmul_q4_0_f32(
 //
 // One thread per output element re-reads the ENTIRE weight row from global
 // memory for every batch row, so a batch of M costs M full passes over the
-// weight. That is invisible at M = 1 and ruinous at M = 512: measured against
-// llama.cpp's tiled path at N = 4096, K = 14336, the untiled form was 192x
-// slower at M = 512 while matching it at M = 1. The weight is the largest
-// operand in a quantized matmul, so reading it once per BLOCK rather than once
-// per OUTPUT is the whole game.
+// weight. That is invisible at M = 1 and ruinous at large M: the untiled form
+// matches llama.cpp's tiled path at M = 1 and falls far behind it at M = 512.
+// The weight is the largest operand in a quantized matmul, so reading it once
+// per BLOCK rather than once per OUTPUT is the whole game.
 //
 // # The tiling
 //

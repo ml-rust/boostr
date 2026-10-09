@@ -208,8 +208,8 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
     /// factor makes every op downstream of it tracked
     /// (`numr::autograd::var_ops`), and dropping that graph after inference
     /// (nothing ever calls `backward`) recurses over every recorded node —
-    /// deep enough to overflow a bounded worker stack (2 MB tokio workers,
-    /// observed in blazr). Call `set_trainable(false)` right after loading a
+    /// deep enough to overflow a bounded worker stack (such as a 2 MB tokio
+    /// worker). Call `set_trainable(false)` right after loading a
     /// frozen adapter; a caller that resumes fine-tuning it calls
     /// `set_trainable(true)` instead.
     pub fn set_trainable(&mut self, trainable: bool) {

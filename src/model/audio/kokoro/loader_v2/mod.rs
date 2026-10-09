@@ -1,11 +1,11 @@
 //! Tier-3 Kokoro loader — reads a full `hexgrad/Kokoro-82M` checkpoint into a
-//! [`KokoroModelV2`].
+//! [`KokoroModelV2`](super::kokoro_v2::KokoroModelV2).
 //!
 //! Depends on the tier-1 helpers in [`super::loader`] (`load_plain_conv1d`,
 //! `load_weight_normed_conv1d`, `load_bilstm`, `load_linear_tensors`,
 //! `load_weight_norm_pair`). Builds up tier-2 helpers for each Kokoro
 //! primitive (`AdaIn1d`, `AdaLayerNorm`, `AdainResBlk1d`, `AdaINResBlock1`,
-//! `AlbertLayer`, ALBERT embeddings, …) in [`primitives`], then tier-3
+//! `AlbertLayer`, ALBERT embeddings, …) in `primitives`, then tier-3
 //! [`full::load_kokoro_v2`] stitches everything under the confirmed checkpoint
 //! prefixes.
 //!

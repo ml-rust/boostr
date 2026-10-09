@@ -77,9 +77,9 @@ pub fn dequant_q5k(blocks: &[u8], output: &mut [f32]) {
         // Both index schemes below mirror llama.cpp's `dequantize_row_q5_K`
         // exactly; getting either wrong scrambles which weight each quantum
         // belongs to, which does not fail loudly — it yields a plausible-looking
-        // tensor (correct RMS, correct shape) whose values are wrong. Measured
-        // against an f16 build of the same model, a mis-indexed Q5_K tensor
-        // scored cosine 0.03 against its reference while Q4_K/Q6_K scored 0.997+.
+        // tensor (correct RMS, correct shape) whose values are wrong. Against
+        // an f16 build of the same model, a mis-indexed Q5_K tensor is
+        // uncorrelated with its reference.
         for j in 0..8 {
             let dl = d * scales[j] as f32;
             let ml = dmin * mins[j] as f32;
@@ -207,7 +207,7 @@ mod tests {
     /// sharing a 32-byte run), and the fifth bit as `qh[idx/8] >> (idx%8)`
     /// (instead of `qh[l] >> j`). Neither failed loudly — the tensor kept a
     /// plausible shape and RMS. Against an f16 build of the same model the
-    /// mis-decoded weights scored cosine 0.03; correct decoding scores 0.999.
+    /// mis-decoded weights are uncorrelated with the reference.
     #[test]
     fn dequant_q5k_follows_llama_cpp_block_layout() {
         // One block: d=1.0, dmin=0.0, all scales=1, all mins=0.

@@ -17,7 +17,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
     /// `x: [batch, seq, hidden]` -> `[batch, seq, hidden]`.
     ///
     /// `rope` is `None` only for a NoPE (`no_rope`) stack, which has no table;
-    /// [`MiniCpm4Attention`] rejects a `None` it is not entitled to.
+    /// [`MiniCpm4Attention`](crate::model::audio::voxcpm::minicpm4::MiniCpm4Attention) rejects a `None` it is not entitled to.
     pub fn forward<C>(&self, client: &C, x: &Var<R>, rope: Option<&RoPE<R>>) -> Result<Var<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
@@ -49,7 +49,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
     /// residual after attention, with `pending` already folded in), and
     /// `mlp_out` is this layer's UNADDED MLP output — the caller passes it as
     /// `pending` to the NEXT layer, or folds it into the model's final norm
-    /// after the last layer (same fold [`forward`] does for its own output).
+    /// after the last layer (same fold [`forward`](Self::forward) does for its own output).
     ///
     /// Each of the two fuse points (`pending` into `input_layernorm`, and the
     /// attention residual into `post_attention_layernorm`) is taken only when

@@ -13,7 +13,7 @@
 //!
 //! # The scale search — same shape as `d*sumqx` maximisation elsewhere
 //!
-//! [`fit_subblock_scale`] is the part of `quantize_row_iq4_nl_impl` that runs
+//! `fit_subblock_scale` is the part of `quantize_row_iq4_nl_impl` that runs
 //! BEFORE the branch on `super_block_size/block_size`, so IQ4_XS calls it once
 //! per sub-block rather than duplicating it. `ntry = 7` (fixed, matching
 //! `quantize_iq4_nl`'s call site) sweeps 15 candidate scales

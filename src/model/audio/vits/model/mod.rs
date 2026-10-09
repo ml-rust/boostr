@@ -1,5 +1,5 @@
 //! `VitsModel`: exact port of HF `VitsModel.forward` (inference path only).
-//! See [`core`] for construction and [`synthesize`] for the forward pass.
+//! See `core` for construction and `synthesize` for the forward pass.
 
 mod client;
 mod core;

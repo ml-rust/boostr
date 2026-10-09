@@ -1,4 +1,4 @@
-//! Unit B of the VoxCPM2 end-to-end orchestrator: the per-patch generation
+//! Generate stage of the VoxCPM2 end-to-end orchestrator: the per-patch generation
 //! loop that drives a finished [`PrefillState`] — one row or a left-padded
 //! batch — until every row has hit a stop token or its cap.
 //!

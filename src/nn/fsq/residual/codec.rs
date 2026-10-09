@@ -22,8 +22,8 @@
 //! `bound(bound(z)) != bound(z)` wherever `offset != 0` (i.e. every even level,
 //! which includes NeuCodec's `levels = [4; 8]`).
 //!
-//! Measured against the real NeuCodec checkpoint, collapsing this to a single
-//! `bound` changes **43.75% of the emitted indices**. Anyone tempted to delete
+//! On the real NeuCodec checkpoint, collapsing this to a single `bound`
+//! changes a large share of the emitted indices. Anyone tempted to delete
 //! the pre-`bound` on line "seed the residual" below is introducing that bug.
 //!
 //! The decode path ([`ResidualFsq::decode`], lucidrains/vector-quantize-pytorch's `get_output_from_indices`)
@@ -78,8 +78,8 @@ impl<R: Runtime<DType = DType>> ResidualFsq<R> {
             reason: "residual FSQ has no layers".to_string(),
         })?;
         // Seed the residual with the PURE bound. Deleting this line (or reusing
-        // the already-bounded value from inside the loop) silently changes 43.75%
-        // of NeuCodec's indices — `bound` is not idempotent.
+        // the already-bounded value from inside the loop) silently changes a
+        // large share of NeuCodec's indices — `bound` is not idempotent.
         let mut residual = first.bound(&projected, client)?;
 
         let mut quantized_out: Option<Var<R>> = None;
@@ -239,7 +239,7 @@ mod tests {
     ///
     /// If someone "simplifies" the pre-bound away, this test fails — which is the
     /// entire point: on the real NeuCodec checkpoint that change silently rewrites
-    /// 43.75% of emitted indices.
+    /// a large share of emitted indices.
     #[test]
     fn test_encode_applies_double_bound() {
         let (residual, client, device) = neucodec_residual();

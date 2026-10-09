@@ -140,7 +140,7 @@ pub fn load_linear_tensors<R: Runtime<DType = DType>>(
 /// Kokoro voice files are shaped `[T, 1, 256]` where `T ≈ 510` and the last
 /// dim is the concatenation `[decoder_style(128) | predictor_style(128)]`.
 /// Indexing by `(phoneme_count - 1)` picks the row that was tuned for that
-/// utterance length; see [`select_voice_style`].
+/// utterance length; see [`select_voice_style`](super::voice_style::select_voice_style).
 ///
 /// * `.safetensors` — expects a single tensor named `style` (or the only
 ///   tensor in the file).
@@ -185,7 +185,8 @@ pub fn load_voice_pack<R: Runtime<DType = DType>>(
 }
 
 /// Deprecated legacy alias — kept so existing callers still compile. Prefer
-/// [`load_voice_pack`] + [`select_voice_style`] + [`split_voice_style`].
+/// [`load_voice_pack`] + [`select_voice_style`](super::select_voice_style) +
+/// [`split_voice_style`](super::split_voice_style).
 #[deprecated(note = "Use load_voice_pack + select_voice_style + split_voice_style")]
 pub fn load_voice_style<R: Runtime<DType = DType>>(
     path: impl AsRef<Path>,

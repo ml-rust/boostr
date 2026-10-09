@@ -20,7 +20,7 @@
 //!   a checkpoint ships without noise weights.
 //! * [`IStftNetGenerator::forward_cpu_full`] — the complete CPU vocoder used in
 //!   production, including the harmonic-excitation → STFT → per-stage noise
-//!   residual path. The STFT analysis uses [`crate::model::audio::stft`].
+//!   residual path. The STFT analysis uses [`crate::model::audio::stft()`].
 //!
 //! Full path (`forward_cpu_full`):
 //!

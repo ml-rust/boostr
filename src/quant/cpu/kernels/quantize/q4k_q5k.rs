@@ -63,7 +63,7 @@ pub fn quantize_q4k(x: &[f32], out: &mut [u8]) {
 /// The low nibbles follow Q4_K exactly. The fifth bit lives in `qh`, indexed by
 /// ELEMENT within the sub-block, with the BIT position being the sub-block
 /// index — `qh[l] >> j`. It is not a flat bitstream over the 256 values;
-/// getting it wrong scored cosine 0.03 against a reference build.
+/// getting it wrong leaves the output uncorrelated with a reference build.
 pub fn quantize_q5k(x: &[f32], out: &mut [u8]) {
     quantize_q5k_with(x, out, &Q5K_SEARCH)
 }

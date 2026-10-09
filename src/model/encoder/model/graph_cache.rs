@@ -17,7 +17,7 @@ use numr::tensor::Tensor;
 
 /// Maximum number of distinct `(batch_size, seq_len)` shapes cached per encoder.
 ///
-/// Workloads typically hit two shapes (reranker B=4 S≈500, embedder B=64 S≈128).
+/// A workload typically hits a few shapes, one per batch geometry it serves.
 pub const GRAPH_CACHE_CAP: usize = 16;
 
 /// A captured encoder forward for one `(batch_size, seq_len)` shape.

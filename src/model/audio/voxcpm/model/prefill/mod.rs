@@ -1,4 +1,4 @@
-//! Unit A of the VoxCPM2 end-to-end orchestrator: reference and prompt
+//! Prefill stage of the VoxCPM2 end-to-end orchestrator: reference and prompt
 //! audio encoding and the deterministic two-LM prefill, for one row or a
 //! left-padded batch.
 //!
@@ -43,7 +43,7 @@
 //!   is.
 //! - Both KV caches come back primed to `current_length == S_max`. The later
 //!   sampling loop advances ONE shared position counter, starting at
-//!   [`PrefillState::position`] (`== S_max`), across both caches.
+//!   the `lanes` position of [`PrefillState`] (`== S_max`), across both caches.
 //! - A batch of one row, or a batch whose rows all have the same length,
 //!   carries `kv_start == None` and runs the exact unpadded kernels.
 //!

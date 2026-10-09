@@ -184,7 +184,9 @@ where
     /// `Snake` alphas, sr-cond embeds) to that dtype; `None` keeps the
     /// checkpoint's own F32, byte-identical to the pre-cast behavior
     /// verified against PyTorch fixtures. The encoder has no such option —
-    /// see [`super::encoder::AudioVaeEncoder::from_checkpoint`]'s docs for
+    /// see
+    /// [`AudioVaeEncoder::from_checkpoint`](crate::model::audio::voxcpm::vae::AudioVaeEncoder::from_checkpoint)'s
+    /// docs for
     /// why the two are not symmetric.
     pub fn from_checkpoint<P: AsRef<Path>>(
         path: P,

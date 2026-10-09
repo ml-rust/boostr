@@ -1,8 +1,8 @@
 //! Kaldi-compatible log-mel filterbank frontend for NeuCodec's semantic branch.
 //!
 //! Bit-for-bit target: HuggingFace `SeamlessM4TFeatureExtractor`. See
-//! [`pipeline`] for the extraction pipeline and what it deliberately omits,
-//! [`window`] for the analysis window, and [`filterbank`] for the mel scale
+//! `pipeline` for the extraction pipeline and what it deliberately omits,
+//! `window` for the analysis window, and `filterbank` for the mel scale
 //! and triangulation. Every convention has a plausible-but-wrong alternative
 //! that still produces correctly *shaped* output; each is called out at its
 //! definition with what breaks if it is changed.

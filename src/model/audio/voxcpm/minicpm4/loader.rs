@@ -100,7 +100,7 @@ where
     /// Load from an ALREADY-OPEN checkpoint (safetensors or GGUF — see
     /// [`WeightSource`]).
     ///
-    /// The VoxCPM2 orchestrator loads seven sub-models out of one 4.3 GB
+    /// The VoxCPM2 orchestrator loads seven sub-models out of one
     /// file; going through `from_safetensors_with` would reopen and re-parse
     /// that file's header once per sub-model, so it opens the source once and
     /// hands the same `&mut` to each.

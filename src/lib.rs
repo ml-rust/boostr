@@ -60,7 +60,7 @@ pub use numr::error::{Error as NumrError, Result as NumrResult};
 pub use numr::runtime::{Runtime, RuntimeClient};
 pub use numr::tensor::Tensor;
 
-// Re-export runtime types for convenience (blazr uses boostr::CpuRuntime, etc.)
+// Re-export runtime types so a caller can name `boostr::CpuRuntime` and friends
 pub use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 #[cfg(feature = "cuda")]
 pub use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
@@ -70,10 +70,10 @@ pub use numr::autograd;
 pub use numr::runtime;
 pub use numr::tensor;
 
-// Re-export TensorOps as a trait alias that blazr uses for client bounds
+// Re-export TensorOps as a trait alias for a caller's client bounds
 pub use ops::TensorOps;
 
-// Re-export MoE expert weight types for blazr's expert offloading
+// Re-export MoE expert weight types for a caller's expert offloading
 pub use model::ExpertWeights;
 
 // Re-export the embedding pipeline for sentence embedding use cases
@@ -82,7 +82,7 @@ pub use model::encoder::{EmbeddingPipeline, Encoder, EncoderClient, EncoderConfi
 // Re-export IndexingOps for KV cache bounds
 pub use numr::ops::traits::IndexingOps;
 
-// Re-export ScalarOps for blazr's temperature scaling
+// Re-export ScalarOps for a caller's temperature scaling
 pub use numr::ops::ScalarOps;
 
 // Re-export HostCopyOps so a caller can write a pre-allocated device buffer in
@@ -90,7 +90,7 @@ pub use numr::ops::ScalarOps;
 // written — without a direct numr dependency.
 pub use numr::ops::HostCopyOps;
 
-// Re-export numr ops needed by blazr's Mamba2 inference path
+// Re-export numr ops a caller's Mamba2 inference path needs
 pub use numr::ops::{
     ActivationOps, BinaryOps, ConvOps, NormalizationOps, TypeConversionOps, UnaryOps,
 };

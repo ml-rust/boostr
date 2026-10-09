@@ -50,7 +50,7 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
             + ConditionalOps<R>
             + DequantOps<R>,
     {
-        let profile = std::env::var("BLAZR_PROFILE").is_ok();
+        let profile = std::env::var("BOOSTR_PROFILE").is_ok();
         let device = input_ids.device();
         let rc = R::default_client(device);
 

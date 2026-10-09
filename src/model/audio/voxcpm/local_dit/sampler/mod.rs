@@ -40,7 +40,7 @@
 //!   `use_cfg_zero_star && step <= zero_init_steps`, the velocity is zero, the
 //!   estimator is never evaluated, and `x` is returned unchanged — but `t` and
 //!   `dt` still advance.
-//! - **The `1e-8` in [`optimized_scale`] sits INSIDE the denominator sum**,
+//! - **The `1e-8` in `optimized_scale` sits INSIDE the denominator sum**,
 //!   added to `sum(v_uncond^2)` before the divide. Adding it after the divide,
 //!   or to the numerator, changes the answer whenever the velocities are near
 //!   orthogonal.
@@ -68,7 +68,6 @@
 //! [`LocalDit::forward`]: crate::model::audio::voxcpm::local_dit::LocalDit::forward
 //! [`LocalDitConfig::mean_mode`]:
 //!     crate::model::audio::voxcpm::local_dit::LocalDitConfig::mean_mode
-//! [`optimized_scale`]: guidance::optimized_scale
 
 mod euler;
 #[cfg(feature = "cuda")]

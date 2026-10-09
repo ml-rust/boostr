@@ -156,7 +156,7 @@ fn refit_affine(
     Some((d as f32, m as f32))
 }
 
-/// Quantizes then dequantizes one group of up to [`GROUP_SIZE`] weights
+/// Quantizes then dequantizes one group of up to `GROUP_SIZE` weights
 /// against `codebook`'s affine reconstruction `m + d * levels()[code]`.
 ///
 /// - `weights[i]` scores element `i`; a short `weights` slice treats a
@@ -225,7 +225,7 @@ fn quantize_group_affine(values: &[f32], weights: &[f32], codebook: AffineCodebo
 }
 
 /// Quantizes then dequantizes every value in `values` against `codebook`,
-/// grouping [`GROUP_SIZE`] consecutive elements per row exactly like
+/// grouping `GROUP_SIZE` consecutive elements per row exactly like
 /// [`super::codebook_round_trip`] — same tail handling, same
 /// never-crosses-a-row-boundary rule, same `in_features == 0` no-op. See
 /// that function's docs for the full contract, which this mirrors unchanged.

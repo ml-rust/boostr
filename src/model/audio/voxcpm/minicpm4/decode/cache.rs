@@ -40,7 +40,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// attention reads the cache buffer at its ALLOCATED length.
     ///
     /// Dtype and device come from the first layer's `k_proj`. See
-    /// [`MiniCpm4Attention::kv_dtype_device`], which reports that
+    /// `MiniCpm4Attention::kv_dtype_device`, which reports that
     /// projection's OUTPUT dtype (F32 for a quantized weight).
     ///
     /// # Errors

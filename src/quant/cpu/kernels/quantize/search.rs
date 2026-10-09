@@ -3,10 +3,9 @@
 //! A block format stores one scale per sub-block and a small integer per
 //! element. The naive choice is absmax: `scale = max|x| / nmax`, which forces
 //! the single largest magnitude in the sub-block to land exactly on the top
-//! level and lets every other element absorb the rounding. That is the choice
-//! compressr shipped, and it measured 7.85% relative RMS on a Q4_K conversion
-//! where llama.cpp's own output measured 7.15% — same format, same block
-//! geometry, same theoretical floor, ~9% of the accuracy given away.
+//! level and lets every other element absorb the rounding. On a Q4_K
+//! conversion it loses to llama.cpp's own output — same format, same block
+//! geometry, same theoretical floor, accuracy given away.
 //!
 //! llama.cpp instead SEARCHES: it sweeps a small family of candidate scales
 //! around the absmax choice, and for each candidate solves the weighted

@@ -18,7 +18,7 @@
 /// Map a GGUF tensor name to its HuggingFace equivalent for `arch`
 /// (`general.architecture`).
 ///
-/// `Some("qwen35")` routes `blk.N.*` names through [`map_qwen35_layer_suffix`]
+/// `Some("qwen35")` routes `blk.N.*` names through `map_qwen35_layer_suffix`
 /// first. Every other `arch`, and `None`, is [`gguf_to_hf_name`] unchanged.
 pub fn gguf_to_hf_name_for_arch(arch: Option<&str>, name: &str) -> String {
     if arch == Some("qwen35")

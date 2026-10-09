@@ -791,13 +791,12 @@ fn assert_paged_bwd_kv_parity(
         // RATIO, not the absolute tolerance (which stays wide enough to
         // tolerate real cancellation, see `paged_bwd_tol`), is what actually
         // detects a return to per-(q_row, k_idx, d) half accumulation:
-        // measured, that regression put dK/dV up to ~780x less accurate than
-        // dQ at the same shape; the current one-atomic-per-Q-block kernel
-        // measures 2.8x (F16) to 6.7x (BF16). 25x is chosen to give the
-        // current numbers real headroom (>3x above the worst measured 6.7x)
-        // while staying more than an order of magnitude below the pre-fix
-        // 780x, so ordinary kernel/compiler variation will not trip it but a
-        // real regression to per-element rounding will.
+        // that regression put dK/dV orders of magnitude less accurate than dQ
+        // at the same shape, while the current one-atomic-per-Q-block kernel
+        // stays within a small multiple. 25x gives the current kernel real
+        // headroom while staying far below the pre-fix ratio, so ordinary
+        // kernel/compiler variation will not trip it but a real regression to
+        // per-element rounding will.
         const DKV_TO_DQ_RATIO_LIMIT: f32 = 25.0;
         for (name, norm) in [("dK", dk_norm), ("dV", dv_norm)] {
             let ratio = norm / dq_norm;

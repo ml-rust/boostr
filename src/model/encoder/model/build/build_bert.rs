@@ -34,9 +34,8 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
         // BERT adds a segment vector to every token, and single-segment
         // inference always uses row 0. Omitting it shifts every token by the
         // same learned constant before the first block — which changes the
-        // pooled vector without changing a single shape. Measured against
-        // llama.cpp on all-MiniLM-L6-v2, dropping it moved the sentence
-        // embedding to cosine 0.85; restoring it gives 0.999+.
+        // pooled vector without changing a single shape. Dropping it moves
+        // the sentence embedding away from llama.cpp's on the same file.
         //
         // Optional: a checkpoint that carries no such table (some distills, and
         // the SafeTensors callers that share this constructor) simply has none.

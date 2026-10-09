@@ -3,15 +3,15 @@
 //!
 //! `conv_pre` (kernel 7) feeds a stack of `upsample_rates.len()` stages,
 //! each: leaky-ReLU → transposed-conv upsample → an average of
-//! `resblock_kernel_sizes.len()` parallel [`HifiGanResidualBlock`]s. A final
+//! `resblock_kernel_sizes.len()` parallel `HifiGanResidualBlock`s. A final
 //! leaky-ReLU (PyTorch's untouched default slope, NOT
 //! `config.leaky_relu_slope` — HF calls `nn.functional.leaky_relu(hidden_states)`
 //! with no slope argument here), `conv_post` (kernel 7, no bias), and
 //! `tanh` produce the waveform. `conv_pre`/`conv_post` are plain
 //! (never weight-norm reparameterized in HF — `apply_weight_norm`/
 //! `remove_weight_norm` only ever touch `upsampler` and `resblocks`);
-//! [`HifiGanResidualBlock`]'s convs and the upsampler's transposed convs go
-//! through [`super::weight_norm_conv`]'s per-tensor detection.
+//! `HifiGanResidualBlock`'s convs and the upsampler's transposed convs go
+//! through `super::weight_norm_conv`'s per-tensor detection.
 
 use crate::error::{Error, Result};
 use crate::model::audio::vits::hifigan_blocks::{HifiGanResidualBlock, HifiGanUpsampleLayer};

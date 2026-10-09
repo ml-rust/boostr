@@ -43,7 +43,7 @@ use common::{model_fixture, skip_notice};
 /// Floor on the waveform's signal-to-error ratio. End to end, the text
 /// encoder's f32 rounding passes through the flow and HiFi-GAN, which
 /// amplify it, so a per-sample absolute bound tracks the loudest sample
-/// rather than the model's correctness. f32 drift lands above 90 dB. A
+/// rather than the model's correctness. f32 drift stays above this floor. A
 /// wrong formula (a missing scale, a shifted window, a swapped mask) moves
 /// samples by 1e-2 or more, which is below 40 dB.
 const WAVEFORM_MIN_SNR_DB: f64 = 80.0;

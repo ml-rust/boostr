@@ -31,7 +31,7 @@
 //! Section 12's raw encodings — the BF16 the writer falls back to for a
 //! rank-1 tensor it cannot tile, plus anything pinned — arrive dense. The
 //! rule and its counts live on
-//! [`TcfSource`](crate::model::audio::voxcpm::loader::support::TcfSource);
+//! [`TcfSource`];
 //! nothing in this file special-cases a tensor by name.
 
 use crate::error::Result;

@@ -20,16 +20,16 @@
 
 // FP8 Format Selection Guide:
 // - E4M3 (4 exp, 3 mantissa): Higher precision, smaller range
-//   * Best for: Hopper (sm_90+, H100), Ada (sm_89, RTX 40xx) with native FP8 tensor cores
-//   * Use case: Preferred for modern GPUs with minimal accuracy loss
+//   * Best for: Ada (sm_89) and Hopper (sm_90+), which have native FP8 tensor cores
+//   * Use case: Preferred where FP8 runs natively, with minimal accuracy loss
 //
 // - E5M2 (5 exp, 2 mantissa): Lower precision, larger dynamic range
-//   * Best for: Ampere (sm_80+, RTX 30xx, A100) where FP8 is software-emulated
-//   * Use case: Prevents underflow/overflow on older GPUs without native FP8
+//   * Best for: Ampere (sm_80, sm_86, sm_87), where FP8 is software-emulated
+//   * Use case: Prevents underflow/overflow on architectures without native FP8
 //
 // This implementation uses E4M3 format with FP32 accumulation for stability
-// Note: On Ampere (sm_80-sm_89), FP8 ops are emulated in software (slower than native)
-//       On Hopper/Ada (sm_89+), FP8 ops use hardware tensor cores (4x faster)
+// Note: On Ampere (sm_80-sm_87), FP8 ops are emulated in software
+//       On Ada and Hopper (sm_89+), FP8 ops use hardware tensor cores
 
 template<int HEAD_DIM, int BLOCK_M, int BLOCK_N>
 __device__ void flash_attention_fwd_fp8_impl(

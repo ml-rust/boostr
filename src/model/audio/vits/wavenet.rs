@@ -12,7 +12,7 @@
 //! is `torch.nn.utils.parametrizations.weight_norm`-reparameterized in the
 //! checkpoint; loading fuses `weight_g`/`weight_v` (or the modern
 //! `parametrizations.weight.original0`/`original1` pair) into a plain
-//! `weight` once, per [`crate::model::audio::vits::weight_norm_conv`].
+//! `weight` once, per `crate::model::audio::vits::weight_norm_conv`.
 
 use crate::error::{Error, Result};
 use crate::model::audio::vits::weight_norm_conv::load_weight_normed_conv1d;

@@ -133,7 +133,7 @@ impl<R: Runtime<DType = DType>> ScalarQuantization<R> {
     /// dotted path the owning
     /// [`VoxCpm2Model`](crate::model::audio::voxcpm::model::VoxCpm2Model)
     /// would pass to `extend_named` for this bottleneck —
-    /// [`crate::model::audio::voxcpm::fsq::loader::FSQ_LAYER_PREFIX`] — so
+    /// `crate::model::audio::voxcpm::fsq::loader::FSQ_LAYER_PREFIX` — so
     /// each projection's path (via [`LoraTargets::join`]) matches
     /// `named_parameters()`'s path exactly. A leaf step: no zero-match check
     /// here — see

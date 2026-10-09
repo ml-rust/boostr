@@ -443,7 +443,7 @@ fn acoustic_encoder_matches_reference() {
 ///
 /// Indices are integers: any mismatch is a real divergence, so this reports
 /// the mismatch FRACTION and the first few (position, got, want) triples
-/// rather than a bare assert — a large fraction (e.g. ~43.75%) means the
+/// rather than a bare assert — a large fraction means the
 /// double bound was lost, while a handful means a float knife-edge in the
 /// reference implementation itself.
 #[test]

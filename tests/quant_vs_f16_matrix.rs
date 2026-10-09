@@ -22,11 +22,11 @@
 //! separates the two cleanly, because the two failure modes live in completely
 //! different ranges:
 //!
-//! - correct dequant, real quantization loss → cosine ≳ 0.95
-//!   (measured: Q8_0/Q6_K/Q5_K ≈ 0.999, Q4_K ≈ 0.997, Q3_K ≈ 0.988, Q2_K ≈ 0.957)
-//! - mis-indexed block layout → cosine ≈ 0.03
-//!   (measured, before the fix: Q5_K scored 0.0307 while Q4_K/Q6_K in the SAME
-//!   file scored 0.997+ — which is how the bug was localised)
+//! - correct dequant, real quantization loss → cosine near 1, falling slowly
+//!   as the bit width drops
+//! - mis-indexed block layout → cosine near 0 (a mis-indexed Q5_K scored near 0
+//!   while Q4_K/Q6_K in the SAME file scored near 1, which is how such a bug
+//!   is localised)
 //!
 //! The 0.90 floor sits in the wide empty gap between those, so it holds for
 //! every format down to 2-bit without being loose enough to pass a layout bug.

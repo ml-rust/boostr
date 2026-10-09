@@ -153,7 +153,7 @@ impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
     /// (`cache` primed, `x` carries one token, no mask needed — past positions
     /// already precede the current one in the concatenated K/V).
     ///
-    /// Delegates to [`Self::forward_with_cache_capturing`] with no capture
+    /// Delegates to `Self::forward_with_cache_capturing` with no capture
     /// sink, so a caller that never asks for cross-attention weights pays
     /// nothing beyond the `None` check.
     pub fn forward_with_cache<C>(

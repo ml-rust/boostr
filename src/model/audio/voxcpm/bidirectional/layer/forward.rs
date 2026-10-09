@@ -48,7 +48,7 @@ impl<R: Runtime<DType = DType>> BidirectionalLayer<R> {
     /// residual after attention, with `pending` already folded in), and
     /// `mlp_out` is this layer's UNADDED MLP output — the caller passes it as
     /// `pending` to the NEXT layer, or folds it into the model's final norm
-    /// after the last layer (same fold [`forward`] does for its own output).
+    /// after the last layer (same fold [`forward`](Self::forward) does for its own output).
     ///
     /// Each of the two fuse points (`pending` into `input_layernorm`, and the
     /// attention residual into `post_attention_layernorm`) is taken only when

@@ -23,7 +23,7 @@ use numr::tensor::Tensor;
 /// # Memory
 ///
 /// Only pages touched by the OS page cache are resident in RAM.
-/// A 100GB dataset uses ~0 bytes of RSS until samples are accessed.
+/// A dataset of any size adds no RSS until samples are accessed.
 pub struct MmapDataset {
     mmap: Mmap,
     seq_len: usize,

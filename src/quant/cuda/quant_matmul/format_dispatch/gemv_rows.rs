@@ -8,9 +8,9 @@
 /// Their single-token dp4a kernel exists at 1 (`_mwr`), 4 (`_r4`) and 8
 /// (`_r8`) columns per block; a block that owns ROWS columns loads each
 /// activation word once for all of them, so the activation re-read that
-/// dominates the one-column geometry drops by ROWS. 4 vs 8 is TO BE
-/// MEASURED (blazr decode under nsys at K = N = 5120 PQ2_0); flip this
-/// const and rebuild. A row's bits are the same at every value, see
+/// dominates the one-column geometry drops by ROWS. 4 vs 8 is NOT YET
+/// MEASURED on a decode workload; to compare them, flip this const and
+/// rebuild. A row's bits are the same at every value, see
 /// `kernels/gemv/legacy_ntok_body.cuh`.
 pub(in crate::quant::cuda::quant_matmul) const LOWBIT_GEMV_ROWS: u32 = 4;
 

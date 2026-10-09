@@ -190,7 +190,7 @@ mod tests {
     /// `set_trainable(false)` must stop `forward` from recording an autograd
     /// graph — this is the actual fix: a file-loaded adapter used for inference
     /// must not build a graph nobody ever calls `backward` on, since dropping
-    /// that graph is what overflowed a bounded worker stack in blazr.
+    /// that graph overflows a bounded worker stack.
     /// `set_trainable(true)` must restore tracking.
     #[test]
     fn test_set_trainable_toggles_graph_recording() {

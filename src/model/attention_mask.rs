@@ -43,7 +43,7 @@ pub(crate) fn mask_fill(dtype: DType) -> f64 {
 /// triangle relative to that diagonal (the future) and zeroes the diagonal and
 /// below (the past and self), which is exactly the additive form.
 ///
-/// The fill is the target dtype's most-negative finite value ([`mask_fill`]),
+/// The fill is the target dtype's most-negative finite value (`mask_fill`),
 /// not `-inf`: `-inf` survives softmax fine, but a
 /// `0 * -inf` anywhere in a fused path is NaN, and HuggingFace uses
 /// `torch.finfo(dtype).min` for the same reason. Leading shape is `[1, 1]` so it
@@ -61,8 +61,8 @@ pub(crate) fn mask_fill(dtype: DType) -> f64 {
 /// attention scores it will be added to, because the additive-mask sites do not
 /// reconcile dtypes for it. The triangular construction always runs in F32 and
 /// the result is cast once at the end. The fill is picked from `dtype` by
-/// [`mask_fill`] BEFORE the build, so the cast is exact and the fill stays a
-/// finite large negative in every dtype — see [`mask_fill`] for why casting
+/// `mask_fill` BEFORE the build, so the cast is exact and the fill stays a
+/// finite large negative in every dtype — see `mask_fill` for why casting
 /// `f32::MIN` down instead would produce `-inf`.
 ///
 /// The two masked regions are DISJOINT for every `window_size >= 1`:

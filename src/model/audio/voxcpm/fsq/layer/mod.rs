@@ -8,10 +8,10 @@
 //! is deliberately NOT ported here.
 //!
 //! - `quantization`: [`ScalarQuantization`], the bottleneck itself
-//! - `aux`: [`AuxProjections`], the six root-level projections around it
+//! - `auxiliary`: [`AuxProjections`], the six root-level projections around it
 
-mod aux;
+mod auxiliary;
 mod quantization;
 
-pub use aux::AuxProjections;
+pub use auxiliary::AuxProjections;
 pub use quantization::ScalarQuantization;

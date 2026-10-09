@@ -147,7 +147,7 @@ fn perf_varlen_throughput() {
     let cap = std::env::var("NUMR_CUDA_FREE_LIST_CAP_MB").unwrap_or_else(|_| "default".into());
     // UNALIGNED total_tokens (15*500 = 7500, not a multiple of 16) — the real
     // varlen case. M-padding must route this to WMMA, else it falls to the
-    // slower generic kernel (the ma8e regression).
+    // slower generic kernel.
     const SEQ: usize = 500;
     const DOCS_PER_BATCH: usize = 15; // 7500 tokens/forward (unaligned)
     const BATCHES: usize = 8;
@@ -181,8 +181,7 @@ fn perf_varlen_throughput() {
         free1 as f64 / 1048576.0,
     );
 
-    // Acceptance (per resource/encoder_embed_gpu_memory_fix.md §7): throughput
-    // within ~2x of pre-fix AND bounded memory, both at once.
+    // Acceptance: throughput above the floor AND bounded memory, both at once.
     assert!(
         docs_per_sec >= MIN_DOCS_PER_SEC,
         "throughput {docs_per_sec:.1} docs/s below floor {MIN_DOCS_PER_SEC} — F16/WMMA \
@@ -200,7 +199,7 @@ fn perf_varlen_throughput() {
     );
 }
 
-// Regression (§7e): a single short query (batch=1) through the PADDED path that
+// Regression: a single short query (batch=1) through the PADDED path that
 // `embed_text` uses — input [1, seq] (3D internal hidden states). The pad-to-16
 // matmul wrapper must narrow the LAST TWO dims, not dims 0/1; narrowing the size-1
 // batch dim produced a degenerate `[0, seq]` → "Shape mismatch: expected [1], got

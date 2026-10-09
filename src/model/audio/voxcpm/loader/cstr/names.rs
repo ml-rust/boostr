@@ -238,7 +238,7 @@ mod tests {
     //! the sentinel probe.
     //!
     //! The probe tests build a MINIMAL in-memory GGUF (a header plus one
-    //! zero-length-data tensor entry) rather than opening a real 1.2 GB
+    //! zero-length-data tensor entry) rather than opening a real
     //! checkpoint: what is under test is which name is present, not any byte of
     //! tensor data.
 

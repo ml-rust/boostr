@@ -3,7 +3,7 @@
 //! 256 elements, 136 bytes: f16 super-scale `d`, `scales_h` (u16), `scales_l`
 //! (4 bytes), then 128 bytes of nibble pairs — 8 sub-blocks of 32 elements.
 //! Same codebook and the same per-sub-block scale fit as IQ4_NL
-//! ([`super::iq4_nl::fit_subblock_scale`]), but IQ4_XS is the format that
+//! (`super::iq4_nl::fit_subblock_scale`), but IQ4_XS is the format that
 //! actually exercises the `super_block_size/block_size > 1` branch of
 //! `quantize_row_iq4_nl_impl` — IQ4_NL's single 32-element block never reaches
 //! it. That branch requantizes the 8 fitted sub-block scales to 6 bits under

@@ -12,7 +12,7 @@ use numr::runtime::Runtime;
 use std::path::Path;
 
 /// What [`VoxCpm2Model::load_lora_adapter`] read from and did with one
-/// adapter file — for a caller (e.g. blazr) to log without reaching into
+/// adapter file — for a caller (e.g. an inference server) to log without reaching into
 /// the model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoraAdapterReport {
@@ -80,8 +80,8 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         // `requires_grad = true`, so every forward would keep building an
         // autograd graph nobody ever calls `backward` on. Dropping that
         // graph after each render recurses over every recorded node, deep
-        // enough to overflow a bounded worker stack (observed in blazr: a
-        // 2 MB tokio worker overflowed on drop). Freeze here; a caller that
+        // enough to overflow a bounded worker stack (such as a 2 MB tokio
+        // worker). Freeze here; a caller that
         // resumes fine-tuning this adapter calls `set_lora_trainable(true)`
         // itself right after (see `examples/voxcpm/finetune.rs`'s `--lora`
         // warm-start arm).

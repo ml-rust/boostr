@@ -11,8 +11,7 @@
 //! `perf stat -e instructions:u` over a child process that runs one case. A
 //! second child runs the same case with zero iterations, so subtracting the two
 //! removes setup, process start, and payload load exactly. Instruction counts
-//! are deterministic; wall-clock on a loaded machine is not, and this machine is
-//! frequently loaded.
+//! are deterministic; wall-clock on a loaded machine is not.
 //!
 //! Allocation count and allocation bytes per iteration are measured in-process
 //! by a counting global allocator. They are deterministic too.

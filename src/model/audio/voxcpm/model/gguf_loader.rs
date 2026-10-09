@@ -25,7 +25,7 @@
 //! `audiovae.pth` carries the VAE too, folded and dense, as
 //! `vae.decoder.*`/`vae.encoder.*` with the `voxcpm2.config_json` key beside
 //! it. `from_gguf` probes for
-//! [`VAE_GGUF_PROBE_TENSOR`](crate::model::audio::voxcpm::vae::VAE_GGUF_PROBE_TENSOR)
+//! [`VAE_GGUF_PROBE_TENSOR`]
 //! and reads the VAE from the same file when it is there; the
 //! `audiovae_path` argument is then optional, and ignored when given. A
 //! file without it — an older conversion, or cstr's, whose `vae.*` tensors
@@ -266,7 +266,7 @@ fn check_embedded_vae_dense(gguf: &Gguf) -> Result<()> {
 /// argument second, an error naming both third.
 ///
 /// Takes the embedded string rather than the [`Gguf`] so the precedence rule
-/// is testable without a real 1.2 GB checkpoint.
+/// is testable without a real checkpoint.
 fn resolve_config_text(embedded: Option<&str>, path: Option<&Path>) -> Result<String> {
     if let Some(content) = embedded {
         return Ok(content.to_string());

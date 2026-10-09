@@ -1,7 +1,7 @@
 //! Shared CUDA graph-mode decode helpers for Llama-family models: the
 //! `Dims` a decode needs, eager/graph decode over a `LoadedModel`, and
-//! loading a real checkpoint (GGUF or SafeTensors directory) the way
-//! blazr's loader does.
+//! loading a real checkpoint (GGUF or SafeTensors directory) the way an
+//! inference server's loader does.
 
 use std::path::Path;
 
@@ -213,7 +213,7 @@ pub fn graph_decode(
     (first, rows, ids)
 }
 
-/// Load a real checkpoint the way blazr's loader does: a GGUF file through
+/// Load a real checkpoint the way an inference server's loader does: a GGUF file through
 /// `Gguf`/`VarMap::from_gguf`, or a SafeTensors directory through its
 /// `config.json` and `SafeTensorsLoader`.
 pub fn load_real_model(
@@ -258,7 +258,7 @@ fn load_safetensors_dir(
 /// A Llama-family `UniversalConfig` from GGUF metadata: vocab, hidden size,
 /// layer count and attention shape, off boostr's own metadata accessors.
 /// Covers `llama`/`mistral`-shaped GGUFs; architecture-specific key tables
-/// (MoE, SSM, ALiBi, …) live in blazr's loader, not here.
+/// (MoE, SSM, ALiBi, …) live in a caller's loader, not here.
 fn llama_config_from_gguf(metadata: &GgufMetadata) -> Result<UniversalConfig, String> {
     let arch = metadata
         .architecture()

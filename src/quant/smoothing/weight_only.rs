@@ -50,7 +50,7 @@
 //! channel whose weight column magnitude is zero or non-finite gets `s_j =
 //! 1.0` exactly, is excluded from the geometric mean, and is set AFTER
 //! normalization so it is never perturbed by it — see
-//! [`super::normalize::normalize_to_unit_geometric_mean`], which this
+//! `super::normalize::normalize_to_unit_geometric_mean`, which this
 //! function shares with [`super::scale::smoothing_scale`] rather than
 //! reimplementing.
 

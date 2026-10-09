@@ -97,7 +97,7 @@ impl<R: Runtime<DType = DType>> WhisperDecoder<R> {
     ///
     /// Returns logits for the **current** input window only: `[B, T, vocab]`.
     ///
-    /// Delegates to [`Self::forward_with_cache_capturing`] with no capture
+    /// Delegates to `Self::forward_with_cache_capturing` with no capture
     /// sink, so this path pays no extra cost for the capture feature.
     pub fn forward_with_cache<C>(
         &self,

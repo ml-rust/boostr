@@ -484,8 +484,9 @@ fn assert_varlen_bwd_parity(
     // error only. dK/dV normalized error should sit within a fixed multiple
     // of dQ's at the same shape and dtype — a regression back to
     // per-(q_row, k_idx, d) half-precision atomics is exactly what would
-    // blow this ratio up, as it did for the paged kernel (~780x measured
-    // pre-fix there, 2.8x-6.7x post-fix). 25x is reused unchanged from
+    // blow this ratio up, as it did for the paged kernel (orders of
+    // magnitude pre-fix there, a small multiple post-fix). 25x is reused
+    // unchanged from
     // `paged_attention.rs::DKV_TO_DQ_RATIO_LIMIT`: same defect class, same
     // one-atomic-per-Q-block-per-K-row restructure, so the same headroom
     // above real post-fix noise and margin below the pre-fix magnitude

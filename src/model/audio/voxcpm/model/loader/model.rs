@@ -71,7 +71,7 @@ where
     /// directory) — see the module docs. A safetensors checkpoint never
     /// embeds the AudioVAE, so `None` here is an error naming the fix; the
     /// parameter is an `Option` only so every entry point shares one rule
-    /// ([`vae_origin`]).
+    /// (`vae_origin`).
     ///
     /// `dtype` casts every transformer-stack tensor (`None` keeps the
     /// checkpoint's BF16). `vae_decoder_dtype` casts every AudioVAE DECODER
@@ -89,7 +89,7 @@ where
         let cfgs = StackConfigs::from_config_json(&dir.join(DEFAULT_CONFIG_FILE))?;
         // Opened ONCE for all five transformer-stack sub-models. Each
         // sub-loader's own `from_safetensors*` would reopen and re-parse this
-        // 4.3 GB file's header, five times over.
+        // multi-gigabyte file's header, five times over.
         let mut source = SafeTensorsLoader::open(dir.join(DEFAULT_WEIGHTS_FILE))?;
         Self::from_source(
             &mut source,

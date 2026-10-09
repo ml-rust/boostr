@@ -39,7 +39,7 @@ pub(in crate::quant::cuda::quant_matmul) struct FeatMajorFormat {
     /// out which formats those are, so measure the two kernels rather than
     /// infer from the decode shape.
     ///
-    /// This constant is the FALLBACK, measured on one Ampere-class part. The
+    /// This constant is the FALLBACK pick. The
     /// dispatch reads `tiling::prefers_tile_parallel`, which times both
     /// schedules on the device at first use and caches the pick per (device,
     /// format) under [`Self::tile_parallel_key`]; it returns this constant

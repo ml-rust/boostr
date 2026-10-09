@@ -20,7 +20,7 @@ use numr::runtime::Runtime;
 /// - `feat_encoder.*`, `base_lm.*`, `residual_lm.*`, `feat_decoder.*` —
 ///   [`DEFAULT_LOCAL_ENCODER_PREFIX`], [`DEFAULT_MINICPM4_PREFIX`],
 ///   [`DEFAULT_RESIDUAL_LM_PREFIX`], [`DEFAULT_LOCAL_DIT_PREFIX`].
-/// - `fsq_layer.*` — [`FSQ_LAYER_PREFIX`], for `fsq` (`ScalarQuantization`)
+/// - `fsq_layer.*` — `FSQ_LAYER_PREFIX`, for `fsq` (`ScalarQuantization`)
 ///   only.
 /// - `aux`'s six projections (`enc_to_lm_proj`, `lm_to_dit_proj`,
 ///   `res_to_dit_proj`, `fusion_concat_proj`, `stop_proj`, `stop_head`) live

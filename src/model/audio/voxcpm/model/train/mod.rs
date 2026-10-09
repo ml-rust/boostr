@@ -1,4 +1,4 @@
-//! Unit D of the VoxCPM2 end-to-end orchestrator: wire teacher-forced
+//! Training stage of the VoxCPM2 end-to-end orchestrator: wire teacher-forced
 //! conditioning ([`PatchGenerator::teacher_forced_conditioning`]) into a
 //! conditional flow-matching (CFM) training loss, differentiable back to
 //! the LoRA adapters via [`numr::autograd::backward`].

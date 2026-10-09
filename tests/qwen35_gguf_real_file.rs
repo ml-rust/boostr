@@ -15,7 +15,7 @@
 //!
 //! # Memory
 //!
-//! The file is 7.2 GB and every dense tensor is decoded to F32, so expect
+//! The file is several GB and every dense tensor is decoded to F32, so expect
 //! peak RSS above the file size. Each test prints elapsed time and `VmHWM`
 //! from `/proc/self/status`.
 

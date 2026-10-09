@@ -1,5 +1,5 @@
 //! Whole-tensor round trip: groups a `[out_features, in_features]` weight's
-//! flat row-major values into blocks of [`GROUP_SIZE`] along the INPUT
+//! flat row-major values into blocks of `GROUP_SIZE` along the INPUT
 //! dimension, one row at a time, and quantizes each block independently.
 
 use super::levels::Codebook;
@@ -11,15 +11,15 @@ use super::quantize::quantize_group;
 pub(super) const GROUP_SIZE: usize = 32;
 
 /// Quantizes then dequantizes every value in `values` against `codebook`,
-/// grouping [`GROUP_SIZE`] consecutive elements at a time WITHIN each row of
+/// grouping `GROUP_SIZE` consecutive elements at a time WITHIN each row of
 /// width `in_features` — a group never crosses a row boundary, so `W`'s
 /// columns stay aligned the same way a real block-quantized encoding aligns
 /// them.
 ///
-/// - `weights[i]` scores element `i`; see [`quantize_group`] for how a short
+/// - `weights[i]` scores element `i`; see `quantize_group` for how a short
 ///   `weights` slice behaves (never panics, treats a missing entry as
 ///   `1.0`).
-/// - Tail handling: if `in_features` is not a multiple of [`GROUP_SIZE`],
+/// - Tail handling: if `in_features` is not a multiple of `GROUP_SIZE`,
 ///   the row's final group is quantized on its own (shorter) length — never
 ///   padded, never dropped. `values.chunks` produces this directly: a row
 ///   itself shorter than `in_features` (a malformed caller) is likewise

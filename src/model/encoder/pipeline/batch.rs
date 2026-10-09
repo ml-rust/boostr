@@ -98,8 +98,8 @@ impl<R: Runtime<DType = DType>> EmbeddingPipeline<R> {
         // seq_len) shapes the encoder sees across a long ingest. Without it,
         // variable-length batches produce dozens of distinct shapes, each
         // allocating fresh CUDA-graph + workspace buffers that the pool caches
-        // but rarely reuses, growing GPU memory monotonically until OOM
-        // (observed on 12-layer models over a full-corpus embed). Padding
+        // but rarely reuses, growing GPU memory monotonically until OOM over a
+        // long ingest. Padding
         // positions are masked to 0.0, so they cannot contaminate the
         // mean-pooled embedding (normalised by real token count).
         let max_len = {

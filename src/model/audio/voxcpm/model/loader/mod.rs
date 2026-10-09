@@ -36,7 +36,7 @@
 //! pass in that dtype — every conv, `Snake`'s `sin`/`recip`, and the final
 //! `tanh` all have CUDA F16/BF16 kernels, so nothing in the decoder path
 //! falls back to F32. The boundary cast (decoder output back to F32) lives in
-//! [`super::decode::VoxCpm2Model::decode_patches`].
+//! [`VoxCpm2Model::decode_patches`].
 //!
 //! The AudioVAE ENCODER has NO dtype option: it always loads and runs at F32.
 //! It runs once per render, over a short reference clip (and during
@@ -48,7 +48,7 @@
 //! [`AudioVaeEncoder::from_checkpoint`](crate::model::audio::voxcpm::vae::AudioVaeEncoder::from_checkpoint)'s
 //! docs.
 //!
-//! - `configs`: the checkpoint file names and [`StackConfigs`]
+//! - `configs`: the checkpoint file names and `StackConfigs`
 //! - `model`: [`VoxCpm2Model`], its constructors, and the stack dtype/device
 //! - `module`: the `Module` impl (parameter enumeration)
 //! - `lora`: whole-model adapter attachment, projection names, write-back

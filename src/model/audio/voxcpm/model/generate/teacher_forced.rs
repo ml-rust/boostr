@@ -281,11 +281,9 @@ mod tests {
     /// position — so any real discrepancy is a shift/concat-order bug, not
     /// float noise.
     ///
-    /// MEASURED by bisection on this fixture: the real error sits between 1e-7
-    /// and 1e-6, so this is ~10x headroom over what was observed rather than an
-    /// unverified guess. It is deliberately NOT tightened to the observed value:
-    /// a larger fixture sums more terms per dot product and reassociates more,
-    /// so a bound fitted exactly to `HIDDEN = 8` would fail for reasons that are
+    /// The bound leaves headroom over the error this fixture actually shows.
+    /// It is deliberately NOT tightened to the observed value: a larger
+    /// fixture sums more terms per dot product and reassociates more, so a bound fitted exactly to `HIDDEN = 8` would fail for reasons that are
     /// not bugs.
     ///
     /// The bound being tight is what makes this test load-bearing, and that was

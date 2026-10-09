@@ -1,7 +1,7 @@
 //! Mixed precision (AMP) trainer
 //!
 //! Wraps `SimpleTrainer` with automatic mixed precision: forward/backward in BF16/FP16
-//! with FP32 master weights for numerical stability. Achieves ~2x throughput on modern GPUs.
+//! with FP32 master weights for numerical stability.
 
 use std::collections::{HashMap, HashSet};
 

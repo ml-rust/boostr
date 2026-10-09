@@ -8,13 +8,13 @@
 //! [`prefers_tile_parallel`] times both on the device through
 //! `numr::runtime::cuda::tune::tuned`, once per (device, format), at one
 //! geometry where the flag decides the launch. The descriptor's
-//! `prefers_tile_parallel_fallback` is the constant measured on one part; it
+//! `prefers_tile_parallel_fallback` is a fixed per-format constant; it
 //! serves when tuning is off (`NUMR_CUDA_TUNE=0`) or the probe fails.
 //!
 //! Cost: one probe per (device, format) on the first dispatch that reaches
 //! the pair-vs-grid decision: one warm-up and three timed launches of each
-//! schedule on a weight of a few MB, a few ms in all; blazr's warmup absorbs
-//! it. Later calls read the tune cache.
+//! schedule on a weight of a few MB; a caller's warmup absorbs it. Later
+//! calls read the tune cache.
 
 use numr::dtype::DType;
 use numr::runtime::cuda::tune::{time_launches, tuned};
@@ -318,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn the_probe_weight_stays_under_sixteen_megabytes_on_the_measured_part() {
+    fn the_probe_weight_stays_under_sixteen_megabytes_at_the_fixture_sm_count() {
         for fm in ALL {
             let shape = probe_shape(fm, WIDE, SMS).expect(fm.kernel_infix);
             let bytes = fm

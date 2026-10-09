@@ -1,4 +1,4 @@
-//! Unit C1 of the VoxCPM2 end-to-end orchestrator: turn the patches
+//! Decode stage of the VoxCPM2 end-to-end orchestrator: turn the patches
 //! [`super::generate::GenerateState`] collected into a waveform.
 //!
 //! ```text
@@ -148,7 +148,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
     /// geometry, then runs [`super::loader::VoxCpm2Model::vae_decoder`] at
     /// the fixed 48 kHz sample-rate bucket
     /// ([`crate::model::audio::voxcpm::vae::decoder::DEFAULT_SR_BUCKET`]),
-    /// windowed via [`super::chunked_decode::decode_latent_windowed`] so peak
+    /// windowed via `super::chunked_decode::decode_latent_windowed` so peak
     /// decoder activation memory is bounded by a fixed number of latent
     /// frames rather than growing linearly with the utterance length.
     /// Returns `[1, 1, samples]` at [`crate::model::audio::voxcpm::vae::decoder::SAMPLE_RATE`]
@@ -226,7 +226,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
     ///
     /// Mechanism: the decode runs on the same window grid
     /// [`Self::decode_patches`] uses, anchored at patch 0, so it unfolds from
-    /// [`first_patch_for_frame`] — the start of the left context of the
+    /// `first_patch_for_frame` — the start of the left context of the
     /// window containing `from` — rather than from `from` itself, decodes
     /// that suffix windowed, and drops everything before `from`. Every
     /// window complete at call time is therefore the identical decoder call

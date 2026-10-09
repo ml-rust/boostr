@@ -73,7 +73,7 @@ impl<R: Runtime<DType = DType>> GdnState<R> {
     ///
     /// # Errors
     ///
-    /// [`Error`](crate::error::Error) when a shape differs from the stored
+    /// [`Error`] when a shape differs from the stored
     /// buffer, or the copy fails.
     pub fn update<C: BinaryOps<R>>(
         &mut self,
@@ -91,13 +91,13 @@ impl<R: Runtime<DType = DType>> GdnState<R> {
     ///
     /// The graph-mode forward uses this in place of [`update`](Self::update):
     /// `initialized` is left as the prefill set it, and the method takes
-    /// `&self` so a whole [`LayeredGdnState`] can be shared with a captured
-    /// closure. Both copies are captured memcpy nodes when called inside
+    /// `&self` so a whole [`LayeredGdnState`](super::LayeredGdnState) can be shared with a
+    /// captured closure. Both copies are captured memcpy nodes when called inside
     /// `capture_graph_into`.
     ///
     /// # Errors
     ///
-    /// [`Error`](crate::error::Error) when a shape differs from the stored
+    /// [`Error`] when a shape differs from the stored
     /// buffer, or the copy fails.
     pub fn update_shared<C: BinaryOps<R>>(
         &self,
@@ -127,7 +127,7 @@ impl<R: Runtime<DType = DType>> GdnState<R> {
     ///
     /// # Errors
     ///
-    /// [`Error`](crate::error::Error) when the zero fill fails.
+    /// [`Error`] when the zero fill fails.
     pub fn reset<C: BinaryOps<R>>(&mut self, client: &C) -> Result<()> {
         let device = self.ssm.device().clone();
         let dtype = self.ssm.dtype();

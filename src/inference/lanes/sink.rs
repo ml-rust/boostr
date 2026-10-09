@@ -1,4 +1,4 @@
-//! The batched KV container [`LaneTable::admit`] installs a lane into.
+//! The batched KV container [`LaneTable::admit`](super::LaneTable::admit) installs a lane into.
 //!
 //! A growable [`LayeredKvCache`] and a [`FrozenLayeredKvCache`] both take a
 //! lane write, but they refuse differently: the growable cache grows to fit

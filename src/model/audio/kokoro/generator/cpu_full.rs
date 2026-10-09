@@ -74,7 +74,7 @@ impl IStftNetGenerator<numr::runtime::cpu::CpuRuntime> {
     /// CPU forward with the full noise-conditioning path enabled when the
     /// `noise_convs` / `noise_res` fields are populated: the excitation from
     /// `f0` ([`excitation_cpu`](Self::excitation_cpu)), then
-    /// [`forward_cpu_with_source`](Self::forward_cpu_with_source). Falls
+    /// [`forward_cpu_with_spectrum`](Self::forward_cpu_with_spectrum). Falls
     /// back to the generic `forward` when they're empty.
     #[allow(clippy::type_complexity)]
     pub fn forward_cpu_full(

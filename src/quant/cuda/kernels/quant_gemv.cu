@@ -1552,10 +1552,9 @@ extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(4) * WARP_SIZE, 1) void 
 // and 4x less compute for the same result, and it is what lets the K tile grow
 // enough that the barrier cost stops mattering.
 //
-// Measured against the f32-staged form at N = 4096, K = 14336, M = 512, on the
-// same card and the same payload: the f32 form never reached bandwidth
-// bound, it was bound by shared traffic and by a barrier every 32 elements
-// of K.
+// Against the f32-staged form at N = 4096, K = 14336, M = 512 on the same
+// payload, the f32 form never reached bandwidth bound: it was bound by shared
+// traffic and by a barrier every 32 elements of K.
 //
 // # Scales
 //

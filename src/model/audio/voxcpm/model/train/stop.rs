@@ -53,7 +53,7 @@ fn stop_targets<R: Runtime<DType = DType>>(tcount: usize, device: &R::Device) ->
 }
 
 /// 2-class cross-entropy over per-patch stop logits, target built by
-/// [`stop_targets`]. `logits` is `[..., T, 2]` (T = the product of every
+/// `stop_targets`. `logits` is `[..., T, 2]` (T = the product of every
 /// dimension but the last); a rank-3 `[1, T, 2]` from
 /// [`AuxProjections::stop`](crate::model::audio::voxcpm::fsq::AuxProjections::stop)
 /// and a rank-2 `[T, 2]` built directly (as tests do, to exercise the

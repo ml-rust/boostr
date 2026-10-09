@@ -10,16 +10,15 @@
 //! start of a stream and is NEVER reset between chunks of the same stream.
 //!
 //! Feeding a bare 512 samples does not error — it returns roughly 0 for every
-//! chunk. Thirty seconds of loud speech then reports a max probability near
-//! 0.03, and the VAD looks merely conservative while marking everything as
-//! silence. [`VadState`] owns the context so a caller cannot skip it.
+//! chunk. Loud speech then reports a near-zero max probability, and the VAD
+//! looks merely conservative while marking everything as silence. [`VadState`] owns the context so a caller cannot skip it.
 //!
 //! # Forward pass
 //!
 //! 1. REFLECT-pad `context_samples` at the END of the buffer — Silero's
 //!    `nn.ReflectionPad1d((0, context))`, exported as an ONNX `Pad` node in
 //!    "reflect" mode. At 16 kHz: 576 -> 640. Zero-padding instead runs fine and
-//!    shifts every probability by up to 0.2.
+//!    shifts every probability.
 //! 2. STFT as a convolution: `conv1d(x[B, 1, 640], forward_basis_buffer,
 //!    stride = n_fft / 2, padding = 0)` -> `[B, 258, 4]`. No bias.
 //! 3. Magnitude: channels `0..129` are the real part, `129..258` the imaginary

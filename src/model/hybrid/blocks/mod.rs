@@ -1,8 +1,8 @@
 //! AttentionBlock, SsmBlock and GdnBlock sub-modules for the hybrid model.
 //!
-//! - `attention`: the [`AttentionBlock`] type and its KV-cached forward
-//! - `mask`: [`AttentionBlock::attention_mask`], the causal / windowed / ALiBi mask
-//! - `ssm`: the [`SsmBlock`] type and its inference forward
+//! - `attention`: the `AttentionBlock` type and its KV-cached forward
+//! - `mask`: `AttentionBlock::attention_mask`, the causal / windowed / ALiBi mask
+//! - `ssm`: the `SsmBlock` type and its inference forward
 //! - `gdn`: the [`GdnBlock`] Gated DeltaNet mixer (`qwen35`) and its forward
 //! - `attention_qwen35`: the [`Qwen35AttentionBlock`] gated full-attention
 //!   mixer (`qwen35`) and its KV-cached forward

@@ -6,7 +6,7 @@
 //! tensors), `acoustic_encoder.*`, `quantizer.*`, `semantic_adapter.*`, and
 //! `semantic_encoder.*` (the Wav2Vec2-BERT branch), and the two-tensor
 //! `fc_encoder.*` prior projection. One file per branch, plus
-//! [`support`] for the shape-checked tensor fetch they all share.
+//! `support` for the shape-checked tensor fetch they all share.
 
 mod acoustic_encoder;
 mod decoder;

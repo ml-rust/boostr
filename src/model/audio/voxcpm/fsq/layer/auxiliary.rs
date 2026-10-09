@@ -13,9 +13,8 @@ use numr::ops::{ActivationOps, BinaryOps, ScalarOps, TensorOps, TypeConversionOp
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 
-/// The six auxiliary projections around `fsq_layer` that a future
-/// `VoxCpm2Model` orchestrator will own: encoder/DiT bridges and the stop
-/// classifier. See [`crate::model::audio::voxcpm::fsq::loader`] for the
+/// The six auxiliary projections around `fsq_layer` that `VoxCpm2Model` owns:
+/// encoder/DiT bridges and the stop classifier. See [`crate::model::audio::voxcpm::fsq::loader`] for the
 /// checkpoint key layout each field is loaded from.
 ///
 /// All six are [`MaybeLoraLinear`] for the same reason

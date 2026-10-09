@@ -24,7 +24,7 @@ mod options;
 mod scale;
 mod spectrogram;
 
-pub use filterbank::MelNorm;
+pub use filterbank::{MelNorm, mel_filterbank};
 pub use options::{LogSpec, MelOptions};
 pub use scale::{
     MelScale, hz_to_mel, hz_to_mel_slaney, mel_frequencies, mel_frequencies_with, mel_to_hz,

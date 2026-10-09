@@ -4,6 +4,8 @@
 //! Sample-level DSP, file codecs, voices and product pipelines live in the
 //! `voxr` crate, which depends on this module and never the reverse.
 
+#[cfg(feature = "clap")]
+pub mod clap;
 #[cfg(feature = "kokoro")]
 pub mod kokoro;
 pub mod mel;
@@ -28,10 +30,12 @@ pub mod whisper_model;
 
 pub use mel::{
     LogSpec, MelNorm, MelOptions, MelScale, compute_mel_spectrogram, compute_mel_spectrogram_with,
+    mel_filterbank,
 };
 pub use phoneme_vocab::{PhonemeVocab, phonemes_to_ids};
 pub use stft::{
     IStftClient, IStftOptions, IStftPadding, StftClient, StftOptions, hann_window, istft, stft,
+    stft_complex,
 };
 #[cfg(feature = "silero-vad")]
 pub use vad::{SileroVad, SileroVadWeights, VadConfig, VadState};

@@ -16,7 +16,7 @@ pub enum MelNorm {
 ///
 /// Uses librosa's ramp formulation so the shared edges between neighbouring
 /// filters agree exactly rather than by a floating-point coincidence.
-pub(super) fn mel_filterbank(
+pub fn mel_filterbank(
     num_mel_bins: usize,
     n_fft: usize,
     sample_rate: f64,

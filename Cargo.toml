@@ -94,6 +94,10 @@ neucodec = ["audio"]
 voxcpm = ["audio", "f16"]
 silero-vad = ["audio"]
 vits = ["audio"]
+# CLAP (`laion/larger_clap_general` and other unfused checkpoints): the HTSAT
+# audio tower, the RoBERTa text tower on `model::encoder`, and the log-mel
+# front end.
+clap = ["audio"]
 
 # spaCy's CNN part-of-speech tagger (`model::text::spacy_tagger`): the
 # `tok2vec` + `tagger` network of `en_core_web_sm`. Text only; implies no

@@ -25,9 +25,13 @@
 //! (f0, n)    = predictor.predict_f0_n(en, pred_s)        [B, T_frames] × 2
 //! t_en       = text_encoder(ids)                         [B, T_phon, 512]
 //! asr        = t_en @ alignment(durations)               [B, 512, T_frames]
-//! (mag, phase) = decoder(asr, f0, n, dec_s)              [B, F, T_spec] × 2
+//! (mag, phase) = decoder(asr, f0, n, dec_s, seed)        [B, F, T_spec] × 2
 //! waveform   = istft(mag, phase, window, hop)            [B, N_samples]
 //! ```
+//!
+//! Every stage runs on any runtime whose client is a [`KokoroClient`]. The
+//! decoder's harmonic source draws random numbers, seeded through
+//! [`KokoroSynthOptions::seed`].
 //!
 //! The **alignment** step is what pairs a per-phoneme `text_encoder` output
 //! with the duration-expanded frame timeline. Upstream builds an explicit
@@ -37,17 +41,13 @@
 
 use crate::error::{Error, Result};
 use crate::model::audio::kokoro::{
-    BertEncoder, Decoder, KokoroConfig, ProsodyPredictor, TextEncoder, decode_prosody_durations,
-    length_regulator, split_voice_style,
+    BertEncoder, Decoder, KokoroClient, KokoroConfig, KokoroSynthOptions, ProsodyPredictor,
+    TextEncoder, decode_prosody_durations, length_regulator, split_voice_style,
 };
 use crate::model::audio::stft::{IStftOptions, IStftPadding, hann_window, istft};
 use numr::dtype::DType;
-use numr::ops::{
-    ActivationOps, BinaryOps, CompareOps, ConvOps, IndexingOps, MatmulOps, NormalizationOps,
-    ReduceOps, ScalarOps, ShapeOps, TensorOps, TypeConversionOps, UnaryOps, UtilityOps,
-};
-use numr::runtime::cpu::{CpuClient, CpuRuntime};
-use numr::runtime::{Runtime, RuntimeClient};
+use numr::ops::IndexingOps;
+use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
 pub struct KokoroModelV2<R: Runtime> {
@@ -58,40 +58,24 @@ pub struct KokoroModelV2<R: Runtime> {
     pub config: KokoroConfig,
 }
 
-impl<R: Runtime> KokoroModelV2<R> {
-    /// Generic forward to the (mag, phase) stage. Does not include iSTFT
-    /// (which is CPU-only for now because overlap-add needs `scatter_add`).
-    /// Use [`KokoroModelV2::synthesize_cpu`] for end-to-end synthesis on
-    /// `CpuRuntime`.
+impl<R: Runtime<DType = DType>> KokoroModelV2<R> {
+    /// Forward to the `(mag, phase)` stage on any runtime, through the
+    /// decoder's full noise-conditioned path. Returns the durations in
+    /// frames with the spectrogram.
     ///
-    /// `speed` divides every phoneme's duration before rounding: `1.0` is
-    /// the voice's natural pace, `2.0` twice as fast. Returns the durations
-    /// in frames with the spectrogram.
+    /// `opts.speed` divides every phoneme's duration before rounding.
+    /// `opts.seed` picks the harmonic source's PRNG stream (see
+    /// [`KokoroSynthOptions::seed`]). The durations draw no random number.
     #[allow(clippy::type_complexity)]
     pub fn forward_to_spectrogram<C>(
         &self,
         client: &C,
         token_ids: &Tensor<R>,
         voice_row: &Tensor<R>,
-        speed: f32,
+        opts: &KokoroSynthOptions,
     ) -> Result<(Tensor<R>, Tensor<R>, Vec<u32>)>
     where
-        R: Runtime<DType = DType>,
-        C: RuntimeClient<R>
-            + IndexingOps<R>
-            + MatmulOps<R>
-            + NormalizationOps<R>
-            + ActivationOps<R>
-            + TensorOps<R>
-            + BinaryOps<R>
-            + UnaryOps<R>
-            + ConvOps<R>
-            + ReduceOps<R>
-            + ScalarOps<R>
-            + ShapeOps<R>
-            + CompareOps<R>
-            + TypeConversionOps<R>
-            + UtilityOps<R>,
+        C: KokoroClient<R>,
         R::Client: IndexingOps<R>,
     {
         // 1. Split voice row into decoder + predictor halves.
@@ -100,7 +84,8 @@ impl<R: Runtime> KokoroModelV2<R> {
         // 2. BERT + bert_encoder projection.
         let d_en = self.bert.forward(client, token_ids)?; // [B, T_phon, 512]
 
-        // 3. Duration prediction.
+        // 3. Duration prediction. The durations are host integers, so the
+        // logits leave the device once here.
         let (dur_logits, d) =
             self.predictor
                 .predict_duration_features(client, &d_en, &predictor_style)?;
@@ -113,7 +98,8 @@ impl<R: Runtime> KokoroModelV2<R> {
             });
         }
         let logits_flat: Vec<f32> = dur_logits.contiguous()?.to_vec();
-        let durations = decode_prosody_durations(&logits_flat, t_phon, self.config.max_dur, speed)?;
+        let durations =
+            decode_prosody_durations(&logits_flat, t_phon, self.config.max_dur, opts.speed)?;
 
         // 4. Length regulator on the duration encoder's features (`d`) →
         // frame-rate hidden, as reference Kokoro expands `d` into `en`.
@@ -135,79 +121,39 @@ impl<R: Runtime> KokoroModelV2<R> {
             .map_err(Error::Numr)?
             .contiguous()?;
 
-        // 8. Decoder → (mag, phase).
-        let (mag, phase) = self
-            .decoder
-            .forward(client, &asr, &f0, &n_energy, &decoder_style)?;
-        Ok((mag, phase, durations))
-    }
-}
-
-impl KokoroModelV2<CpuRuntime> {
-    /// CPU-specialized spectrogram forward — runs the decoder through its
-    /// `forward_cpu_full` path so the generator's noise conditioning is
-    /// applied when the checkpoint provided it. `speed` reads as
-    /// [`forward_to_spectrogram`](Self::forward_to_spectrogram) reads it.
-    #[allow(clippy::type_complexity)]
-    pub fn forward_to_spectrogram_cpu(
-        &self,
-        client: &CpuClient,
-        token_ids: &Tensor<CpuRuntime>,
-        voice_row: &Tensor<CpuRuntime>,
-        speed: f32,
-    ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>, Vec<u32>)> {
-        let (decoder_style, predictor_style) = split_voice_style(voice_row, self.config.style_dim)?;
-        let d_en = self.bert.forward(client, token_ids)?;
-        let (dur_logits, d) =
-            self.predictor
-                .predict_duration_features(client, &d_en, &predictor_style)?;
-        let logits_shape = dur_logits.shape();
-        let (b, t_phon) = (logits_shape[0], logits_shape[1]);
-        if b != 1 {
-            return Err(Error::InvalidArgument {
-                arg: "token_ids",
-                reason: "synthesis is single-utterance; batch > 1 not supported".into(),
-            });
-        }
-        let logits_flat: Vec<f32> = dur_logits.contiguous()?.to_vec();
-        let durations = decode_prosody_durations(&logits_flat, t_phon, self.config.max_dur, speed)?;
-        let frames = length_regulator(client, &d, &durations)?;
-        let (f0, n_energy) = self
-            .predictor
-            .predict_f0_n(client, &frames, &predictor_style)?;
-        let t_en = self.text_encoder.forward(client, token_ids)?;
-        let asr_bt_d = length_regulator(client, &t_en, &durations)?;
-        let asr = asr_bt_d
-            .transpose(1, 2)
-            .map_err(Error::Numr)?
-            .contiguous()?;
+        // 8. Decoder → (mag, phase), with the seeded harmonic source.
         let (mag, phase) =
             self.decoder
-                .forward_cpu_full(client, &asr, &f0, &n_energy, &decoder_style)?;
+                .forward(client, &asr, &f0, &n_energy, &decoder_style, opts.seed)?;
         Ok((mag, phase, durations))
     }
 
-    /// CPU end-to-end synthesis.
+    /// End-to-end synthesis on any runtime.
     ///
     /// `token_ids [1, T_phon]` i64 + `voice_row [1, 256]` f32 → waveform
-    /// `[1, N_samples]` f32, at `speed` (`1.0` is the voice's natural
-    /// pace).
-    pub fn synthesize_cpu(
+    /// `[1, N_samples]` f32. `opts` reads as
+    /// [`forward_to_spectrogram`](Self::forward_to_spectrogram) reads it, so
+    /// one seed on one backend always gives the same samples.
+    pub fn synthesize<C>(
         &self,
-        client: &CpuClient,
-        token_ids: &Tensor<CpuRuntime>,
-        voice_row: &Tensor<CpuRuntime>,
-        speed: f32,
-    ) -> Result<Tensor<CpuRuntime>> {
+        client: &C,
+        token_ids: &Tensor<R>,
+        voice_row: &Tensor<R>,
+        opts: &KokoroSynthOptions,
+    ) -> Result<Tensor<R>>
+    where
+        C: KokoroClient<R>,
+        R::Client: IndexingOps<R>,
+    {
         let (mag, phase, _durations) =
-            self.forward_to_spectrogram_cpu(client, token_ids, voice_row, speed)?;
-        let window = hann_window(self.config.n_fft, voice_row.device())?;
-        let opts = IStftOptions {
+            self.forward_to_spectrogram(client, token_ids, voice_row, opts)?;
+        let window = hann_window::<R>(self.config.n_fft, voice_row.device())?;
+        let istft_opts = IStftOptions {
             hop_length: self.config.hop_length,
             padding: IStftPadding::Center,
             eps: 1e-8,
         };
-        istft(client, &mag, &phase, &window, opts)
+        istft(client, &mag, &phase, &window, istft_opts)
     }
 }
 
@@ -248,7 +194,7 @@ pub fn alignment_matrix_from_durations<R: Runtime<DType = DType>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use numr::runtime::cpu::CpuDevice;
+    use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 
     #[test]
     fn alignment_matrix_shape_and_placement() {

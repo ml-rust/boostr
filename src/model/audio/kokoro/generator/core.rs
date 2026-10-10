@@ -1,12 +1,6 @@
 use crate::error::{Error, Result};
 use crate::model::audio::kokoro::{AdaINResBlock1, MagPhaseHead, SourceModuleHnNSF, UpsampleBlock};
-use numr::dtype::DType;
-use numr::ops::{
-    ActivationOps, BinaryOps, CompareOps, ConvOps, MatmulOps, NormalizationOps, ReduceOps,
-    ScalarOps, ShapeOps, TensorOps, TypeConversionOps, UnaryOps, UtilityOps,
-};
-use numr::runtime::{Runtime, RuntimeClient};
-use numr::tensor::Tensor;
+use numr::runtime::Runtime;
 
 /// Parameters controlling the STFT used for noise-path conditioning.
 #[derive(Debug, Clone, Copy)]
@@ -33,7 +27,7 @@ pub struct IStftNetGenerator<R: Runtime> {
     pub conv_post: MagPhaseHead<R>,
     pub num_kernels: usize,
     pub leaky_slope: f64,
-    /// STFT parameters used by the CPU-specialized noise-path forward.
+    /// STFT parameters of the excitation spectrum the noise path reads.
     pub stft: GeneratorStftParams,
     /// Frames of reflection padding added on the LEFT of `x` on the last
     /// upsample stage, just before `+ x_source`: reference Kokoro's
@@ -152,75 +146,11 @@ impl<R: Runtime> IStftNetGenerator<R> {
         self.ups.len()
     }
 
-    /// Forward (generic main path): trunk `x [B, C, T]` + style `s [B, style_dim]`
-    /// → `(mag [B, F, T_out], phase [B, F, T_out])`.
-    ///
-    /// This is the runtime-agnostic path without source/noise conditioning. The
-    /// `f0` contour is unused here — it only drives the STFT-based noise path,
-    /// which is CPU-specialized in [`Self::forward_cpu_full`].
-    #[allow(clippy::type_complexity)]
-    pub fn forward<C>(
-        &self,
-        client: &C,
-        x: &Tensor<R>,
-        style: &Tensor<R>,
-        _f0: &Tensor<R>,
-    ) -> Result<(Tensor<R>, Tensor<R>)>
-    where
-        R: Runtime<DType = DType>,
-        C: RuntimeClient<R>
-            + ConvOps<R>
-            + NormalizationOps<R>
-            + ActivationOps<R>
-            + TensorOps<R>
-            + MatmulOps<R>
-            + BinaryOps<R>
-            + UnaryOps<R>
-            + ReduceOps<R>
-            + ScalarOps<R>
-            + ShapeOps<R>
-            + CompareOps<R>
-            + TypeConversionOps<R>
-            + UtilityOps<R>,
-    {
-        let mut x = x.clone();
-        for stage in 0..self.num_upsamples() {
-            x = client
-                .leaky_relu(&x, self.leaky_slope)
-                .map_err(Error::Numr)?;
-            x = self.ups[stage].forward(client, &x)?;
-
-            // This generic path omits source/noise conditioning, which is
-            // STFT-based and therefore CPU-specialized. The full Kokoro vocoder
-            // (harmonic excitation → STFT → per-stage noise residual) runs via
-            // [`Self::forward_cpu_full`]; this `forward` is the no-noise variant
-            // used by generic-runtime callers and when no noise weights loaded.
-
-            // Average K parallel resblocks for this stage.
-            let mut xs: Option<Tensor<R>> = None;
-            for k in 0..self.num_kernels {
-                let idx = stage * self.num_kernels + k;
-                let out = self.resblocks[idx].forward(client, &x, style)?;
-                xs = Some(match xs {
-                    None => out,
-                    Some(prev) => client.add(&prev, &out).map_err(Error::Numr)?,
-                });
-            }
-            let summed = xs.ok_or_else(|| Error::InvalidArgument {
-                arg: "num_kernels",
-                reason: "each upsample stage needs at least one resblock".into(),
-            })?;
-            x = client
-                .mul_scalar(&summed, 1.0 / self.num_kernels as f64)
-                .map_err(Error::Numr)?;
-        }
-
-        // Upstream's last `F.leaky_relu(x)` takes torch's default slope,
-        // not the per-stage one.
-        let x = client
-            .leaky_relu(&x, POST_LEAKY_SLOPE)
-            .map_err(Error::Numr)?;
-        self.conv_post.forward(client, &x)
+    /// Whether this generator has the per-stage noise-conditioning modules
+    /// populated. When `false`, [`Self::forward`] runs the upsampling
+    /// stages without a source.
+    pub fn has_noise_path(&self) -> bool {
+        !self.noise_convs.is_empty() && !self.noise_res.is_empty()
     }
 }
 
@@ -299,7 +229,7 @@ mod tests {
         let x = zeros(&[1, 8, 3], &device);
         let style = zeros(&[1, 4], &device);
         let f0 = zeros(&[1, 3, 1], &device);
-        let (mag, phase) = g.forward(&client, &x, &style, &f0).unwrap();
+        let (mag, phase) = g.forward(&client, &x, &style, &f0, None).unwrap();
         // First ups stride=2, kernel=2 on T=3: L_out = (3-1)*2 + 2 = 6.
         // Second ups stride=1, kernel=1 on T=6: L_out = 6.
         assert_eq!(mag.shape(), &[1, 3, 6]); // n_fft/2+1 = 3

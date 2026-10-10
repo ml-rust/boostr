@@ -30,7 +30,7 @@
 //!        x = cat([x, asr, f0, n], dim=1)     [B, 1090, T']  (until a block upsamples)
 //!        x = block(x, style)                  [B, 1024, T'] (block 0..2) or [B, 512, 2·T'] (block 3)
 //!
-//! 4. return generator(x, style, F0_curve) → (mag, phase)
+//! 4. return generator(x, style, F0_curve, seed) → (mag, phase)
 //! ```
 //!
 //! The exact time-axis alignment (how T/2, T, T' relate) depends on the real
@@ -39,14 +39,13 @@
 //! line up.
 
 use crate::error::{Error, Result};
-use crate::model::audio::kokoro::{AdainResBlk1d, IStftNetGenerator};
+use crate::model::audio::kokoro::{AdainResBlk1d, IStftNetGenerator, KokoroClient};
 use crate::nn::Conv1d;
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConvOps, MatmulOps, NormalizationOps, ReduceOps,
     ScalarOps, ShapeOps, TensorOps, TypeConversionOps, UnaryOps, UtilityOps,
 };
-use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
@@ -97,8 +96,12 @@ impl<R: Runtime> Decoder<R> {
     ///   expanded phoneme count).
     /// * `n_curve [B, T_f0]` — predicted energy, same time axis as `f0_curve`.
     /// * `style [B, style_dim]` — decoder-half style vector (128-d for Kokoro).
+    /// * `seed` — the PRNG stream of the generator's harmonic source (see
+    ///   [`IStftNetGenerator::forward`]). `None` draws unseeded.
     ///
-    /// Returns `(mag, phase)` ready for `istft`.
+    /// Runs the generator's full noise-conditioned path when the checkpoint
+    /// supplied `noise_convs` / `noise_res`. Returns `(mag, phase)` ready
+    /// for `istft`.
     #[allow(clippy::type_complexity)]
     pub fn forward<C>(
         &self,
@@ -107,23 +110,11 @@ impl<R: Runtime> Decoder<R> {
         f0_curve: &Tensor<R>,
         n_curve: &Tensor<R>,
         style: &Tensor<R>,
+        seed: Option<u64>,
     ) -> Result<(Tensor<R>, Tensor<R>)>
     where
         R: Runtime<DType = DType>,
-        C: RuntimeClient<R>
-            + ConvOps<R>
-            + NormalizationOps<R>
-            + ActivationOps<R>
-            + TensorOps<R>
-            + MatmulOps<R>
-            + BinaryOps<R>
-            + UnaryOps<R>
-            + ReduceOps<R>
-            + ScalarOps<R>
-            + ShapeOps<R>
-            + CompareOps<R>
-            + TypeConversionOps<R>
-            + UtilityOps<R>,
+        C: KokoroClient<R>,
     {
         let x = self.trunk(client, asr_feats, f0_curve, n_curve, style)?;
         let (b, t_f0) = (f0_curve.shape()[0], f0_curve.shape()[1]);
@@ -131,13 +122,13 @@ impl<R: Runtime> Decoder<R> {
         // Generator takes the original frame-rate f0_curve for source-filter
         // excitation (not the strided f0 tensor). Promote to [B, T_f0, 1].
         let f0_for_gen = f0_curve.reshape(&[b, t_f0, 1]).map_err(Error::Numr)?;
-        self.generator.forward(client, &x, style, &f0_for_gen)
+        self.generator.forward(client, &x, style, &f0_for_gen, seed)
     }
 
     /// The decoder up to the generator: the F0 and energy convolutions,
     /// `encode`, and every `decode` block with its residuals. Shared by
-    /// [`forward`](Self::forward) and the CPU noise-path forward. It holds no
-    /// random draw, so it is the decoder's deterministic half.
+    /// [`forward`](Self::forward) and the parity tests. It holds no random
+    /// draw, so it is the decoder's deterministic half.
     pub fn trunk<C>(
         &self,
         client: &C,
@@ -211,27 +202,6 @@ impl<R: Runtime> Decoder<R> {
     }
 }
 
-impl Decoder<CpuRuntime> {
-    /// CPU forward that uses the generator's full noise-conditioned path
-    /// (`forward_cpu_full`) when the checkpoint supplied `noise_convs` /
-    /// `noise_res`. Falls back to the noise-free `forward` otherwise.
-    #[allow(clippy::type_complexity)]
-    pub fn forward_cpu_full(
-        &self,
-        client: &CpuClient,
-        asr_feats: &Tensor<CpuRuntime>,
-        f0_curve: &Tensor<CpuRuntime>,
-        n_curve: &Tensor<CpuRuntime>,
-        style: &Tensor<CpuRuntime>,
-    ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
-        let x = self.trunk(client, asr_feats, f0_curve, n_curve, style)?;
-        let (b, t_f0) = (f0_curve.shape()[0], f0_curve.shape()[1]);
-        let f0_for_gen = f0_curve.reshape(&[b, t_f0, 1]).map_err(Error::Numr)?;
-        self.generator
-            .forward_cpu_full(client, &x, style, &f0_for_gen)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,6 +211,7 @@ mod tests {
     };
     use crate::test_utils::cpu_setup;
     use numr::ops::PaddingMode;
+    use numr::runtime::cpu::CpuRuntime;
 
     fn zeros(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
@@ -404,7 +375,9 @@ mod tests {
         let f0 = zeros(&[1, t], &device);
         let ne = zeros(&[1, t], &device);
         let style = zeros(&[1, style_dim], &device);
-        let (mag, phase) = decoder.forward(&client, &asr, &f0, &ne, &style).unwrap();
+        let (mag, phase) = decoder
+            .forward(&client, &asr, &f0, &ne, &style, None)
+            .unwrap();
         // n_fft/2 + 1 = 3 magnitude/phase bins. Time axis matches the single
         // ups stage's output (stride=1 → same as input = 5).
         assert_eq!(mag.shape(), &[1, 3, 5]);
@@ -499,6 +472,10 @@ mod tests {
         let f0 = zeros(&[1, 5], &device);
         let n = zeros(&[1, 7], &device); // mismatched
         let style = zeros(&[1, 2], &device);
-        assert!(decoder.forward(&client, &asr, &f0, &n, &style).is_err());
+        assert!(
+            decoder
+                .forward(&client, &asr, &f0, &n, &style, None)
+                .is_err()
+        );
     }
 }

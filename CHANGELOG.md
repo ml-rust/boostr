@@ -7,6 +7,59 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Kokoro on every backend** — the full synthesis path, with the harmonic source and the
+  per-stage noise conditioning, runs on any runtime: CPU, CUDA and WebGPU.
+- **`KokoroClient<R>`** — the client bound of the Kokoro synthesis path, exported from
+  `model::audio::kokoro`. Every numr backend client implements it.
+- **`KokoroSynthOptions`** — `speed` and `seed: Option<u64>` for
+  `KokoroModelV2::synthesize` and `forward_to_spectrogram`. One seed on one backend
+  always gives the same samples. `None` keeps the unseeded draws.
+- **Tests** — `kokoro_cuda` holds CUDA to the CPU port of the same checkpoint and checks
+  that a seed reproduces the waveform. `vits_synthesis_cuda` runs the VITS reference
+  parity on CUDA.
+
+### Changed
+
+- **`KokoroModelV2::forward_to_spectrogram`** — runs the decoder's noise-conditioned
+  path and takes `&KokoroSynthOptions` in place of `speed: f32`.
+- **`Decoder::forward`** (Kokoro) — runs the generator's noise-conditioned path and
+  takes a trailing `seed: Option<u64>`.
+- **`IStftNetGenerator::forward`** — runs the full vocoder with the harmonic source and
+  takes a trailing `seed: Option<u64>`. A generator without `noise_convs` / `noise_res`
+  runs the upsampling stages alone, as before.
+- **`SineGen::forward` and `SourceModuleHnNSF::forward`** — take a trailing
+  `seed: Option<u64>`. The initial phase draws from `seed` and the noise from
+  `seed + 1`.
+- **`SineGen` on WebGPU** — the phase sums in the input dtype, since WGSL has no 64-bit
+  float. CPU and CUDA still sum in f64.
+- **`IStftNetGenerator::has_noise_path`** — available on every runtime.
+
+### Removed
+
+- **CPU-only Kokoro methods** — use the runtime-neutral method in each case:
+
+  | Removed | Use |
+  | --- | --- |
+  | `KokoroModelV2::synthesize_cpu` | `KokoroModelV2::synthesize` |
+  | `KokoroModelV2::forward_to_spectrogram_cpu` | `KokoroModelV2::forward_to_spectrogram` |
+  | `Decoder::forward_cpu_full` | `Decoder::forward` |
+  | `IStftNetGenerator::forward_cpu_full` | `IStftNetGenerator::forward` |
+  | `IStftNetGenerator::forward_cpu_with_spectrum` | `IStftNetGenerator::forward_with_spectrum` |
+  | `IStftNetGenerator::excitation_cpu` | `IStftNetGenerator::excitation` |
+  | `IStftNetGenerator::harmonic_excitation_spec_cpu` | `IStftNetGenerator::harmonic_excitation_spec` |
+  | `IStftNetGenerator::source_spectrum_cpu` | `IStftNetGenerator::source_spectrum` |
+
+- **Kokoro's generic forward without the source** — the old generic
+  `forward_to_spectrogram`, `Decoder::forward` and `IStftNetGenerator::forward` skipped
+  the harmonic source and gave degraded audio. The methods of those names now run the
+  full path.
+
+---
+
 ## [0.5.0] - 2026-10-10
 
 ### ⚠️ Breaking changes

@@ -13,19 +13,17 @@
 //! conv_post : weight-normed Conv1d → (exp|sin) split      (mag/phase head)
 //! ```
 //!
-//! Two forward paths are provided:
+//! [`IStftNetGenerator::forward`] runs the complete vocoder on any runtime,
+//! including the harmonic-excitation → STFT → per-stage noise residual path.
+//! The STFT analysis uses [`crate::model::audio::stft()`]. A generator
+//! loaded without noise weights runs the upsampling stages alone.
+//! [`IStftNetGenerator::forward_with_spectrum`] runs everything after the
+//! source over a given excitation spectrum, with no random draw.
 //!
-//! * [`IStftNetGenerator::forward`] — the generic, runtime-agnostic main path
-//!   (no source/noise conditioning). Used by generic-runtime callers and when
-//!   a checkpoint ships without noise weights.
-//! * [`IStftNetGenerator::forward_cpu_full`] — the complete CPU vocoder used in
-//!   production, including the harmonic-excitation → STFT → per-stage noise
-//!   residual path. The STFT analysis uses [`crate::model::audio::stft()`].
-//!
-//! Full path (`forward_cpu_full`):
+//! Full path:
 //!
 //! ```text
-//! har = harmonic_excitation_spec(f0)            # [B, n_fft+2, T] via STFT
+//! har = harmonic_excitation_spec(f0, seed)      # [B, n_fft+2, T] via STFT
 //! for each upsample stage i:
 //!     x = leaky_relu(x)
 //!     x_source = noise_res[i](noise_convs[i](har), style)
@@ -41,7 +39,7 @@
 //! so the trunk meets the excitation's `center=True` frame count.
 
 mod core;
-mod cpu_full;
+mod full;
 #[cfg(test)]
 mod test_support;
 

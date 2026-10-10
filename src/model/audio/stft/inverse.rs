@@ -82,7 +82,7 @@ impl Default for IStftOptions {
     }
 }
 
-/// Run iSTFT on CPU, returning waveform `[B, N_samples]` (f32).
+/// Run iSTFT on any runtime, returning waveform `[B, N_samples]` (f32).
 ///
 /// * `mag` — `[B, F, T_frames]`
 /// * `phase` — `[B, F, T_frames]`

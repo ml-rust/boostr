@@ -199,6 +199,10 @@ name = "istft_backend_parity"
 required-features = ["audio"]
 
 [[test]]
+name = "kokoro_cuda"
+required-features = ["kokoro"]
+
+[[test]]
 name = "neucodec_encoder_cuda"
 required-features = ["neucodec"]
 

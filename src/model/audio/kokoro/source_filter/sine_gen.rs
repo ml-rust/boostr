@@ -1,38 +1,9 @@
-//! Harmonic-plus-noise source-filter excitation for the ISTFTNet generator.
-//!
-//! Upstream `decoder.generator.m_source` = `SourceModuleHnNSF`:
-//!
-//! ```text
-//! m_source
-//! ├── l_sin_gen: SineGen(sampling_rate, harmonic_num=8)   # no parameters
-//! ├── l_linear:  Linear(harmonic_num + 1 = 9, 1)           # fc.weight, fc.bias
-//! └── l_tanh:    nn.Tanh                                    # no parameters
-//! ```
-//!
-//! Flow per f0 sample:
-//!
-//! 1. For each harmonic `h ∈ {1, 2, …, harmonic_num+1}`, generate a sine wave
-//!    at `h · f0 / sample_rate` cycles per sample, as upstream's `_f02sine`
-//!    does: the per-sample increments are linearly downsampled by the
-//!    upsample scale, summed at that rate, scaled back up, and linearly
-//!    interpolated to the sample rate.
-//! 2. Stack harmonics along a new last axis → `[B, T, harmonic_num+1]`.
-//! 3. Voiced/unvoiced mask `uv = (f0 > threshold)`; voiced frames carry the
-//!    harmonics plus a small amount of Gaussian noise, while unvoiced frames
-//!    are driven entirely by Gaussian noise (`sine_amp / 3`). Each harmonic
-//!    also receives a random initial phase.
-//! 4. `l_linear` + `tanh` collapse the `harmonic_num+1` channels to a single
-//!    time-domain excitation signal.
-//!
-//! The random initial phase and additive noise use the runtime's RNG, matching
-//! the reference NSF implementation. Seed numr's global RNG before synthesis if you need
-//! bit-reproducible output.
+//! [`SineGen`]: the harmonic sines and the seeded noise of the source.
 
 use crate::error::{Error, Result};
 use numr::dtype::DType;
 use numr::ops::{
-    BinaryOps, CompareOps, MatmulOps, ScalarOps, ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
-    UtilityOps,
+    BinaryOps, CompareOps, ScalarOps, ShapeOps, TensorOps, TypeConversionOps, UnaryOps, UtilityOps,
 };
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
@@ -132,9 +103,13 @@ impl SineGen {
     /// `f0` is in Hz. Voiced frames (`f0 > voiced_threshold`) emit the sine
     /// harmonics scaled by `sine_amp` plus `noise_std` Gaussian noise; unvoiced
     /// frames emit `sine_amp / 3` Gaussian noise only. Each harmonic also gets a
-    /// random initial phase, as in the reference. The Gaussian/uniform draws use
-    /// the runtime's RNG — seed it (numr global RNG) for reproducible synthesis.
-    pub fn forward<R, C>(&self, client: &C, f0: &Tensor<R>) -> Result<Tensor<R>>
+    /// random initial phase, as in the reference.
+    ///
+    /// `seed` picks the PRNG stream of both draws. The initial phase draws
+    /// from `seed` and the noise from `seed.wrapping_add(1)`, so the two
+    /// stay independent. One seed, shape and backend always give the same
+    /// output. `None` draws from the runtime's unseeded RNG.
+    pub fn forward<R, C>(&self, client: &C, f0: &Tensor<R>, seed: Option<u64>) -> Result<Tensor<R>>
     where
         R: Runtime<DType = DType>,
         C: RuntimeClient<R>
@@ -190,7 +165,12 @@ impl SineGen {
 
         // Random initial phase per (batch, harmonic), fundamental fixed at 0,
         // added to the first sample's increment as upstream adds it.
-        let rand_phase = client.rand(&[b, 1, h - 1], dtype).map_err(Error::Numr)?;
+        let phase_shape = [b, 1, h - 1];
+        let rand_phase = match seed {
+            Some(s) => client.rand_seeded(&phase_shape, dtype, s),
+            None => client.rand(&phase_shape, dtype),
+        }
+        .map_err(Error::Numr)?;
         let zero_col = client.fill(&[b, 1, 1], 0.0, dtype).map_err(Error::Numr)?;
         let rand_ini = client
             .cat(&[&zero_col, &rand_phase], 2)
@@ -213,9 +193,8 @@ impl SineGen {
         } else {
             self.interpolate(client, &rad_values, frames, 1.0 / scale as f64)?
         };
-        // PyTorch's CPU cumsum accumulates f32 in f64, which keeps the
-        // phase of a long take exact to the f32 it ends in.
-        let wide = client.cast(&rad_frames, DType::F64).map_err(Error::Numr)?;
+        let sum_dtype = phase_sum_dtype::<R>(dtype);
+        let wide = client.cast(&rad_frames, sum_dtype).map_err(Error::Numr)?;
         let phase = client.cumsum(&wide, 1).map_err(Error::Numr)?;
         let phase = client.cast(&phase, dtype).map_err(Error::Numr)?;
         let phase = client
@@ -262,74 +241,33 @@ impl SineGen {
         let noise_amp = client
             .add(&voiced_noise, &unvoiced_noise)
             .map_err(Error::Numr)?; // [B, T, 1]
-        let gauss = client.randn(&[b, t, h], dtype).map_err(Error::Numr)?;
+        let noise_shape = [b, t, h];
+        let gauss = match seed {
+            Some(s) => client.randn_seeded(&noise_shape, dtype, noise_seed(s)),
+            None => client.randn(&noise_shape, dtype),
+        }
+        .map_err(Error::Numr)?;
         let noise = client.mul(&gauss, &noise_amp).map_err(Error::Numr)?;
 
         client.add(&sine_waves, &noise).map_err(Error::Numr)
     }
 }
 
-/// `SourceModuleHnNSF` — SineGen → Linear → tanh.
-pub struct SourceModuleHnNSF<R: Runtime> {
-    sine_gen: SineGen,
-    /// Linear weight `[1, harmonic_num + 1]`.
-    weight: Tensor<R>,
-    /// Linear bias `[1]`.
-    bias: Tensor<R>,
+/// The dtype the phase sums in. PyTorch's CPU cumsum accumulates f32 in
+/// f64, which keeps the phase of a long take exact to the f32 it ends in.
+/// WGSL has no 64-bit float, so WebGPU sums in the phase's own `dtype`.
+fn phase_sum_dtype<R: Runtime>(dtype: DType) -> DType {
+    if R::name() == "wgpu" {
+        dtype
+    } else {
+        DType::F64
+    }
 }
 
-impl<R: Runtime> SourceModuleHnNSF<R> {
-    pub fn new(sine_gen: SineGen, weight: Tensor<R>, bias: Tensor<R>) -> Result<Self> {
-        let expected_in = sine_gen.harmonic_num + 1;
-        if weight.shape() != [1, expected_in] {
-            return Err(Error::InvalidArgument {
-                arg: "weight",
-                reason: format!("expected [1, {expected_in}], got {:?}", weight.shape()),
-            });
-        }
-        if bias.shape() != [1] {
-            return Err(Error::InvalidArgument {
-                arg: "bias",
-                reason: format!("expected [1], got {:?}", bias.shape()),
-            });
-        }
-        Ok(Self {
-            sine_gen,
-            weight,
-            bias,
-        })
-    }
-
-    /// Forward: f0 contour `[B, T, 1]` → excitation `[B, T, 1]`.
-    pub fn forward<C>(&self, client: &C, f0: &Tensor<R>) -> Result<Tensor<R>>
-    where
-        R: Runtime<DType = DType>,
-        C: RuntimeClient<R>
-            + UnaryOps<R>
-            + BinaryOps<R>
-            + ScalarOps<R>
-            + MatmulOps<R>
-            + TensorOps<R>
-            + ShapeOps<R>
-            + CompareOps<R>
-            + TypeConversionOps<R>
-            + numr::ops::RandomOps<R>
-            + numr::ops::ReduceOps<R>
-            + numr::ops::IndexingOps<R>
-            + UtilityOps<R>,
-    {
-        let sines = self.sine_gen.forward(client, f0)?; // [B, T, h]
-        let shape = sines.shape();
-        let (b, t, h) = (shape[0], shape[1], shape[2]);
-        // Flatten to [B*T, h], linear, reshape to [B, T, 1], tanh.
-        let flat = sines.reshape(&[b * t, h]).map_err(Error::Numr)?;
-        let w_t = self.weight.transpose(0, 1).map_err(Error::Numr)?;
-        let projected = client
-            .matmul_bias(&flat, &w_t, &self.bias)
-            .map_err(Error::Numr)?;
-        let reshaped = projected.reshape(&[b, t, 1]).map_err(Error::Numr)?;
-        client.tanh(&reshaped).map_err(Error::Numr)
-    }
+/// The noise draw's sub-seed: distinct from the phase draw's `seed`, so a
+/// seeded run never correlates the two.
+fn noise_seed(seed: u64) -> u64 {
+    seed.wrapping_add(1)
 }
 
 #[cfg(test)]
@@ -341,6 +279,11 @@ mod tests {
     fn zeros(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
         Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; n], shape, device).unwrap()
+    }
+
+    #[test]
+    fn the_phase_sums_in_f64_on_cpu() {
+        assert_eq!(phase_sum_dtype::<CpuRuntime>(DType::F32), DType::F64);
     }
 
     #[test]
@@ -367,7 +310,7 @@ mod tests {
         sg.noise_std = 0.0;
         let t = 64;
         let f0 = Tensor::<CpuRuntime>::from_slice(&vec![100.0f32; t], &[1, t, 1], &device).unwrap();
-        let out: Vec<f32> = sg.forward(&client, &f0).unwrap().to_vec();
+        let out: Vec<f32> = sg.forward(&client, &f0, None).unwrap().to_vec();
         let r = 1.0f64 / 240.0;
         for j in 2..t - 2 {
             let want = 0.1 * (2.0 * std::f64::consts::PI * r * (j as f64 + 2.5)).sin();
@@ -381,7 +324,7 @@ mod tests {
         let (client, device) = cpu_setup();
         let sg = SineGen::new(24_000.0, 2).with_upsample_scale(4);
         let f0 = zeros(&[1, 6, 1], &device);
-        assert!(sg.forward(&client, &f0).is_err());
+        assert!(sg.forward(&client, &f0, None).is_err());
     }
 
     #[test]
@@ -394,7 +337,7 @@ mod tests {
             &device,
         )
         .unwrap();
-        let sines = sg.forward(&client, &f0).unwrap();
+        let sines = sg.forward(&client, &f0, None).unwrap();
         assert_eq!(sines.shape(), &[1, 5, 9]); // 8 harmonics + fundamental
     }
 
@@ -407,7 +350,7 @@ mod tests {
         let sg = SineGen::new(24_000.0, 2);
         let t = 512;
         let f0 = Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; t], &[1, t, 1], &device).unwrap();
-        let out = sg.forward(&client, &f0).unwrap();
+        let out = sg.forward(&client, &f0, None).unwrap();
         let data: Vec<f32> = out.to_vec();
         assert!(data.iter().all(|v| v.is_finite()));
         assert!(
@@ -430,7 +373,7 @@ mod tests {
         let sg = SineGen::new(24_000.0, 4);
         let t = 512;
         let f0 = Tensor::<CpuRuntime>::from_slice(&vec![220.0f32; t], &[1, t, 1], &device).unwrap();
-        let out = sg.forward(&client, &f0).unwrap();
+        let out = sg.forward(&client, &f0, None).unwrap();
         let data: Vec<f32> = out.to_vec();
         let rms = (data.iter().map(|v| v * v).sum::<f32>() / data.len() as f32).sqrt();
         // Harmonic RMS (~sine_amp/√2 ≈ 0.07) dwarfs the voiced noise_std=0.003.
@@ -438,44 +381,25 @@ mod tests {
     }
 
     #[test]
+    fn one_seed_reproduces_the_draws_and_another_changes_them() {
+        let (client, device) = cpu_setup();
+        let sg = SineGen::new(24_000.0, 4);
+        let t = 64;
+        // Half unvoiced, half voiced: the output carries both draws.
+        let contour: Vec<f32> = (0..t)
+            .map(|i| if i < t / 2 { 0.0 } else { 180.0 })
+            .collect();
+        let f0 = Tensor::<CpuRuntime>::from_slice(&contour, &[1, t, 1], &device).unwrap();
+        let run = |seed| sg.forward(&client, &f0, seed).unwrap().to_vec::<f32>();
+        assert_eq!(run(Some(7)), run(Some(7)));
+        assert_ne!(run(Some(7)), run(Some(8)));
+    }
+
+    #[test]
     fn sine_gen_rejects_wrong_f0_rank() {
         let (client, device) = cpu_setup();
         let sg = SineGen::new(24_000.0, 2);
         let f0 = zeros(&[1, 4], &device);
-        assert!(sg.forward(&client, &f0).is_err());
-    }
-
-    #[test]
-    fn source_module_output_shape_is_b_t_1() {
-        let (client, device) = cpu_setup();
-        let sg = SineGen::new(24_000.0, 4);
-        let module =
-            SourceModuleHnNSF::new(sg, zeros(&[1, 5], &device), zeros(&[1], &device)).unwrap();
-        let f0 = Tensor::<CpuRuntime>::from_slice(&[200.0f32, 200.0, 200.0], &[1, 3, 1], &device)
-            .unwrap();
-        let out = module.forward(&client, &f0).unwrap();
-        assert_eq!(out.shape(), &[1, 3, 1]);
-    }
-
-    #[test]
-    fn source_module_zero_weight_gives_zero_output() {
-        // With weight=0, bias=0, Linear output is 0, tanh(0)=0.
-        let (client, device) = cpu_setup();
-        let sg = SineGen::new(24_000.0, 2);
-        let module =
-            SourceModuleHnNSF::new(sg, zeros(&[1, 3], &device), zeros(&[1], &device)).unwrap();
-        let f0 = Tensor::<CpuRuntime>::from_slice(&[200.0f32; 4], &[1, 4, 1], &device).unwrap();
-        let out = module.forward(&client, &f0).unwrap();
-        for v in out.to_vec::<f32>() {
-            assert!(v.abs() < 1e-5, "got {v}");
-        }
-    }
-
-    #[test]
-    fn source_module_rejects_wrong_weight_shape() {
-        let (_client, device) = cpu_setup();
-        let sg = SineGen::new(24_000.0, 2);
-        let bad = SourceModuleHnNSF::new(sg, zeros(&[1, 99], &device), zeros(&[1], &device));
-        assert!(bad.is_err());
+        assert!(sg.forward(&client, &f0, None).is_err());
     }
 }

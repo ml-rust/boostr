@@ -1,6 +1,5 @@
-// Split-K range bodies for the feature-major MMQ family, included by
-// `quant_mmq_mma.cu` after `mmqf_accumulate`, `mmqf_write_dst` and
-// `mmqf_write_fixup` are defined; it is not a compilation unit of its own.
+// Split-K range bodies for the feature-major MMQ family. Not a compilation
+// unit of its own.
 //
 // Three entry-point bodies live here: `mmqf_ms_body` (one block per output
 // tile, the K ranges back to back), `mmqf_sk_body` (one block per (tile,
@@ -11,9 +10,13 @@
 // at any M and any tile position.
 #pragma once
 
+#include "accumulate.cuh"
+#include "body.cuh"
+#include "common.cuh"
+
 // `mmqf_split_range`, the one K-range rule; the single-token kernel in
 // `quant_mmq_gemv1.cu` reads the same header.
-#include "mmq/split_range.cuh"
+#include "../mmq/split_range.cuh"
 
 // Adds a partial tile into the output. The same lane owns the same element
 // on every split, so the read-modify-write needs no atomics; the sum for

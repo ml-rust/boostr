@@ -22,7 +22,7 @@
 // several output columns.
 //
 // Weight decode is lifted from the MMQ staging structs `MmqfQ40`, `MmqfQ50`,
-// `MmqfQ41` and `MmqfQ51` in `../quant_mmq_mma.cu`, which are in turn
+// `MmqfQ41` and `MmqfQ51` in `../mmq_mma/formats/`, which are in turn
 // cross-checked element by element against `dequant_q4_0`, `dequant_q5_0`,
 // `dequant_q4_1` and `dequant_q5_1` in
 // `src/quant/cpu/kernels/dequant_simple.rs`. Nibble map, shared by all four:

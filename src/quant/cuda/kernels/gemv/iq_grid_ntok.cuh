@@ -24,7 +24,7 @@
 // LANE MAP. A super-block is 256 elements = 32 sub-groups of 8, and a warp
 // has 32 lanes, so lane `l` owns sub-group `l` of ONE super-block and a warp
 // step covers a whole super-block. That is the same lane-to-sub-group map the
-// MMQ staging structs in `../quant_mmq_mma.cu` use, which is what lets the
+// MMQ staging structs in `../mmq_mma/formats/` use, which is what lets the
 // decode below be lifted from them unchanged. The 8 elements a lane owns are
 // contiguous, and consecutive lanes read consecutive index bytes, so every
 // index/sign/scale read across a warp covers a contiguous field of the block.

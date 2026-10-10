@@ -118,7 +118,7 @@ use boostr::quant::cuda::kernels::{
     GEMV_IQ3_S_MODULE, GEMV_IQ3_XXS_MODULE, GEMV_IQ4_NL_MODULE, GEMV_IQ4_XS_MODULE,
     GEMV_PQ2_0_MODULE, GEMV_PTQ1_0_MODULE, GEMV_Q1_0_MODULE, GEMV_Q2_0_MODULE, GEMV_Q2_K_MODULE,
     GEMV_Q3_K_MODULE, GEMV_Q4_1_MODULE, GEMV_Q5_0_MODULE, GEMV_Q5_1_MODULE, GEMV_Q5_K_MODULE,
-    QUANT_GEMV_MODULE, QUANT_MMQ_GEMV1_MODULE, QUANT_MMQ_MMA_MODULE,
+    QUANT_GEMV_MODULE, QUANT_MMQ_GEMV1_MODULE,
 };
 // The ONE set of grids and the ONE sign table, shared with the CPU
 // dequantizers the IQ1, IQ2 and IQ3 references mirror.
@@ -1942,7 +1942,7 @@ impl MmqFormat {
     /// format the family does not compile; every format this tool knows is
     /// compiled today. Mirrors the `FeatMajorFormat` constants in
     /// `src/quant/cuda/quant_matmul/mmq_feat_major/formats/` and the
-    /// `MMQ_FM_KERNEL` instantiations in `quant_mmq_mma.cu`.
+    /// per-format translation units in `src/quant/cuda/kernels/mmq_mma/`.
     fn feat_major_infix(&self) -> Option<&'static str> {
         match self {
             MmqFormat::Q8_0 => Some("q8_0"),
@@ -2682,7 +2682,7 @@ fn repack_q8_1_mmq(act: &[u8], m: usize, k: usize, ntok: usize) -> Vec<u8> {
 /// `quant_mmq_q4_k_q8_1` in `src/quant/cuda/kernels/quant_gemv.cu`
 /// (`blk + 16 + (j / 2) * 32`, low nibble for even `j`, high for odd) and
 /// from the identical byte indexing `mmq_q4_k_stage_load` uses in
-/// `src/quant/cuda/kernels/quant_mmq_mma.cu`.
+/// `src/quant/cuda/kernels/mmq_mma/q4_k.cu`.
 #[cfg(feature = "cuda")]
 fn build_q4_k_weight(n: usize, k: usize) -> Vec<u8> {
     const SUPER: usize = 256;
@@ -2815,7 +2815,7 @@ fn build_q5_k_weight(n: usize, k: usize) -> Vec<u8> {
 /// The `ql`/`qh` bit-packing below is copied verbatim from that file's
 /// `pack_q6k` function (lines 99-114), which both the dp4a
 /// (`quant_mmq_q6_k_q8_1` in `quant_gemv.cu`) and MMA
-/// (`mmq_q6_k_stage_load` in `quant_mmq_mma.cu`) kernels unpack identically.
+/// (`mmq_q6_k_stage_load` in `mmq_mma/q6_k.cu`) kernels unpack identically.
 #[cfg(feature = "cuda")]
 fn build_q6_k_weight(n: usize, k: usize) -> Vec<u8> {
     const SUPER: usize = 256;
@@ -3084,9 +3084,14 @@ fn main() {
         shared_mem_bytes: 0,
     };
 
-    let mma_module =
-        kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_MMA_MODULE)
-            .expect("load mma module");
+    // One tensor-core module per format holds its feature-major kernels and,
+    // for Q8_0, Q4_K and Q6_K, the token-major `_mma` kernel too.
+    let mma_module_name = format
+        .feat_major_infix()
+        .and_then(kernels::quant_mmq_mma_module)
+        .expect("every format this tool knows has a tensor-core MMQ module");
+    let mma_module = kernels::get_or_load_module(client.context(), device_index, mma_module_name)
+        .expect("load mma module");
 
     // Token-major pair: the dp4a MMQ kernel and its tensor-core twin, which
     // share a grid and a per-token activation layout. Q4_0, Q5_K and Q3_K

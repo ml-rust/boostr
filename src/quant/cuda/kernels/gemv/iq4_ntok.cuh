@@ -23,7 +23,7 @@
 // the dp4a branch for these formats only from m = 2 up.
 //
 // Weight decode is lifted from the MMQ staging structs `MmqfIQ4NL` and
-// `MmqfIQ4XS` in `../quant_mmq_mma.cu`, which are in turn cross-checked
+// `MmqfIQ4XS` in `../mmq_mma/formats/`, which are in turn cross-checked
 // element by element against `dequant_iq4_nl` and `dequant_iq4_xs` in
 // `src/quant/cpu/kernels/dequant_iq4.rs`. Nibble map, shared by both: within
 // one 32-element run, element `j` (0..15) is the LOW nibble of `qs[j]` and

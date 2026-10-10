@@ -6,7 +6,7 @@
 //
 // WORD MAPS. Staged word `w` of a 256-k group holds elements `4w .. 4w + 3`,
 // so word `i` of chunk `j` is elements `32j + 4i .. +3`. Every map below is
-// the inverse of the corresponding `stage` in `quant_mmq_mma.cu`, which is
+// the inverse of the corresponding `stage` in `mmq_mma/formats/`, which is
 // where the map is derived and cross-checked against the CPU dequantizers.
 //
 // The four 32-element formats and IQ4_NL share ONE map, the split-half

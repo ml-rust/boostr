@@ -1581,7 +1581,7 @@ extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(4) * WARP_SIZE, 1) void 
 // else. A minimum-blocks-per-SM of 1 tells ptxas one resident block suffices,
 // so it spends registers freely and occupancy falls; leaving it out lets ptxas
 // size the register budget per target architecture. Same reasoning as the
-// tensor-core variants in `quant_mmq_mma.cu`.
+// tensor-core variants in `mmq_mma/token_major.cuh`.
 #define MMQ_THREADS 256
 #define MMQ_TM 8
 #define MMQ_TN 4

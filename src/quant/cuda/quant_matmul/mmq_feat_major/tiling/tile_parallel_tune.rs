@@ -23,7 +23,7 @@ use numr::runtime::{Device, RuntimeClient};
 use numr::tensor::Tensor;
 
 use crate::error::{Error, Result};
-use crate::quant::cuda::kernels::{self, QUANT_MMQ_MMA_MODULE};
+use crate::quant::cuda::kernels;
 use crate::quant::cuda::quant_matmul::helpers::quantize_activation_q8_1_mmq;
 
 use super::super::formats::FeatMajorFormat;
@@ -184,7 +184,7 @@ fn probe(client: &CudaClient, fm: &FeatMajorFormat) -> Result<bool> {
     let weight_bytes = fm.quant_format.storage_bytes(n as usize * k as usize)?;
     let weight = Tensor::<CudaRuntime>::empty(&[weight_bytes], DType::U8, device)?;
     let output = Tensor::<CudaRuntime>::empty(&[m as usize, n as usize], DType::F32, device)?;
-    let module = kernels::get_or_load_module(client.context(), device.id(), QUANT_MMQ_MMA_MODULE)?;
+    let module = kernels::get_or_load_module(client.context(), device.id(), fm.module)?;
 
     let launch = Launch {
         format: fm,
@@ -261,6 +261,23 @@ mod tests {
             );
         }
         assert_eq!(seen.len(), ALL.len());
+    }
+
+    /// Each descriptor loads the module its format's translation unit
+    /// compiles to, and no two descriptors share one.
+    #[test]
+    fn every_descriptor_names_its_own_module() {
+        let mut seen = HashSet::new();
+        for fm in ALL {
+            assert_eq!(
+                Some(fm.module),
+                kernels::quant_mmq_mma_module(fm.kernel_infix),
+                "{}",
+                fm.kernel_infix
+            );
+            assert!(seen.insert(fm.module), "{} repeats", fm.module);
+        }
+        assert_eq!(seen.len(), kernels::QUANT_MMQ_MMA_MODULES.len());
     }
 
     #[test]

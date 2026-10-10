@@ -1,11 +1,11 @@
 // Lowbit weight format policies for the feature-major MMQ family:
-// PQ2_0, Q2_0, Q1_0 and PTQ1_0. Included by `quant_mmq_mma.cu` after
-// `MmqfQ80` and `mmqf_vec_dot_d` are defined; it is not a compilation unit
-// of its own.
+// PQ2_0, Q2_0, Q1_0 and PTQ1_0. Each of `pq2_0.cu`, `q2_0.cu`, `q1_0.cu`
+// and `ptq1_0.cu` includes it and instantiates one of them; it is not a
+// compilation unit of its own.
 //
 // PQ2_0, Q2_0 and Q1_0 keep an f16 `d` at byte 0 and a dense bit-packed `qs`
 // run at byte 2, element order byte-major, low bits first
-// (`../lowbit_dequant.cuh` is the layout's one home). One block spans 64
+// (`../../lowbit_dequant.cuh` is the layout's one home). One block spans 64
 // (Q2_0) or 128 (PQ2_0, Q1_0) elements under ONE scale, where the legacy
 // 32-element formats carry one scale per block. The MMA loop reads signed
 // int8 lanes at `X_QS` and one f32 scale per 32 elements at `X_DS`, so
@@ -48,7 +48,10 @@
 
 #pragma once
 
-#include "../lowbit_dequant.cuh"
+#include "../../lowbit_dequant.cuh"
+#include "../common.cuh"
+#include "../vec_dot_d.cuh"
+#include "q8_0.cuh"
 
 // The shared body. `CHUNK_BYTES` is a 32-element chunk of the code run: 8
 // bytes at 2 bits per element, 4 at 1 bit. `SIGN` picks the sign-bit
@@ -198,7 +201,7 @@ static_assert(MmqfPQ20::CHUNKS == 4 && MmqfQ20::CHUNKS == 2 && MmqfQ10::CHUNKS =
 //
 // Block: `qs[24]` at 0, `qh[2]` at 24, f16 `d` at 26. Element `e` reads one
 // byte at one trit level, level-major over three runs
-// (`gguf_ptq1_0_trit` in `../lowbit_dequant.cuh`):
+// (`gguf_ptq1_0_trit` in `../../lowbit_dequant.cuh`):
 //   e in [0, 80)     byte qs[e % 16],           level e / 16
 //   e in [80, 120)   byte qs[16 + (e - 80) % 8], level (e - 80) / 8
 //   e in [120, 128)  byte qh[(e - 120) % 2],    level (e - 120) / 2
@@ -216,7 +219,7 @@ static_assert(MmqfPQ20::CHUNKS == 4 && MmqfQ20::CHUNKS == 2 && MmqfQ10::CHUNKS =
 // So 15 of the 16 lane groups are "8 consecutive bytes at a group offset,
 // one level", and the `qh` tail — the lane with `chunk % 4 == 3 && kqsx ==
 // 3` — is the one bespoke case. Both go through `ptq1_0_expand4`
-// (`../lowbit_dequant.cuh`), one call per staged word, with a per-lane
+// (`../../lowbit_dequant.cuh`), one call per staged word, with a per-lane
 // `(mask, mul)` pair that is the ONLY difference between them: a run lane
 // scales its four bytes by `pow3[level]`, the tail lane scales `qh0` and
 // `qh1` by two powers at once. Offset, mask and multipliers depend on the
@@ -279,7 +282,7 @@ struct MmqfPTQ10 {
         // Byte offset of the group's source bytes inside the block, the trit
         // level of a run lane, and the `(mask, mul)` pair `ptq1_0_expand4`
         // takes for each staged word; see the run table above and the tail
-        // derivation in `../lowbit_dequant.cuh`.
+        // derivation in `../../lowbit_dequant.cuh`.
         unsigned int group_off;
         int level;
         if (e0 < 80) {

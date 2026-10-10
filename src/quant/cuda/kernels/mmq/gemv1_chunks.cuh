@@ -45,7 +45,7 @@
 #include "gemv1_legacy.cuh"
 
 // Activation record: 4 header words, then 32 quant words (128 k-values);
-// `MMQF_Y_DS`, `MMQF_Y_QS` and `MMQF_Y_STRIDE` in `quant_mmq_mma.cu`. A
+// `MMQF_Y_DS`, `MMQF_Y_QS` and `MMQF_Y_STRIDE` in `mmq_mma/common.cuh`. A
 // step stages two records: 72 words, 18 windows. Header word `b` of a
 // record carries chunk `b`'s activation scale as `half` bits in its low
 // half and the exact int16 sum of the chunk's 32 activation quants in its

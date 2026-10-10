@@ -32,7 +32,9 @@ use std::sync::{Mutex, OnceLock};
 
 use boostr::quant::cuda::kernels::{
     self, GEMV_PQ2_0_MODULE, GEMV_PTQ1_0_MODULE, GEMV_Q1_0_MODULE, GEMV_Q2_0_MODULE,
-    QUANT_GEMV_MODULE, QUANT_MMQ_MMA_MODULE,
+    QUANT_GEMV_MODULE, QUANT_MMQ_MMA_PQ2_0_MODULE, QUANT_MMQ_MMA_PTQ1_0_MODULE,
+    QUANT_MMQ_MMA_Q1_0_MODULE, QUANT_MMQ_MMA_Q2_0_MODULE, QUANT_MMQ_MMA_Q4_K_MODULE,
+    QUANT_MMQ_MMA_Q6_K_MODULE, QUANT_MMQ_MMA_Q8_0_MODULE,
 };
 use boostr::quant::cuda::quant_matmul::forced_tile::quant_matmul_forced_schedule;
 use boostr::quant::cuda::quant_matmul::mmq_feat_major::Schedule;
@@ -438,7 +440,8 @@ fn q6_k_mma_kernel_matches_dp4a_kernel() {
     let dp4a_func = kernels::get_kernel_function(&dp4a_module, "quant_mmq_q6_k_q8_1").unwrap();
 
     let mma_module =
-        kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_MMA_MODULE).unwrap();
+        kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_MMA_Q6_K_MODULE)
+            .unwrap();
     let mma_func = kernels::get_kernel_function(&mma_module, "quant_mmq_q6_k_q8_1_mma").unwrap();
 
     unsafe {
@@ -551,7 +554,8 @@ fn q4_k_mma_kernel_matches_dp4a_kernel() {
     let dp4a_func = kernels::get_kernel_function(&dp4a_module, "quant_mmq_q4_k_q8_1").unwrap();
 
     let mma_module =
-        kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_MMA_MODULE).unwrap();
+        kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_MMA_Q4_K_MODULE)
+            .unwrap();
     let mma_func = kernels::get_kernel_function(&mma_module, "quant_mmq_q4_k_q8_1_mma").unwrap();
 
     unsafe {
@@ -665,7 +669,8 @@ fn mma_kernel_matches_dp4a_kernel() {
     let dp4a_func = kernels::get_kernel_function(&dp4a_module, "quant_mmq_q8_0_q8_1").unwrap();
 
     let mma_module =
-        kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_MMA_MODULE).unwrap();
+        kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_MMA_Q8_0_MODULE)
+            .unwrap();
     let mma_func = kernels::get_kernel_function(&mma_module, "quant_mmq_q8_0_q8_1_mma").unwrap();
 
     unsafe {
@@ -765,6 +770,7 @@ struct LowbitCase {
     gemv_kernel: &'static str,
     gemv_module: &'static str,
     mma_kernel: &'static str,
+    mma_module: &'static str,
     block_elems: usize,
     block_bytes: usize,
     decode: fn(&[u8], usize) -> i32,
@@ -883,7 +889,7 @@ fn lowbit_device_ready(name: &str) -> bool {
     true
 }
 
-/// Launches the feature-major kernel `mma_kernel` at token tile
+/// Launches the feature-major kernel `mma_kernel` of module `mma_module` at token tile
 /// [`LOWBIT_MMQ_X`] on the repacked activation `packed_ptr`: grid (token
 /// tiles, feature tiles), 256 threads, dynamic shared memory of one 76-int
 /// weight row per feature plus one 36-int activation record per token
@@ -892,6 +898,7 @@ fn lowbit_device_ready(name: &str) -> bool {
 fn launch_lowbit_mma(
     client: &CudaClient,
     device_index: usize,
+    mma_module: &'static str,
     mma_kernel: &str,
     packed_ptr: u64,
     weight_ptr: u64,
@@ -905,7 +912,7 @@ fn launch_lowbit_mma(
     let n_u32 = n as u32;
     let ntok = LOWBIT_MMQ_X;
     let mma_module =
-        kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_MMA_MODULE).unwrap();
+        kernels::get_or_load_module(client.context(), device_index, mma_module).unwrap();
     let mma_func = kernels::get_kernel_function(&mma_module, mma_kernel).unwrap();
     let smem = 4 * (128 * 76 + LOWBIT_MMQ_X * 36);
     mma_func
@@ -1001,6 +1008,7 @@ fn lowbit_mma_matches_gemv(name: &str, case: &LowbitCase, weight_bytes: &[u8], k
     launch_lowbit_mma(
         &client,
         device_index,
+        case.mma_module,
         case.mma_kernel,
         packed.ptr(),
         weight_ptr,
@@ -1062,6 +1070,7 @@ fn pq2_0_mma_kernel_matches_gemv_kernel() {
             gemv_kernel: "quant_gemv_pq2_0_q8_1_mwr_n4",
             gemv_module: GEMV_PQ2_0_MODULE,
             mma_kernel: "quant_mmq_pq2_0_q8_1_mma_x64",
+            mma_module: QUANT_MMQ_MMA_PQ2_0_MODULE,
             block_elems: 128,
             block_bytes: 34,
             decode: lowbit_code2,
@@ -1082,6 +1091,7 @@ fn q2_0_mma_kernel_matches_gemv_kernel() {
             gemv_kernel: "quant_gemv_q2_0_q8_1_mwr_n4",
             gemv_module: GEMV_Q2_0_MODULE,
             mma_kernel: "quant_mmq_q2_0_q8_1_mma_x64",
+            mma_module: QUANT_MMQ_MMA_Q2_0_MODULE,
             block_elems: 64,
             block_bytes: 18,
             decode: lowbit_code2,
@@ -1102,6 +1112,7 @@ fn q1_0_mma_kernel_matches_gemv_kernel() {
             gemv_kernel: "quant_gemv_q1_0_q8_1_mwr_n4",
             gemv_module: GEMV_Q1_0_MODULE,
             mma_kernel: "quant_mmq_q1_0_q8_1_mma_x64",
+            mma_module: QUANT_MMQ_MMA_Q1_0_MODULE,
             block_elems: 128,
             block_bytes: 18,
             decode: lowbit_sign,
@@ -1336,6 +1347,7 @@ fn ptq1_0_mma_matches_f32_gemv(name: &str, weight_bytes: &[u8], k: usize) {
     launch_lowbit_mma(
         &client,
         device_index,
+        QUANT_MMQ_MMA_PTQ1_0_MODULE,
         "quant_mmq_ptq1_0_q8_1_mma_x64",
         packed.ptr(),
         weight_ptr,

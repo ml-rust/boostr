@@ -14,7 +14,7 @@
 // WORD MAPS. Chunk `j` of a super-block is staged words `8j .. 8j + 7`, and
 // staged word `w` holds elements `4w .. 4w + 3`, so word `i` of a chunk is
 // elements `32j + 4i .. +3`. Each map below is the inverse of the
-// corresponding `stage` in `quant_mmq_mma.cu`, which is where the map is
+// corresponding `stage` in `mmq_mma/formats/`, which is where the map is
 // derived and cross-checked against the CPU dequantizers.
 #pragma once
 

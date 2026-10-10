@@ -76,7 +76,7 @@ static __device__ __forceinline__ int gguf_ptq1_0_trit(
 // Ports of `vec_dot_q1_0_q8_1` and `vec_dot_q2_0_q8_1` from `ggml-cuda`'s
 // `vecdotq.cuh` — same LUT words, same `__byte_perm` selectors.
 // Shared by the token-batched dp4a GEMV (`gemv/lowbit_ntok.cuh`), the
-// feature-major MMQ staging (`mmq/lowbit_tiles.cuh`) and the single-token
+// feature-major MMQ staging (`mmq_mma/formats/lowbit.cuh`) and the single-token
 // body's readers (`mmq/gemv1_formats.cuh`), which all want a code run as
 // signed int8 lanes.
 //
@@ -124,7 +124,7 @@ static __device__ __forceinline__ void lowbit_expand_sign8(
 
 // ── PTQ1_0 int8x4 expansions ────────────────────────────────────────────
 //
-// Used by the feature-major MMQ staging (`mmq/lowbit_tiles.cuh`), which gives
+// Used by the feature-major MMQ staging (`mmq_mma/formats/lowbit.cuh`), which gives
 // one lane 8 consecutive elements of a block. In the two `qs` runs those 8
 // elements read 8 CONSECUTIVE bytes at ONE trit level (the run's per-level
 // width, 16 or 8, is a multiple of 8 and `e0 % 8 == 0`); in the `qh` tail

@@ -4,6 +4,9 @@
 
 use super::super::FeatMajorFormat;
 use crate::quant::QuantFormat;
+use crate::quant::cuda::kernels::{
+    QUANT_MMQ_MMA_IQ1_S_MODULE, QUANT_MMQ_MMA_IQ3_S_MODULE, QUANT_MMQ_MMA_IQ3_XXS_MODULE,
+};
 
 /// IQ3_XXS: 98-byte blocks of 256 elements, staged as Q8_0's row byte for byte
 /// — 64 quant words plus 8 f32 group scales plus 4 ints of bank padding.
@@ -28,6 +31,7 @@ use crate::quant::QuantFormat;
 pub(in crate::quant::cuda::quant_matmul) const IQ3_XXS: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::IQ3XXS,
     kernel_infix: "iq3_xxs",
+    module: QUANT_MMQ_MMA_IQ3_XXS_MODULE,
     x_stride: 76,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
@@ -53,6 +57,7 @@ pub(in crate::quant::cuda::quant_matmul) const IQ3_XXS: FeatMajorFormat = FeatMa
 pub(in crate::quant::cuda::quant_matmul) const IQ3_S: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::IQ3S,
     kernel_infix: "iq3_s",
+    module: QUANT_MMQ_MMA_IQ3_S_MODULE,
     x_stride: 76,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
@@ -91,6 +96,7 @@ pub(in crate::quant::cuda::quant_matmul) const IQ3_S: FeatMajorFormat = FeatMajo
 pub(in crate::quant::cuda::quant_matmul) const IQ1_S: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::IQ1S,
     kernel_infix: "iq1_s",
+    module: QUANT_MMQ_MMA_IQ1_S_MODULE,
     x_stride: 84,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,

@@ -15,30 +15,33 @@ pub(in crate::quant::cuda::quant_matmul::mmq_feat_major) const FEAT_TILE_NARROW:
 /// per block, four times the blocks of the narrow tile at the same per-warp
 /// work. Compiled only for the formats whose `narrow_tile` flag is set, and
 /// only at [`SMALL_VARIANTS`]. Must match `MMQF_Y_SMALL` in
-/// `src/quant/cuda/kernels/quant_mmq_mma.cu`.
+/// `src/quant/cuda/kernels/mmq_mma/common.cuh`.
 pub(in crate::quant::cuda::quant_matmul::mmq_feat_major) const FEAT_TILE_SMALL: u32 = 16;
 
 /// Token tiles compiled at the single-warp feature tile. Must match the
-/// `MMQ_FM_KERNEL_Y16` list in the kernel file. A batch wider than the last
-/// one takes the narrow or default tile.
+/// `MMQ_FM_KERNEL_Y16` lines of `MMQ_FM_KERNELS_NARROW` in
+/// `src/quant/cuda/kernels/mmq_mma/entry_points.cuh`. A batch wider than the
+/// last one takes the narrow or default tile.
 pub(in crate::quant::cuda::quant_matmul::mmq_feat_major) const SMALL_VARIANTS: &[u32] = &[8, 16];
 
 /// Widest token tile the kernel stages both 128-k halves of an activation
 /// group at once on every feature tile and cadence, prefetching the next
 /// group where the format allows; the shared-memory request doubles its
-/// activation term up to here. Must match `MMQF_SMALL_X` in the kernel file.
+/// activation term up to here. Must match `MMQF_SMALL_X` in
+/// `src/quant/cuda/kernels/mmq_mma/common.cuh`.
 pub(in crate::quant::cuda::quant_matmul::mmq_feat_major) const SMALL_X: u32 = 32;
 
 /// Compiled token-tile variants at the default feature tile, ascending. Below
 /// 48 the tile steps by 8, at and above it by 16; the kernel's warp blocking
-/// rejects every other value.
+/// rejects every other value. Must match `MMQ_FM_KERNELS` in
+/// `src/quant/cuda/kernels/mmq_mma/entry_points.cuh`.
 pub(in crate::quant::cuda::quant_matmul::mmq_feat_major) const VARIANTS: &[u32] =
     &[8, 16, 24, 32, 40, 48, 64, 80, 96, 112, 128];
 
 /// Token tiles compiled at the narrow feature tile. Stops at 64: a batch that
 /// wants a wider token tile already launches enough tiles at the default
-/// feature tile. Must match the `MMQ_FM_KERNEL_Y64` list in
-/// `src/quant/cuda/kernels/quant_mmq_mma.cu`.
+/// feature tile. Must match the `MMQ_FM_KERNEL_Y64` lines of
+/// `MMQ_FM_KERNELS_NARROW` in `src/quant/cuda/kernels/mmq_mma/entry_points.cuh`.
 pub(in crate::quant::cuda::quant_matmul::mmq_feat_major) const NARROW_VARIANTS: &[u32] =
     &[8, 16, 24, 32, 40, 48, 64];
 
@@ -121,7 +124,7 @@ pub(in crate::quant::cuda::quant_matmul::mmq_feat_major) enum Role {
 }
 
 /// 128-k halves of a 256-k group the activation tile holds at once: two on
-/// [`Cadence::Group`] (`mmqf_accumulate_group` in the kernel file) and at
+/// [`Cadence::Group`] (`mmqf_accumulate_group` in `mmq_mma/accumulate.cuh`) and at
 /// every token tile up to [`SMALL_X`], each a full record slice plus its
 /// scratch, else one. Must match the kernel's `GROUP` template axis and its
 /// `MMQF_SMALL_X` rule.

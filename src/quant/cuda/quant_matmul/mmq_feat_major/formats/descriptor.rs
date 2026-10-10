@@ -11,6 +11,10 @@ pub(in crate::quant::cuda::quant_matmul) struct FeatMajorFormat {
     pub quant_format: QuantFormat,
     /// Format name inside the kernel symbol, as `MMQ_FM_KERNEL`'s `NAME`.
     pub kernel_infix: &'static str,
+    /// Module that holds this format's entry points,
+    /// `quant_mmq_mma_<kernel_infix>`: the fatbin of
+    /// `src/quant/cuda/kernels/mmq_mma/<kernel_infix>.cu`.
+    pub module: &'static str,
     /// Weight row stride in the shared tile, in ints (`FMT::X_STRIDE`).
     pub x_stride: u32,
     /// K must be a whole number of these for the staging map to hold.
@@ -57,16 +61,17 @@ pub(in crate::quant::cuda::quant_matmul) struct FeatMajorFormat {
     /// `mmq_feat_major.<kernel_infix>.prefers_tile_parallel`. One per
     /// format, so two formats never share a probe result.
     pub tile_parallel_key: &'static str,
-    /// `true` when the kernel file compiles this format's `_y64_` and `_y16_`
+    /// `true` when the format's kernel file compiles its `_y64_` and `_y16_`
     /// entry points: the narrow feature tile for the CTA-starved small-M,
     /// small-N regime and the single-warp tile for the decode regime — see
-    /// `MMQ_FM_KERNEL_Y64` and `MMQ_FM_KERNEL_Y16` in `quant_mmq_mma.cu`.
+    /// `MMQ_FM_KERNELS_NARROW` in
+    /// `src/quant/cuda/kernels/mmq_mma/entry_points.cuh`.
     ///
     /// Only the formats a K-quant mix places on the small-N projections
     /// compile them; every other format has one feature tile, and the
-    /// dispatch never asks it for another. A format joins by adding its
-    /// `MMQ_FM_KERNEL_Y64` and `MMQ_FM_KERNEL_Y16` lists to the kernel file
-    /// AND flipping this flag; the flag alone would launch a symbol the
-    /// module does not hold.
+    /// dispatch never asks it for another. A format joins by expanding
+    /// `MMQ_FM_KERNELS_NARROW` in its `mmq_mma/<kernel_infix>.cu` AND
+    /// flipping this flag; the flag alone would launch a symbol the module
+    /// does not hold.
     pub narrow_tile: bool,
 }

@@ -74,13 +74,10 @@ fn compile_cuda_kernels() {
         // sm_80, not sm_75: `mma.sync.aligned.m16n8k32...s8.s8.s32` is an
         // Ampere+ instruction, unavailable at sm_75.
         k!("src/quant/cuda/kernels", "mma_int8_probe.cu", "sm_80", true),
-        // sm_80, not sm_75: `mma.sync.aligned.m16n8k32...s8.s8.s32` is an
-        // Ampere+ instruction, unavailable at sm_75.
-        k!("src/quant/cuda/kernels", "quant_mmq_mma.cu", "sm_80", true),
         // The M = 1 kernels of the feature-major family. dp4a needs only
-        // sm_61, but the kernel exists to match `quant_mmq_mma.cu` bit for
-        // bit and is launched only where that module runs, so it shares
-        // its floor.
+        // sm_61, but the kernel exists to match the `mmq_mma/` modules bit
+        // for bit and is launched only where they run, so it shares their
+        // floor.
         k!(
             "src/quant/cuda/kernels",
             "quant_mmq_gemv1.cu",
@@ -427,18 +424,38 @@ fn compile_cuda_kernels() {
         ),
     ]);
 
+    // The tensor-core MMQ family, one translation unit per weight format, so
+    // the formats compile on parallel workers and no single nvcc holds the
+    // whole family. Each is its own module, `quant_mmq_mma_<fmt>`; the names
+    // match `QUANT_MMQ_MMA_MODULES` in `src/quant/cuda/kernels/constants.rs`.
+    // sm_80, not sm_75: `mma.sync.aligned.m16n8k32...s8.s8.s32` is an
+    // Ampere+ instruction, unavailable at sm_75. Pushed last because the work
+    // queue pops from the back: these are the longest compiles, so they
+    // start first and the short ones fill in around them.
+    let mmq_mma_formats: &[&str] = &[
+        "q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "iq4_nl", "pq2_0", "q2_0", "q1_0", "ptq1_0",
+        "q4_k", "q5_k", "q6_k", "q3_k", "q2_k", "iq4_xs", "iq2_xxs", "iq2_xs", "iq2_s", "iq3_xxs",
+        "iq3_s", "iq1_s",
+    ];
+    let mmq_mma_dir = PathBuf::from("src/quant/cuda/kernels/mmq_mma");
+    for fmt in mmq_mma_formats {
+        kernel_sets.push((
+            mmq_mma_dir.clone(),
+            format!("{fmt}.cu"),
+            "sm_80".to_string(),
+            true,
+            Some(format!("quant_mmq_mma_{fmt}.fatbin")),
+        ));
+    }
+
     // Shared headers are not compilation units, so the `.cu` paths above do not
     // cover them. Emit every `.cuh` under the kernel source roots instead of
     // guessing one from the `.cu` stem: that guess matched only same-stem pairs
     // and left `dtype_traits.cuh`, `attention/atomics.cuh`, `gemm/common.cuh`
     // and `gemv/common.cuh` untracked. Scanning `#include` lines is not an
-    // option either — it misses transitive includes.
-    //
-    // No stale-PTX window is open today: the loop below invokes `nvcc` for
-    // every kernel on every run, so a header change is always picked up. This
-    // makes the declared dependency honest, and is what keeps the build correct
-    // if that unconditional rebuild ever becomes incremental.
-    for root in ["src/ops/cuda/kernels", "src/quant/cuda/kernels"] {
+    // option either — it misses transitive includes. `fatbin_up_to_date` reads
+    // the same roots, so cargo's rerun set and the per-kernel skip agree.
+    for root in KERNEL_ROOTS {
         emit_header_deps(std::path::Path::new(root));
     }
 
@@ -552,7 +569,7 @@ fn compile_cuda_kernels() {
 
                     let outcome = match Command::new(&nvcc).args(&args).output() {
                         Ok(output) => KernelOutcome {
-                            file: kernel_file.clone(),
+                            file: cu_path.display().to_string(),
                             required,
                             arch: arch.clone(),
                             fatbin_path: fatbin_path.clone(),
@@ -562,7 +579,7 @@ fn compile_cuda_kernels() {
                             exec_error: None,
                         },
                         Err(e) => KernelOutcome {
-                            file: kernel_file.clone(),
+                            file: cu_path.display().to_string(),
                             required,
                             arch: arch.clone(),
                             fatbin_path: fatbin_path.clone(),
@@ -676,10 +693,13 @@ fn write_embedded_kernels_table(
 /// Whether `fatbin` was built from the current sources with the current
 /// nvcc arguments.
 ///
-/// Newer than the kernel source, every `.cuh` under its directory and the
-/// shared header directory, and this script; and the recorded arguments equal
-/// `args_text`. A header a kernel does not include still forces a rebuild,
-/// which costs one compile and never a stale kernel.
+/// Newer than the kernel source, every `.cuh` under the kernel source root
+/// its directory lies in, every `.cuh` under the shared header root, and this
+/// script; and the recorded arguments equal `args_text`. The whole root
+/// counts, not only the kernel's own directory, because a kernel in a
+/// subdirectory includes its parent's headers (`../decode.cuh`). A header a
+/// kernel does not include still forces a rebuild, which costs one compile
+/// and never a stale kernel.
 fn fatbin_up_to_date(
     fatbin: &std::path::Path,
     args_path: &std::path::Path,
@@ -695,8 +715,15 @@ fn fatbin_up_to_date(
         return false;
     }
     let mut inputs: Vec<PathBuf> = vec![cu_path.to_path_buf(), PathBuf::from("build.rs")];
-    for dir in [kernels_dir, Path::new("src/ops/cuda/kernels")] {
-        collect_headers(dir, &mut inputs);
+    let root = KERNEL_ROOTS
+        .iter()
+        .map(Path::new)
+        .find(|root| kernels_dir.starts_with(root))
+        .unwrap_or(kernels_dir);
+    let shared = Path::new("src/ops/cuda/kernels");
+    collect_headers(root, &mut inputs);
+    if root != shared {
+        collect_headers(shared, &mut inputs);
     }
     inputs.into_iter().all(|input| {
         std::fs::metadata(&input)
@@ -704,6 +731,12 @@ fn fatbin_up_to_date(
             .is_ok_and(|modified| modified < built)
     })
 }
+
+/// The kernel source roots: every `.cu` in `kernel_sets` lies under one, and
+/// every header a kernel can include lies under its own root or the shared
+/// one, `src/ops/cuda/kernels`.
+#[cfg(feature = "cuda")]
+const KERNEL_ROOTS: [&str; 2] = ["src/ops/cuda/kernels", "src/quant/cuda/kernels"];
 
 /// Every `.cuh` under `dir`, recursively — the same set `emit_header_deps`
 /// registers, so the two views of "what a kernel can include" agree.

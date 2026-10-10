@@ -18,7 +18,7 @@
 //
 // The int8x4 expansions `lowbit_expand_code2x8` and `lowbit_expand_sign8`
 // live in `../lowbit_dequant.cuh`, shared with the feature-major MMQ staging
-// in `../mmq/lowbit_tiles.cuh`. A lane here owns elements `4w..4w+3` and
+// in `../mmq_mma/formats/lowbit.cuh`. A lane here owns elements `4w..4w+3` and
 // `4w+16..4w+19` of its chunk, so the 16-bit (Q2_0) or 8-bit (Q1_0) input
 // is assembled from those two positions first. The permutes then land the
 // low half in `v_lo` and the high half in `v_hi`, which is what the body

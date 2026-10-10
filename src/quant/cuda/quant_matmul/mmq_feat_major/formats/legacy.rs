@@ -4,6 +4,10 @@
 
 use super::FeatMajorFormat;
 use crate::quant::QuantFormat;
+use crate::quant::cuda::kernels::{
+    QUANT_MMQ_MMA_IQ4_NL_MODULE, QUANT_MMQ_MMA_Q4_0_MODULE, QUANT_MMQ_MMA_Q4_1_MODULE,
+    QUANT_MMQ_MMA_Q5_0_MODULE, QUANT_MMQ_MMA_Q5_1_MODULE, QUANT_MMQ_MMA_Q8_0_MODULE,
+};
 
 /// Q8_0: 34-byte blocks of 32 elements, staged as 64 quant words plus 8 f32
 /// scales plus 4 ints of bank padding.
@@ -14,6 +18,7 @@ use crate::quant::QuantFormat;
 pub(in crate::quant::cuda::quant_matmul) const Q8_0: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::Q8_0,
     kernel_infix: "q8_0",
+    module: QUANT_MMQ_MMA_Q8_0_MODULE,
     x_stride: 76,
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
@@ -35,6 +40,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q8_0: FeatMajorFormat = FeatMajor
 pub(in crate::quant::cuda::quant_matmul) const Q4_0: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::Q4_0,
     kernel_infix: "q4_0",
+    module: QUANT_MMQ_MMA_Q4_0_MODULE,
     x_stride: 76,
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
@@ -54,6 +60,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q4_0: FeatMajorFormat = FeatMajor
 pub(in crate::quant::cuda::quant_matmul) const Q4_1: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::Q4_1,
     kernel_infix: "q4_1",
+    module: QUANT_MMQ_MMA_Q4_1_MODULE,
     x_stride: 84,
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
@@ -71,6 +78,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q4_1: FeatMajorFormat = FeatMajor
 pub(in crate::quant::cuda::quant_matmul) const Q5_0: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::Q5_0,
     kernel_infix: "q5_0",
+    module: QUANT_MMQ_MMA_Q5_0_MODULE,
     x_stride: 76,
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
@@ -87,6 +95,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q5_0: FeatMajorFormat = FeatMajor
 pub(in crate::quant::cuda::quant_matmul) const Q5_1: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::Q5_1,
     kernel_infix: "q5_1",
+    module: QUANT_MMQ_MMA_Q5_1_MODULE,
     x_stride: 84,
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
@@ -109,6 +118,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q5_1: FeatMajorFormat = FeatMajor
 pub(in crate::quant::cuda::quant_matmul) const IQ4_NL: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::IQ4NL,
     kernel_infix: "iq4_nl",
+    module: QUANT_MMQ_MMA_IQ4_NL_MODULE,
     x_stride: 76,
     k_multiple: 32,
     act_scratch_ints_per_token: 0,

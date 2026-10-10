@@ -4,7 +4,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::super::super::kernels::{self, QUANT_MMQ_MMA_MODULE};
+use super::super::super::kernels;
 use super::super::helpers::quantize_activation_q8_1_mmq;
 use super::formats::FeatMajorFormat;
 use super::gemv1;
@@ -221,7 +221,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_quantized(
         });
     }
 
-    let module = kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_MMA_MODULE)?;
+    let module = kernels::get_or_load_module(client.context(), device_index, format.module)?;
 
     // The split count reads K, N and the device only, so the float sequence
     // each output element receives is fixed before M or the tiling is known.

@@ -3,6 +3,10 @@
 
 use super::FeatMajorFormat;
 use crate::quant::QuantFormat;
+use crate::quant::cuda::kernels::{
+    QUANT_MMQ_MMA_PQ2_0_MODULE, QUANT_MMQ_MMA_PTQ1_0_MODULE, QUANT_MMQ_MMA_Q1_0_MODULE,
+    QUANT_MMQ_MMA_Q2_0_MODULE,
+};
 
 /// PQ2_0: 34-byte blocks of 128 elements, 2-bit codes under ONE f16 scale,
 /// staged as Q8_0's row byte for byte — 64 quant words plus 8 f32 scales plus
@@ -18,6 +22,7 @@ use crate::quant::QuantFormat;
 pub(in crate::quant::cuda::quant_matmul) const PQ2_0: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::PQ2_0,
     kernel_infix: "pq2_0",
+    module: QUANT_MMQ_MMA_PQ2_0_MODULE,
     x_stride: 76,
     k_multiple: 128,
     act_scratch_ints_per_token: 0,
@@ -37,6 +42,7 @@ pub(in crate::quant::cuda::quant_matmul) const PQ2_0: FeatMajorFormat = FeatMajo
 pub(in crate::quant::cuda::quant_matmul) const Q2_0: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::Q2_0,
     kernel_infix: "q2_0",
+    module: QUANT_MMQ_MMA_Q2_0_MODULE,
     x_stride: 76,
     k_multiple: 64,
     act_scratch_ints_per_token: 0,
@@ -56,6 +62,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q2_0: FeatMajorFormat = FeatMajor
 pub(in crate::quant::cuda::quant_matmul) const Q1_0: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::Q1_0,
     kernel_infix: "q1_0",
+    module: QUANT_MMQ_MMA_Q1_0_MODULE,
     x_stride: 76,
     k_multiple: 128,
     act_scratch_ints_per_token: 0,
@@ -81,6 +88,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q1_0: FeatMajorFormat = FeatMajor
 pub(in crate::quant::cuda::quant_matmul) const PTQ1_0: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::PTQ1_0,
     kernel_infix: "ptq1_0",
+    module: QUANT_MMQ_MMA_PTQ1_0_MODULE,
     x_stride: 76,
     k_multiple: 128,
     act_scratch_ints_per_token: 0,

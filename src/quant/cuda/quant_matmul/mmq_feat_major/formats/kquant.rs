@@ -1,5 +1,9 @@
 use super::FeatMajorFormat;
 use crate::quant::QuantFormat;
+use crate::quant::cuda::kernels::{
+    QUANT_MMQ_MMA_Q2_K_MODULE, QUANT_MMQ_MMA_Q3_K_MODULE, QUANT_MMQ_MMA_Q4_K_MODULE,
+    QUANT_MMQ_MMA_Q5_K_MODULE, QUANT_MMQ_MMA_Q6_K_MODULE,
+};
 
 /// Q4_K: 144-byte super-blocks of 256 elements, staged as 64 quant words plus
 /// 8 `float2` scale/min pairs (16 ints) plus 4 ints of bank padding. The row is
@@ -10,6 +14,7 @@ use crate::quant::QuantFormat;
 pub(in crate::quant::cuda::quant_matmul) const Q4_K: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::Q4K,
     kernel_infix: "q4_k",
+    module: QUANT_MMQ_MMA_Q4_K_MODULE,
     x_stride: 84,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
@@ -26,6 +31,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q4_K: FeatMajorFormat = FeatMajor
 pub(in crate::quant::cuda::quant_matmul) const Q5_K: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::Q5K,
     kernel_infix: "q5_k",
+    module: QUANT_MMQ_MMA_Q5_K_MODULE,
     x_stride: 84,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
@@ -44,6 +50,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q5_K: FeatMajorFormat = FeatMajor
 pub(in crate::quant::cuda::quant_matmul) const Q6_K: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::Q6K,
     kernel_infix: "q6_k",
+    module: QUANT_MMQ_MMA_Q6_K_MODULE,
     x_stride: 84,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
@@ -61,6 +68,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q6_K: FeatMajorFormat = FeatMajor
 pub(in crate::quant::cuda::quant_matmul) const Q3_K: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::Q3K,
     kernel_infix: "q3_k",
+    module: QUANT_MMQ_MMA_Q3_K_MODULE,
     x_stride: 84,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
@@ -93,6 +101,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q3_K: FeatMajorFormat = FeatMajor
 pub(in crate::quant::cuda::quant_matmul) const Q2_K: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::Q2K,
     kernel_infix: "q2_k",
+    module: QUANT_MMQ_MMA_Q2_K_MODULE,
     x_stride: 100,
     k_multiple: 256,
     act_scratch_ints_per_token: 4,

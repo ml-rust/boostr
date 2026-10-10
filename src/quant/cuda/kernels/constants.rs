@@ -16,7 +16,71 @@ pub const QUANT_ACT_MODULE: &str = "quant_act";
 /// record producer, one token (`fwht_quantize_f32_q8_1_mmq`).
 pub const FWHT_QUANT_ACT_MODULE: &str = "fwht_quant_act";
 pub const MMA_INT8_PROBE_MODULE: &str = "mma_int8_probe";
-pub const QUANT_MMQ_MMA_MODULE: &str = "quant_mmq_mma";
+
+// Tensor-core MMQ family (sm_80+), one module per weight format, compiled
+// from `mmq_mma/<fmt>.cu`. Each holds that format's feature-major entry
+// points `quant_mmq_<fmt>_q8_1_mma*`. The Q8_0, Q4_K and Q6_K modules also
+// hold the token-major `quant_mmq_<fmt>_q8_1_mma`.
+pub const QUANT_MMQ_MMA_Q8_0_MODULE: &str = "quant_mmq_mma_q8_0";
+pub const QUANT_MMQ_MMA_Q4_0_MODULE: &str = "quant_mmq_mma_q4_0";
+pub const QUANT_MMQ_MMA_Q4_1_MODULE: &str = "quant_mmq_mma_q4_1";
+pub const QUANT_MMQ_MMA_Q5_0_MODULE: &str = "quant_mmq_mma_q5_0";
+pub const QUANT_MMQ_MMA_Q5_1_MODULE: &str = "quant_mmq_mma_q5_1";
+pub const QUANT_MMQ_MMA_IQ4_NL_MODULE: &str = "quant_mmq_mma_iq4_nl";
+pub const QUANT_MMQ_MMA_PQ2_0_MODULE: &str = "quant_mmq_mma_pq2_0";
+pub const QUANT_MMQ_MMA_Q2_0_MODULE: &str = "quant_mmq_mma_q2_0";
+pub const QUANT_MMQ_MMA_Q1_0_MODULE: &str = "quant_mmq_mma_q1_0";
+pub const QUANT_MMQ_MMA_PTQ1_0_MODULE: &str = "quant_mmq_mma_ptq1_0";
+pub const QUANT_MMQ_MMA_Q4_K_MODULE: &str = "quant_mmq_mma_q4_k";
+pub const QUANT_MMQ_MMA_Q5_K_MODULE: &str = "quant_mmq_mma_q5_k";
+pub const QUANT_MMQ_MMA_Q6_K_MODULE: &str = "quant_mmq_mma_q6_k";
+pub const QUANT_MMQ_MMA_Q3_K_MODULE: &str = "quant_mmq_mma_q3_k";
+pub const QUANT_MMQ_MMA_Q2_K_MODULE: &str = "quant_mmq_mma_q2_k";
+pub const QUANT_MMQ_MMA_IQ4_XS_MODULE: &str = "quant_mmq_mma_iq4_xs";
+pub const QUANT_MMQ_MMA_IQ2_XXS_MODULE: &str = "quant_mmq_mma_iq2_xxs";
+pub const QUANT_MMQ_MMA_IQ2_XS_MODULE: &str = "quant_mmq_mma_iq2_xs";
+pub const QUANT_MMQ_MMA_IQ2_S_MODULE: &str = "quant_mmq_mma_iq2_s";
+pub const QUANT_MMQ_MMA_IQ3_XXS_MODULE: &str = "quant_mmq_mma_iq3_xxs";
+pub const QUANT_MMQ_MMA_IQ3_S_MODULE: &str = "quant_mmq_mma_iq3_s";
+pub const QUANT_MMQ_MMA_IQ1_S_MODULE: &str = "quant_mmq_mma_iq1_s";
+
+/// Every tensor-core MMQ module, keyed by the format name inside its kernel
+/// symbols (`quant_mmq_<infix>_q8_1_mma*`). The module name is always
+/// `quant_mmq_mma_<infix>`.
+pub const QUANT_MMQ_MMA_MODULES: [(&str, &str); 22] = [
+    ("q8_0", QUANT_MMQ_MMA_Q8_0_MODULE),
+    ("q4_0", QUANT_MMQ_MMA_Q4_0_MODULE),
+    ("q4_1", QUANT_MMQ_MMA_Q4_1_MODULE),
+    ("q5_0", QUANT_MMQ_MMA_Q5_0_MODULE),
+    ("q5_1", QUANT_MMQ_MMA_Q5_1_MODULE),
+    ("iq4_nl", QUANT_MMQ_MMA_IQ4_NL_MODULE),
+    ("pq2_0", QUANT_MMQ_MMA_PQ2_0_MODULE),
+    ("q2_0", QUANT_MMQ_MMA_Q2_0_MODULE),
+    ("q1_0", QUANT_MMQ_MMA_Q1_0_MODULE),
+    ("ptq1_0", QUANT_MMQ_MMA_PTQ1_0_MODULE),
+    ("q4_k", QUANT_MMQ_MMA_Q4_K_MODULE),
+    ("q5_k", QUANT_MMQ_MMA_Q5_K_MODULE),
+    ("q6_k", QUANT_MMQ_MMA_Q6_K_MODULE),
+    ("q3_k", QUANT_MMQ_MMA_Q3_K_MODULE),
+    ("q2_k", QUANT_MMQ_MMA_Q2_K_MODULE),
+    ("iq4_xs", QUANT_MMQ_MMA_IQ4_XS_MODULE),
+    ("iq2_xxs", QUANT_MMQ_MMA_IQ2_XXS_MODULE),
+    ("iq2_xs", QUANT_MMQ_MMA_IQ2_XS_MODULE),
+    ("iq2_s", QUANT_MMQ_MMA_IQ2_S_MODULE),
+    ("iq3_xxs", QUANT_MMQ_MMA_IQ3_XXS_MODULE),
+    ("iq3_s", QUANT_MMQ_MMA_IQ3_S_MODULE),
+    ("iq1_s", QUANT_MMQ_MMA_IQ1_S_MODULE),
+];
+
+/// The tensor-core MMQ module that holds the `quant_mmq_<infix>_q8_1_mma*`
+/// entry points, or `None` when no module compiles that format.
+pub fn quant_mmq_mma_module(infix: &str) -> Option<&'static str> {
+    QUANT_MMQ_MMA_MODULES
+        .iter()
+        .find(|(name, _)| *name == infix)
+        .map(|(_, module)| *module)
+}
+
 /// The M = 1 kernels of the feature-major MMQ family
 /// (`quant_mmq_<fmt>_q8_1_gemv1`) and their split-range fixup.
 pub const QUANT_MMQ_GEMV1_MODULE: &str = "quant_mmq_gemv1";

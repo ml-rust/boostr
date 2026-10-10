@@ -10,7 +10,8 @@ use crate::quant::cuda::kernels::{
     GEMM_IQ4_XS_MODULE, GEMM_PQ2_0_MODULE, GEMM_PTQ1_0_MODULE, GEMM_Q1_0_MODULE, GEMM_Q2_0_MODULE,
     GEMM_Q2_K_MODULE, GEMM_Q3_K_MODULE, GEMM_Q4_1_MODULE, GEMM_Q5_0_MODULE, GEMM_Q5_1_MODULE,
     GEMM_Q5_K_MODULE, GEMM_Q8_1_MODULE, GEMM_Q8_K_MODULE, GEMM_TQ1_0_MODULE, GEMM_TQ2_0_MODULE,
-    QUANT_GEMV_MODULE, QUANT_MATMUL_MODULE, QUANT_MMQ_MMA_MODULE,
+    QUANT_GEMV_MODULE, QUANT_MATMUL_MODULE, QUANT_MMQ_MMA_Q4_K_MODULE, QUANT_MMQ_MMA_Q6_K_MODULE,
+    QUANT_MMQ_MMA_Q8_0_MODULE,
 };
 use crate::quant::cuda::quant_matmul::helpers::quantize_activation_q8_1;
 use crate::quant::cuda::quant_matmul::mmq_feat_major;
@@ -162,8 +163,8 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_matmul(
     // tile across a 128-row batch tile instead of re-reading it per output row.
     // The K-quants additionally need K to be a whole number of 256-element
     // super-blocks, which their own layout already guarantees.
-    // All three need sm_80 for their `_mma` kernels (module
-    // `QUANT_MMQ_MMA_MODULE`). Below sm_80 each falls back to its dp4a kernel
+    // All three need sm_80 for their `_mma` kernels (each in its format's
+    // `quant_mmq_mma_<fmt>` module). Below sm_80 each falls back to its dp4a kernel
     // (module `QUANT_GEMV_MODULE`). Both produce bit-identical output.
     // `caps.int8_mma_m16n8k32` names the `m16n8k32` shape, but Q6_K's `_mma`
     // kernel uses `m16n8k16` instead. Both need sm_80 for int8, and neither
@@ -174,7 +175,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_matmul(
                 .profile()
                 .caps;
             if caps.int8_mma_m16n8k32 {
-                Some(("quant_mmq_q8_0_q8_1_mma", QUANT_MMQ_MMA_MODULE))
+                Some(("quant_mmq_q8_0_q8_1_mma", QUANT_MMQ_MMA_Q8_0_MODULE))
             } else {
                 Some(("quant_mmq_q8_0_q8_1", QUANT_GEMV_MODULE))
             }
@@ -184,7 +185,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_matmul(
                 .profile()
                 .caps;
             if caps.int8_mma_m16n8k32 {
-                Some(("quant_mmq_q4_k_q8_1_mma", QUANT_MMQ_MMA_MODULE))
+                Some(("quant_mmq_q4_k_q8_1_mma", QUANT_MMQ_MMA_Q4_K_MODULE))
             } else {
                 Some(("quant_mmq_q4_k_q8_1", QUANT_GEMV_MODULE))
             }
@@ -194,7 +195,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_matmul(
                 .profile()
                 .caps;
             if caps.int8_mma_m16n8k32 {
-                Some(("quant_mmq_q6_k_q8_1_mma", QUANT_MMQ_MMA_MODULE))
+                Some(("quant_mmq_q6_k_q8_1_mma", QUANT_MMQ_MMA_Q6_K_MODULE))
             } else {
                 Some(("quant_mmq_q6_k_q8_1", QUANT_GEMV_MODULE))
             }

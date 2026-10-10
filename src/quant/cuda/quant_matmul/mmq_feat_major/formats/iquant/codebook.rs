@@ -2,6 +2,7 @@
 
 use super::super::FeatMajorFormat;
 use crate::quant::QuantFormat;
+use crate::quant::cuda::kernels::QUANT_MMQ_MMA_IQ4_XS_MODULE;
 
 /// IQ4_XS: 136-byte super-blocks of 256 elements, staged as Q8_0's row byte for
 /// byte — 64 quant words plus 8 f32 sub-block scales plus 4 ints of bank
@@ -15,6 +16,7 @@ use crate::quant::QuantFormat;
 pub(in crate::quant::cuda::quant_matmul) const IQ4_XS: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::IQ4XS,
     kernel_infix: "iq4_xs",
+    module: QUANT_MMQ_MMA_IQ4_XS_MODULE,
     x_stride: 76,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,

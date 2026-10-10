@@ -1,7 +1,7 @@
 // The K-range rule of the feature-major MMQ family: how many 32-element
 // activation blocks one 256-k staging group holds, and which block range
-// split `s` of `splits` walks. `quant_mmq_mma.cu` and `quant_mmq_gemv1.cu`
-// both include it, so a tensor-core launch and the single-token launch cut K
+// split `s` of `splits` walks. The tensor-core family (`mmq_mma/common.cuh`)
+// and `quant_mmq_gemv1.cu` both include it, so a tensor-core launch and the single-token launch cut K
 // at the same boundaries and their range partials are the same floats.
 #pragma once
 

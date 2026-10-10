@@ -7,6 +7,34 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.5.0] - 2026-10-10
+
+### ⚠️ Breaking changes
+
+- **Dependencies** — boostr requires numr 0.10.
+- **MMA kernel modules** — the feature-major and token-major MMA kernels now load
+  from one CUDA module per quant format, named `quant_mmq_mma_<format>` (for example
+  `quant_mmq_mma_q4_k`). `quant::cuda::kernels::QUANT_MMQ_MMA_MODULE` is removed.
+  `QUANT_MMQ_MMA_MODULES` lists every module, and `quant_mmq_mma_module(infix)` returns
+  the module for a format's kernel-name infix. Kernel names do not change.
+
+### Changed
+
+- **CUDA build** — the MMA kernels compile as 22 separate units, one per quant format,
+  instead of one. The build script compiles them in parallel, and each nvcc run needs
+  a fraction of the memory the single unit needed. A multi-arch build
+  (`NUMR_CUDA_ARCH=all`) no longer spends hours on one file.
+- **cudarc** — default features are off. boostr enables the driver API and module
+  loading only, so cuBLAS, cuBLASLt, cuRAND and the CUDA runtime library are not built.
+
+### Fixed
+
+- **Stale CUDA kernels** — a kernel in a subdirectory of a kernel root was not rebuilt
+  after a change to a header in a parent directory. The up-to-date check now scans the
+  whole kernel root.
+
+---
+
 ## [0.4.0] - 2026-10-09
 
 ### ⚠️ Breaking changes

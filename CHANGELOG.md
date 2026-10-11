@@ -7,7 +7,7 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased]
+## [0.6.0] - 2026-10-11
 
 ### Added
 
@@ -27,6 +27,8 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Dependencies** — boostr requires numr 0.11. CUDA `scatter_reduce` there is deterministic, so Kokoro's
+  inverse STFT gives the same samples on every run.
 - **`KokoroModelV2::forward_to_spectrogram`** — runs the decoder's noise-conditioned
   path and takes `&KokoroSynthOptions` in place of `speed: f32`.
 - **`Decoder::forward`** (Kokoro) — runs the generator's noise-conditioned path and

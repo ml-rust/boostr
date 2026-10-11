@@ -85,43 +85,21 @@ impl DequantOps<CpuRuntime> for CpuClient {
         // SAFETY: CpuRuntime stores data as host pointers
         let block_bytes = unsafe { qt.storage().as_host_slice::<u8>() };
 
-        // Dequantize to f32 first
-        let f32_output = {
-            let mut out = vec![0.0f32; numel];
-            match qt.format() {
-                QuantFormat::Q4_0 => dequant::dequant_q4_0(block_bytes, &mut out),
-                QuantFormat::Q4_1 => dequant::dequant_q4_1(block_bytes, &mut out),
-                QuantFormat::Q5_0 => dequant::dequant_q5_0(block_bytes, &mut out),
-                QuantFormat::Q5_1 => dequant::dequant_q5_1(block_bytes, &mut out),
-                QuantFormat::Q8_0 => dequant::dequant_q8_0(block_bytes, &mut out),
-                QuantFormat::Q8_1 => dequant::dequant_q8_1(block_bytes, &mut out),
-                QuantFormat::Q2K => dequant::dequant_q2k(block_bytes, &mut out),
-                QuantFormat::Q3K => dequant::dequant_q3k(block_bytes, &mut out),
-                QuantFormat::Q4K => dequant::dequant_q4k(block_bytes, &mut out),
-                QuantFormat::Q5K => dequant::dequant_q5k(block_bytes, &mut out),
-                QuantFormat::Q6K => dequant::dequant_q6k(block_bytes, &mut out),
-                QuantFormat::Q8K => dequant::dequant_q8k(block_bytes, &mut out),
-                QuantFormat::IQ4NL => dequant::dequant_iq4_nl(block_bytes, &mut out),
-                QuantFormat::IQ4XS => dequant::dequant_iq4_xs(block_bytes, &mut out),
-                QuantFormat::IQ2XXS => dequant::dequant_iq2_xxs(block_bytes, &mut out),
-                QuantFormat::IQ2XS => dequant::dequant_iq2_xs(block_bytes, &mut out),
-                QuantFormat::IQ2S => dequant::dequant_iq2_s(block_bytes, &mut out),
-                QuantFormat::IQ3XXS => dequant::dequant_iq3_xxs(block_bytes, &mut out),
-                QuantFormat::IQ3S => dequant::dequant_iq3_s(block_bytes, &mut out),
-                QuantFormat::IQ1S => dequant::dequant_iq1_s(block_bytes, &mut out),
-                QuantFormat::IQ1M => dequant::dequant_iq1_m(block_bytes, &mut out),
-                QuantFormat::TQ1_0 => dequant::dequant_tq1_0(block_bytes, &mut out),
-                QuantFormat::TQ2_0 => dequant::dequant_tq2_0(block_bytes, &mut out),
-                QuantFormat::Q1_0 => dequant::dequant_q1_0(block_bytes, &mut out),
-                QuantFormat::Q2_0 => dequant::dequant_q2_0(block_bytes, &mut out),
-                QuantFormat::PQ2_0 => dequant::dequant_pq2_0(block_bytes, &mut out),
-                QuantFormat::PTQ1_0 => dequant::dequant_ptq1_0(block_bytes, &mut out),
-            }
-            out
-        };
-
-        // Create f32 tensor
-        let f32_tensor = Tensor::<CpuRuntime>::from_slice(&f32_output, qt.shape(), qt.device())?;
+        // Dequantize straight into the output tensor. A host buffer plus a
+        // copy would hold two F32 copies at once: twice the RAM of a large
+        // embedding table during model load.
+        let f32_tensor = Tensor::<CpuRuntime>::empty(qt.shape(), DType::F32, qt.device())?;
+        if numel > 0 {
+            let ptr = f32_tensor.ptr() as *mut f32;
+            // SAFETY: `f32_tensor` was just allocated on the CPU runtime with
+            // `numel` contiguous F32 elements, and nothing else refers to it.
+            // Zeroing first means the slice never covers uninitialized memory.
+            let out = unsafe {
+                std::ptr::write_bytes(ptr, 0, numel);
+                std::slice::from_raw_parts_mut(ptr, numel)
+            };
+            dequant_into(qt.format(), block_bytes, out);
+        }
 
         // Cast to target dtype if needed
         if target_dtype == DType::F32 {
@@ -129,6 +107,39 @@ impl DequantOps<CpuRuntime> for CpuClient {
         } else {
             self.cast(&f32_tensor, target_dtype).map_err(Error::Numr)
         }
+    }
+}
+
+/// Dequantize `block_bytes` of `format` into `out`.
+fn dequant_into(format: QuantFormat, block_bytes: &[u8], out: &mut [f32]) {
+    match format {
+        QuantFormat::Q4_0 => dequant::dequant_q4_0(block_bytes, out),
+        QuantFormat::Q4_1 => dequant::dequant_q4_1(block_bytes, out),
+        QuantFormat::Q5_0 => dequant::dequant_q5_0(block_bytes, out),
+        QuantFormat::Q5_1 => dequant::dequant_q5_1(block_bytes, out),
+        QuantFormat::Q8_0 => dequant::dequant_q8_0(block_bytes, out),
+        QuantFormat::Q8_1 => dequant::dequant_q8_1(block_bytes, out),
+        QuantFormat::Q2K => dequant::dequant_q2k(block_bytes, out),
+        QuantFormat::Q3K => dequant::dequant_q3k(block_bytes, out),
+        QuantFormat::Q4K => dequant::dequant_q4k(block_bytes, out),
+        QuantFormat::Q5K => dequant::dequant_q5k(block_bytes, out),
+        QuantFormat::Q6K => dequant::dequant_q6k(block_bytes, out),
+        QuantFormat::Q8K => dequant::dequant_q8k(block_bytes, out),
+        QuantFormat::IQ4NL => dequant::dequant_iq4_nl(block_bytes, out),
+        QuantFormat::IQ4XS => dequant::dequant_iq4_xs(block_bytes, out),
+        QuantFormat::IQ2XXS => dequant::dequant_iq2_xxs(block_bytes, out),
+        QuantFormat::IQ2XS => dequant::dequant_iq2_xs(block_bytes, out),
+        QuantFormat::IQ2S => dequant::dequant_iq2_s(block_bytes, out),
+        QuantFormat::IQ3XXS => dequant::dequant_iq3_xxs(block_bytes, out),
+        QuantFormat::IQ3S => dequant::dequant_iq3_s(block_bytes, out),
+        QuantFormat::IQ1S => dequant::dequant_iq1_s(block_bytes, out),
+        QuantFormat::IQ1M => dequant::dequant_iq1_m(block_bytes, out),
+        QuantFormat::TQ1_0 => dequant::dequant_tq1_0(block_bytes, out),
+        QuantFormat::TQ2_0 => dequant::dequant_tq2_0(block_bytes, out),
+        QuantFormat::Q1_0 => dequant::dequant_q1_0(block_bytes, out),
+        QuantFormat::Q2_0 => dequant::dequant_q2_0(block_bytes, out),
+        QuantFormat::PQ2_0 => dequant::dequant_pq2_0(block_bytes, out),
+        QuantFormat::PTQ1_0 => dequant::dequant_ptq1_0(block_bytes, out),
     }
 }
 

@@ -38,7 +38,9 @@ pub unsafe fn fused_dot_q6k_neon(act: &[f32], blocks: &[u8], k: usize) -> f32 {
         let block = &blocks[b * BLOCK_BYTES..];
         let ql = &block[0..128];
         let qh = &block[128..192];
-        let sc: &[i8] = std::slice::from_raw_parts(block[192..208].as_ptr() as *const i8, 16);
+        // SAFETY: block[192..208] is 16 initialized bytes. i8 has u8 size and alignment.
+        let sc: &[i8] =
+            unsafe { std::slice::from_raw_parts(block[192..208].as_ptr() as *const i8, 16) };
         let d = f16::from_le_bytes([block[208], block[209]]).to_f32();
         let act_block = &act[b * BLOCK_SIZE..];
 
@@ -82,15 +84,20 @@ pub unsafe fn fused_dot_q6k_neon(act: &[f32], blocks: &[u8], k: usize) -> f32 {
                 );
 
                 // Load 4 activation values at positions [y_base+l, y_base+l+32, y_base+l+64, y_base+l+96]
+                // SAFETY: act_block holds at least 256 floats.
+                // y_base + l + 96 <= 128 + 31 + 96 < 256, so all four reads stay in bounds.
+                let (a0, a1, a2, a3) = unsafe {
+                    let p = act_block.as_ptr();
+                    (
+                        *p.add(y_base + l),
+                        *p.add(y_base + l + 32),
+                        *p.add(y_base + l + 64),
+                        *p.add(y_base + l + 96),
+                    )
+                };
                 let a = vcombine_f32(
-                    vcreate_f32(
-                        (*act_block.as_ptr().add(y_base + l)).to_bits() as u64
-                            | ((*act_block.as_ptr().add(y_base + l + 32)).to_bits() as u64) << 32,
-                    ),
-                    vcreate_f32(
-                        (*act_block.as_ptr().add(y_base + l + 64)).to_bits() as u64
-                            | ((*act_block.as_ptr().add(y_base + l + 96)).to_bits() as u64) << 32,
-                    ),
+                    vcreate_f32(a0.to_bits() as u64 | (a1.to_bits() as u64) << 32),
+                    vcreate_f32(a2.to_bits() as u64 | (a3.to_bits() as u64) << 32),
                 );
 
                 total_acc = vfmaq_f32(total_acc, dq, a);
@@ -98,5 +105,6 @@ pub unsafe fn fused_dot_q6k_neon(act: &[f32], blocks: &[u8], k: usize) -> f32 {
         }
     }
 
-    hsum_f32_neon(total_acc)
+    // SAFETY: NEON is enabled on this function, which hsum_f32_neon requires.
+    unsafe { hsum_f32_neon(total_acc) }
 }

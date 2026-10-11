@@ -6,8 +6,6 @@
 //! Inner loop SIMD-accelerated on x86-64 AVX2: unpack 8 nibbles → dequant → FMA.
 //! Parallelized across output columns via rayon for decode (M=1).
 
-use rayon::prelude::*;
-
 /// AWQ bit-shift table for unpacking 8 INT4 values from a u32.
 /// AWQ packs with order `[0,2,4,6,1,3,5,7]`, so to extract column j
 /// the shift is: `[0, 16, 4, 20, 8, 24, 12, 28][j]`
@@ -124,6 +122,7 @@ unsafe fn int4_gemm_f32_avx2_par(
     n_packed: usize,
 ) {
     use super::simd::int4_unpack::unpack_dequant_awq_avx2;
+    use rayon::prelude::*;
     use std::arch::x86_64::*;
 
     // For M=1 (decode), parallelize across output columns

@@ -83,7 +83,9 @@ pub unsafe fn fused_dot_q5k_neon(act: &[f32], blocks: &[u8], k: usize) -> f32 {
                 );
                 let q_f32 = vcvtq_f32_u32(q_u32);
 
-                let a = vld1q_f32(act_sub.as_ptr().add(l_base));
+                // SAFETY: act_sub holds at least 32 floats and l_base + 4 <= 32.
+                // vld1q_f32 needs only f32 alignment, which a &[f32] carries.
+                let a = unsafe { vld1q_f32(act_sub.as_ptr().add(l_base)) };
 
                 // Accumulate: dl * (a * q) - ml * a
                 let aq = vmulq_f32(a, q_f32);
@@ -93,5 +95,6 @@ pub unsafe fn fused_dot_q5k_neon(act: &[f32], blocks: &[u8], k: usize) -> f32 {
         }
     }
 
-    hsum_f32_neon(total_acc)
+    // SAFETY: NEON is enabled on this function, which hsum_f32_neon requires.
+    unsafe { hsum_f32_neon(total_acc) }
 }

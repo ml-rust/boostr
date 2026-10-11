@@ -13,8 +13,10 @@
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
+#[cfg(target_arch = "x86_64")]
 use half::f16;
 
+#[cfg(target_arch = "x86_64")]
 use super::super::dequant_k_quants::unpack_q4k_q5k_scales;
 
 /// Fused dequant+dot for Q5_K using AVX2+FMA.
@@ -115,6 +117,7 @@ pub fn fused_dot_q5k(act: &[f32], blocks: &[u8], k: usize) -> f32 {
 mod tests {
     use super::*;
     use crate::quant::cpu::kernels::dequant;
+    use half::f16;
 
     #[test]
     fn test_fused_q5k_avx2_vs_dequant() {

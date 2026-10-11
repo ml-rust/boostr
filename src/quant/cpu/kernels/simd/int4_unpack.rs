@@ -5,6 +5,7 @@
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
+#[cfg(target_arch = "x86_64")]
 use super::super::int4_gemm::AWQ_SHIFTS;
 
 /// Unpack 8 INT4 values from a u32 (AWQ bit layout) into 8 f32s.

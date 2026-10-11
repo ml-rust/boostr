@@ -32,16 +32,19 @@ pub unsafe fn dot_f32_neon(a: *const f32, b: *const f32, len: usize) -> f32 {
 
     for i in 0..chunks {
         let offset = i * F32_LANES;
-        let va = vld1q_f32(a.add(offset));
-        let vb = vld1q_f32(b.add(offset));
+        // SAFETY: offset + 4 <= chunks * 4 <= len, so both 4-lane loads stay in bounds.
+        // vld1q_f32 needs only f32 alignment, which the caller's pointers carry.
+        let (va, vb) = unsafe { (vld1q_f32(a.add(offset)), vld1q_f32(b.add(offset))) };
         acc = vfmaq_f32(acc, va, vb);
     }
 
-    let mut result = hsum_f32_neon(acc);
+    // SAFETY: NEON is enabled on this function, which hsum_f32_neon requires.
+    let mut result = unsafe { hsum_f32_neon(acc) };
 
     for i in 0..remainder {
         let offset = chunks * F32_LANES + i;
-        result += *a.add(offset) * *b.add(offset);
+        // SAFETY: offset < chunks * 4 + remainder == len, so both reads stay in bounds.
+        result += unsafe { *a.add(offset) * *b.add(offset) };
     }
 
     result

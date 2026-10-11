@@ -285,3 +285,54 @@ fn test_interleaved_vs_standard_different_outputs() {
         "standard and interleaved RoPE produced identical outputs — they shouldn't"
     );
 }
+
+/// Decode reads the cos/sin row at the current position: a `narrow` view
+/// with a storage offset. Every backend must rotate by that row, not row 0.
+#[test]
+fn test_apply_rope_at_position_offset_parity() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let (b, h, s, d) = (1, 2, 1, 32);
+    let (cache_len, position) = (16, 9);
+
+    let x_data = det_tensor(&[b, h, s, d], &cpu_device);
+    let cos_cache = det_tensor(&[cache_len, d / 2], &cpu_device);
+    let sin_data: Vec<f32> = cos_cache
+        .to_vec::<f32>()
+        .iter()
+        .map(|v| (v * 3.0).cos())
+        .collect();
+    let sin_cache =
+        numr::tensor::Tensor::<CpuRuntime>::from_slice(&sin_data, &[cache_len, d / 2], &cpu_device)
+            .unwrap();
+
+    let x = Var::<CpuRuntime>::new(x_data.clone(), false);
+    let cos = Var::<CpuRuntime>::new(cos_cache.narrow(0, position, s).unwrap(), false);
+    let sin = Var::<CpuRuntime>::new(sin_cache.narrow(0, position, s).unwrap(), false);
+    let cpu_result = cpu_client.apply_rope(&x, &cos, &sin).unwrap();
+    let cpu_result_vec = cpu_result.tensor().to_vec::<f32>();
+
+    #[cfg(feature = "wgpu")]
+    with_wgpu_backend(|wgpu_client, wgpu_device| {
+        use numr::runtime::wgpu::WgpuRuntime;
+        use numr::tensor::Tensor;
+        let x_w = Var::<WgpuRuntime>::new(
+            Tensor::from_slice(&x_data.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap(),
+            false,
+        );
+        let cos_full = Tensor::from_slice(
+            &cos_cache.to_vec::<f32>(),
+            &[cache_len, d / 2],
+            &wgpu_device,
+        )
+        .unwrap();
+        let sin_full = Tensor::from_slice(&sin_data, &[cache_len, d / 2], &wgpu_device).unwrap();
+        let cos_w = Var::<WgpuRuntime>::new(cos_full.narrow(0, position, s).unwrap(), false);
+        let sin_w = Var::<WgpuRuntime>::new(sin_full.narrow(0, position, s).unwrap(), false);
+        let result = wgpu_client.apply_rope(&x_w, &cos_w, &sin_w).unwrap();
+        assert_parity_f32(
+            &result.tensor().to_vec::<f32>(),
+            &cpu_result_vec,
+            "apply_rope at a position offset, WGPU vs CPU",
+        );
+    });
+}

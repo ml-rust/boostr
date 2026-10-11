@@ -162,16 +162,22 @@ impl RoPEOps<WgpuRuntime> for WgpuClient {
 
         let (b, h, s, d) = validate_rope_shapes(x_t, cos_t, sin_t)?;
 
+        // The shader binds the whole buffer from element 0. A view at a
+        // position offset is copied to a dense buffer first.
         let cos_narrowed = if cos_t.shape()[0] > s {
             cos_t.narrow(0, 0, s)?
         } else {
             cos_t.clone()
-        };
+        }
+        .contiguous()?;
+        // The shader binds the whole buffer from element 0. A view at a
+        // position offset is copied to a dense buffer first.
         let sin_narrowed = if sin_t.shape()[0] > s {
             sin_t.narrow(0, 0, s)?
         } else {
             sin_t.clone()
-        };
+        }
+        .contiguous()?;
 
         let output = Tensor::<WgpuRuntime>::empty(&[b, h, s, d], DType::F32, x_t.device())?;
 
@@ -240,16 +246,22 @@ impl RoPEOps<WgpuRuntime> for WgpuClient {
 
         let (b, h, s, d) = validate_rope_shapes(x_t, cos_t, sin_t)?;
 
+        // The shader binds the whole buffer from element 0. A view at a
+        // position offset is copied to a dense buffer first.
         let cos_narrowed = if cos_t.shape()[0] > s {
             cos_t.narrow(0, 0, s)?
         } else {
             cos_t.clone()
-        };
+        }
+        .contiguous()?;
+        // The shader binds the whole buffer from element 0. A view at a
+        // position offset is copied to a dense buffer first.
         let sin_narrowed = if sin_t.shape()[0] > s {
             sin_t.narrow(0, 0, s)?
         } else {
             sin_t.clone()
-        };
+        }
+        .contiguous()?;
 
         let output = Tensor::<WgpuRuntime>::empty(&[b, h, s, d], DType::F32, x_t.device())?;
 
@@ -319,16 +331,22 @@ impl RoPEOps<WgpuRuntime> for WgpuClient {
 
         let (b, h, s, d) = validate_rope_shapes(x_t, cos_t, sin_t)?;
 
+        // The shader binds the whole buffer from element 0. A view at a
+        // position offset is copied to a dense buffer first.
         let cos_narrowed = if cos_t.shape()[0] > s {
             cos_t.narrow(0, 0, s)?
         } else {
             cos_t.clone()
-        };
+        }
+        .contiguous()?;
+        // The shader binds the whole buffer from element 0. A view at a
+        // position offset is copied to a dense buffer first.
         let sin_narrowed = if sin_t.shape()[0] > s {
             sin_t.narrow(0, 0, s)?
         } else {
             sin_t.clone()
-        };
+        }
+        .contiguous()?;
 
         let output = Tensor::<WgpuRuntime>::empty(&[b, h, s, d], DType::F32, x_t.device())?;
 

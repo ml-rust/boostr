@@ -6,6 +6,10 @@
 //! byte run and reordering rows is a strided copy of the packed bytes. The
 //! copy runs through `Runtime::copy_strided` and needs no client, so a
 //! module constructor can call it on any runtime.
+//!
+//! The weights reach a constructor already on the device, so the regroup
+//! runs there. Every runtime copies 1-byte elements: wgpu runs a
+//! byte-gathering kernel, so a row length off a 4-byte boundary works too.
 
 use crate::error::{Error, Result};
 use crate::quant::tensor::QuantTensor;

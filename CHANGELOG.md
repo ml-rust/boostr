@@ -7,6 +7,55 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.7.0] - 2026-10-11
+
+### Added
+
+- **WebGPU sampling and grammar kernels** — `SamplingOps` and `GrammarDfaOps` run on `WgpuClient`:
+  sampling penalties, logits-to-token and grammar DFA masking. Parity tests hold them to the CPU.
+- **GGUF name table** — `format::gguf::hf_to_gguf_name` inverts `gguf_to_hf_name`. Both read one
+  shared table.
+- **GGUF RoPE row order** — `format::gguf::rope_rows` holds `RopeRowOrder`, `ROPE_PERMUTED_ARCHS`,
+  `rope_row_heads`, `rope_row_heads_in`, `rope_row_sources` and `reorder_rope_rows`. They convert
+  llama.cpp's pair-ordered query and key rows to and from the HuggingFace order.
+- **GGUF loads in HF order** — `Gguf::load_tensor_f32_hf_order` and
+  `Gguf::load_tensor_quantized_hf_order` load a tensor with HuggingFace row order.
+  `VarMap::from_gguf_reader` builds a `VarMap` from a GGUF the caller already opened, such as one
+  from `Gguf::from_bytes`.
+- **GGUF memory release** — `Gguf::is_memory_mapped`, `Gguf::release_tensor` and `Gguf::tensor_slice`.
+  A loader releases a memory-mapped tensor's pages once it copies the tensor out. A mapped file then
+  never adds a second copy of the model to resident memory.
+- **`rope_freqs` RoPE scaling** — the per-dimension divisors of a GGUF `rope_freqs.weight` tensor,
+  carried in `long_factor`. They reproduce llama3 scaling.
+- **`SafeTensorsLoader::from_bytes`** — loads a SafeTensors image from memory, with no model directory.
+- **`LoadedModel::tp_communicator`** — the tensor-parallel communicator of a `LlamaTp` shard. Every
+  other variant returns `None`.
+
+### Changed
+
+- **Dependencies** — boostr requires numr 0.12. Its WebGPU backend copies sub-word and offset views.
+- **`VarMap::from_gguf`** — a llama-architecture file gets its query and key rows back in
+  HuggingFace order. The file opens memory-mapped, and each tensor's pages leave resident memory
+  after the load.
+- **SafeTensors on F32-only backends** — F16 and BF16 payloads decode to F32 on the host when the
+  backend does not compute those dtypes.
+- **`LlamaTp::forward_with_kv_cache`** — gathers the vocabulary shards, so every rank returns full
+  logits.
+- **CUDA grammar kernel** — reads the F32 table layout every backend shares, and bounds-checks the
+  DFA state.
+- **WebGPU K-quants** — the Q4_K and Q6_K dequant and quant matmul shaders share one block decoder.
+  CPU dequant writes straight into the output tensor, so it holds one F32 copy instead of two.
+
+### Fixed
+
+- **`gather_from_ranks`** — concatenates the shards along the gather dim. Before, any dim other than 0
+  interleaved the shards. An out-of-range dim returns an error.
+- **CUDA top-k** — the threshold keeps at most `top_k` tokens. Before, it kept more.
+- **WebGPU RoPE** — a narrowed cos/sin cache copies to a dense buffer first. Before, a view at a
+  position offset read the wrong rows.
+
+---
+
 ## [0.6.0] - 2026-10-11
 
 ### Added

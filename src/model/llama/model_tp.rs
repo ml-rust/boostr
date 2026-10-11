@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use super::block_tp::{LlamaAttentionTp, LlamaBlockTp, LlamaMlpTp};
 use crate::distributed::parallel_embedding::VocabParallelEmbedding;
-use crate::distributed::tensor_parallel::{ColumnParallelLinear, RowParallelLinear};
+use crate::distributed::tensor_parallel::{
+    ColumnParallelLinear, RowParallelLinear, gather_from_ranks,
+};
 use crate::error::{Error, Result};
 use crate::model::config::ModelConfig;
 use crate::model::traits::ModelClient;
@@ -321,7 +323,9 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
     /// `kv_cache` is a layered cache: one `KvCache` per layer, each with
     /// `local_kv_heads` (= total_kv_heads / world_size) heads.
     ///
-    /// Note: output logits are the local shard (vocab/world_size).
+    /// Every rank must call it with the same input and position. The vocab
+    /// shards gather across ranks, so each rank returns the full
+    /// `[B, S, vocab]` logits.
     pub fn forward_with_kv_cache<C>(
         &self,
         client: &C,
@@ -359,7 +363,9 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
 
         // LM head (column-parallel): [B, S, hidden] -> [B, S, vocab/N]
         let logits = self.lm_head.forward(client, &hidden)?;
-        Ok(logits.tensor().clone())
+        // Rank r holds vocab rows [r*V/N, (r+1)*V/N). Gather them in rank order.
+        let local = logits.tensor().contiguous()?;
+        gather_from_ranks(&local, -1, self.comm.as_ref())
     }
 
     /// Forward pass: token_ids [B, S] -> logits [B, S, vocab/world_size]

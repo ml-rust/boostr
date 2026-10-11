@@ -27,6 +27,15 @@ where
         }
     }
 
+    /// The tensor-parallel communicator of a `LlamaTp` shard. Every other
+    /// variant runs on one device and returns `None`.
+    pub fn tp_communicator(&self) -> Option<&dyn numr::runtime::Communicator> {
+        match self {
+            LoadedModel::LlamaTp(m) => Some(m.comm()),
+            _ => None,
+        }
+    }
+
     /// Whether this model uses SSM state.
     pub fn needs_ssm_state(&self) -> bool {
         match self {

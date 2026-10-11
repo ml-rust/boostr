@@ -22,6 +22,9 @@ impl<R: Runtime> RoPE<R> {
     /// - LongRoPE: per-dimension divisor list (`short_factor` below/at
     ///   `original_max_position_embeddings`, else `long_factor`) plus an
     ///   `attention_scaling` (mscale) folded into the cos/sin caches
+    /// - `rope_freqs`: llama.cpp's per-dimension divisor tensor, carried in
+    ///   `long_factor` and applied at every length with no mscale. A GGUF
+    ///   stores llama3 scaling this way, as the `rope_freqs.weight` tensor.
     ///
     /// Any other `scaling_type` is an error. `"dynamic"` is rejected: it recomputes
     /// frequencies per forward as the sequence grows, which a precomputed cache cannot do.
@@ -83,6 +86,30 @@ impl<R: Runtime> RoPE<R> {
                     attention_scaling =
                         apply_longrope_scaling(&mut freqs, head_dim, base, max_seq_len, cfg)?;
                 }
+                "rope_freqs" => {
+                    let factors =
+                        cfg.long_factor
+                            .as_ref()
+                            .ok_or_else(|| Error::InvalidArgument {
+                                arg: "rope_scaling.long_factor",
+                                reason:
+                                    "rope_freqs RoPE scaling reads its per-dimension divisors from \
+                                 long_factor, and none is set"
+                                        .to_string(),
+                            })?;
+                    if factors.len() != half_dim {
+                        return Err(Error::InvalidArgument {
+                            arg: "rope_scaling.long_factor",
+                            reason: format!(
+                                "rope_freqs needs {half_dim} divisors (head_dim/2), got {}",
+                                factors.len()
+                            ),
+                        });
+                    }
+                    for (f, divisor) in freqs.iter_mut().zip(factors) {
+                        *f /= divisor;
+                    }
+                }
                 "dynamic" => {
                     return Err(Error::InvalidArgument {
                         arg: "rope_scaling.type",
@@ -99,7 +126,7 @@ impl<R: Runtime> RoPE<R> {
                         arg: "rope_scaling.type",
                         reason: format!(
                             "unsupported RoPE scaling type '{other}'; supported: \
-                             'linear', 'llama3', 'yarn', 'longrope'"
+                             'linear', 'llama3', 'yarn', 'longrope', 'rope_freqs'"
                         ),
                     });
                 }
@@ -277,5 +304,57 @@ mod tests {
                 assert!((c - 1.0).abs() < 1e-6, "{scaling_type} cos[0,{i}]={c}");
             }
         }
+    }
+
+    /// A GGUF's `rope_freqs.weight` divisors reproduce llama3 scaling. The
+    /// divisors are what `convert_hf_to_gguf.py` writes for the same config.
+    #[test]
+    fn test_rope_freqs_divisors_match_llama3() {
+        let device = CpuDevice::new();
+        let (head_dim, base, len) = (64usize, 500000.0f32, 16usize);
+        let mut llama3 = RopeScalingConfig {
+            scaling_type: "llama3".to_string(),
+            factor: 32.0,
+            original_max_position_embeddings: Some(8192),
+            low_freq_factor: Some(1.0),
+            high_freq_factor: Some(4.0),
+            attention_factor: None,
+            beta_fast: None,
+            beta_slow: None,
+            short_factor: None,
+            long_factor: None,
+        };
+        let divisors: Vec<f32> = (0..head_dim / 2)
+            .map(|i| {
+                let freq = 1.0 / base.powf(2.0 * i as f32 / head_dim as f32);
+                let wavelen = 2.0 * std::f32::consts::PI / freq;
+                if wavelen < 8192.0 / 4.0 {
+                    1.0
+                } else if wavelen > 8192.0 {
+                    32.0
+                } else {
+                    let smooth = (8192.0 / wavelen - 1.0) / (4.0 - 1.0);
+                    1.0 / ((1.0 - smooth) / 32.0 + smooth)
+                }
+            })
+            .collect();
+        let expected =
+            RoPE::<CpuRuntime>::precompute_freqs(len, head_dim, base, Some(&llama3), &device)
+                .unwrap();
+        llama3.scaling_type = "rope_freqs".to_string();
+        llama3.long_factor = Some(divisors);
+        let got = RoPE::<CpuRuntime>::precompute_freqs(len, head_dim, base, Some(&llama3), &device)
+            .unwrap();
+        let want: Vec<f32> = expected.sin_cache().tensor().to_vec();
+        let have: Vec<f32> = got.sin_cache().tensor().to_vec();
+        for (i, (w, h)) in want.iter().zip(&have).enumerate() {
+            assert!((w - h).abs() < 1e-5, "sin[{i}]: llama3 {w}, rope_freqs {h}");
+        }
+
+        llama3.long_factor = Some(vec![1.0; 3]);
+        assert!(
+            RoPE::<CpuRuntime>::precompute_freqs(len, head_dim, base, Some(&llama3), &device)
+                .is_err()
+        );
     }
 }

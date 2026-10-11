@@ -15,6 +15,8 @@
 //! table has no entry for (`attn_qkv`, `attn_gate`, `ssm_alpha`,
 //! `ssm_beta`, `attn_q_norm`, `attn_k_norm`, `post_attention_norm`).
 
+use super::name_table::{GLOBAL_NAMES, LAYER_SUFFIXES, gguf_for, hf_for};
+
 /// Map a GGUF tensor name to its HuggingFace equivalent for `arch`
 /// (`general.architecture`).
 ///
@@ -77,11 +79,8 @@ fn map_qwen35_layer_suffix(suffix: &str) -> Option<&'static str> {
 /// Unrecognized names are returned unchanged.
 pub fn gguf_to_hf_name(name: &str) -> String {
     // Global (non-layer) tensors
-    match name {
-        "token_embd.weight" => return "model.embed_tokens.weight".to_string(),
-        "output_norm.weight" => return "model.norm.weight".to_string(),
-        "output.weight" => return "lm_head.weight".to_string(),
-        _ => {}
+    if let Some(hf) = hf_for(GLOBAL_NAMES, name) {
+        return hf.to_string();
     }
 
     // Layer tensors: blk.N.suffix -> model.layers.N.hf_suffix
@@ -101,59 +100,25 @@ pub fn gguf_to_hf_name(name: &str) -> String {
 
 /// Map a GGUF layer suffix to its HuggingFace equivalent.
 fn map_layer_suffix(suffix: &str) -> Option<&'static str> {
-    Some(match suffix {
-        // Standard attention
-        "attn_q.weight" => "self_attn.q_proj.weight",
-        "attn_k.weight" => "self_attn.k_proj.weight",
-        "attn_v.weight" => "self_attn.v_proj.weight",
-        "attn_output.weight" => "self_attn.o_proj.weight",
+    hf_for(LAYER_SUFFIXES, suffix)
+}
 
-        // Attention biases
-        "attn_q.bias" => "self_attn.q_proj.bias",
-        "attn_k.bias" => "self_attn.k_proj.bias",
-        "attn_v.bias" => "self_attn.v_proj.bias",
-        "attn_output.bias" => "self_attn.o_proj.bias",
-
-        // MLA (Multi-Head Latent Attention) - DeepSeek-V2/V3
-        "attn_q_a.weight" => "self_attn.q_a_proj.weight",
-        "attn_q_a_norm.weight" => "self_attn.q_a_layernorm.weight",
-        "attn_q_b.weight" => "self_attn.q_b_proj.weight",
-        "attn_kv_a.weight" => "self_attn.kv_a_proj_with_mqa.weight",
-        "attn_kv_a_norm.weight" => "self_attn.kv_a_layernorm.weight",
-        "attn_kv_b.weight" => "self_attn.kv_b_proj.weight",
-
-        // Standard MLP (SwiGLU)
-        "ffn_gate.weight" => "mlp.gate_proj.weight",
-        "ffn_up.weight" => "mlp.up_proj.weight",
-        "ffn_down.weight" => "mlp.down_proj.weight",
-
-        // MoE router
-        "ffn_gate_inp.weight" => "block_sparse_moe.gate.weight",
-        "ffn_gate_inp.bias" => "block_sparse_moe.gate.bias",
-
-        // MoE shared expert
-        "ffn_gate_shexp.weight" => "block_sparse_moe.shared_expert.gate_proj.weight",
-        "ffn_up_shexp.weight" => "block_sparse_moe.shared_expert.up_proj.weight",
-        "ffn_down_shexp.weight" => "block_sparse_moe.shared_expert.down_proj.weight",
-
-        // Layer norms
-        "attn_norm.weight" => "input_layernorm.weight",
-        "ffn_norm.weight" => "post_attention_layernorm.weight",
-
-        // Mamba2 SSM
-        "ssm_in.weight" => "mamba2.mixer.in_proj.weight",
-        "ssm_in.bias" => "mamba2.mixer.in_proj.bias",
-        "ssm_out.weight" => "mamba2.mixer.out_proj.weight",
-        "ssm_out.bias" => "mamba2.mixer.out_proj.bias",
-        "ssm_conv1d.weight" => "mamba2.mixer.conv1d.weight",
-        "ssm_conv1d.bias" => "mamba2.mixer.conv1d.bias",
-        "ssm_a" => "mamba2.mixer.A_log",
-        "ssm_dt.bias" => "mamba2.mixer.dt_bias",
-        "ssm_d" => "mamba2.mixer.D",
-        "ssm_norm.weight" => "mamba2.mixer.norm.weight",
-
-        _ => return None,
-    })
+/// Map a HuggingFace tensor name to llama.cpp's GGUF name.
+///
+/// `None` for a name outside the shared table, so a caller can tell an
+/// unmapped tensor from a mapped one. MoE expert tensors answer `None`:
+/// llama.cpp merges them into one 3-D tensor per projection.
+pub fn hf_to_gguf_name(name: &str) -> Option<String> {
+    if let Some(gguf) = gguf_for(GLOBAL_NAMES, name) {
+        return Some(gguf.to_string());
+    }
+    let rest = name.strip_prefix("model.layers.")?;
+    let (layer_num, suffix) = rest.split_once('.')?;
+    if layer_num.is_empty() || !layer_num.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let gguf_suffix = gguf_for(LAYER_SUFFIXES, suffix)?;
+    Some(format!("blk.{layer_num}.{gguf_suffix}"))
 }
 
 /// Map a GGUF MoE expert tensor name to its HuggingFace equivalent.
@@ -196,6 +161,30 @@ mod tests {
         );
         assert_eq!(gguf_to_hf_name("output_norm.weight"), "model.norm.weight");
         assert_eq!(gguf_to_hf_name("output.weight"), "lm_head.weight");
+    }
+
+    /// Every pair in the shared table maps back to where it started.
+    #[test]
+    fn hf_to_gguf_inverts_gguf_to_hf() {
+        for gguf in [
+            "token_embd.weight",
+            "output_norm.weight",
+            "output.weight",
+            "blk.0.attn_q.weight",
+            "blk.15.attn_k.bias",
+            "blk.3.attn_q_norm.weight",
+            "blk.7.ffn_down.weight",
+            "blk.2.ffn_norm.weight",
+        ] {
+            let hf = gguf_to_hf_name(gguf);
+            assert_eq!(hf_to_gguf_name(&hf).as_deref(), Some(gguf), "{hf}");
+        }
+        assert_eq!(hf_to_gguf_name("model.layers.x.mlp.up_proj.weight"), None);
+        assert_eq!(hf_to_gguf_name("model.rotary_emb.inv_freq"), None);
+        assert_eq!(
+            hf_to_gguf_name("model.layers.0.block_sparse_moe.experts.0.w1.weight"),
+            None
+        );
     }
 
     #[test]

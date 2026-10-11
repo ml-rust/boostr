@@ -1,5 +1,7 @@
 //! One-shot tensor loading: F32 (with dequantization) and `QuantTensor`.
 
+use super::super::GgufTensorInfo;
+use super::super::rope_rows::{RopeRowOrder, reorder_rope_rows, rope_row_heads_in};
 use super::super::types::GgmlType;
 use super::open::Gguf;
 use crate::error::{Error, Result};
@@ -7,6 +9,7 @@ use crate::quant::QuantTensor;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
+use std::borrow::Cow;
 
 impl Gguf {
     /// Load an F32 tensor (for unquantized F32/F16/BF16 tensors, converted to F32)
@@ -15,6 +18,43 @@ impl Gguf {
         name: &str,
         device: &R::Device,
     ) -> Result<Tensor<R>> {
+        let tensor = {
+            let (info, bytes) = self.tensor_bytes(name, false)?;
+            Self::decode_f32(name, &info, &bytes, device)?
+        };
+        self.release_tensor(name);
+        Ok(tensor)
+    }
+
+    /// [`load_tensor_f32`](Self::load_tensor_f32) with query and key rows
+    /// in HuggingFace order.
+    ///
+    /// A file in [`ROPE_PERMUTED_ARCHS`](crate::format::gguf::ROPE_PERMUTED_ARCHS)
+    /// stores those rows in llama.cpp's pair order. The rows return on the
+    /// host, before upload. Every other tensor loads as stored.
+    pub fn load_tensor_f32_hf_order<R: Runtime<DType = DType>>(
+        &mut self,
+        name: &str,
+        device: &R::Device,
+    ) -> Result<Tensor<R>> {
+        let tensor = {
+            let (info, bytes) = self.tensor_bytes(name, true)?;
+            Self::decode_f32(name, &info, &bytes, device)?
+        };
+        self.release_tensor(name);
+        Ok(tensor)
+    }
+
+    /// Read a tensor's info and raw bytes. With `hf_rows`, query and key
+    /// rows of a llama.cpp-order file return to HuggingFace order.
+    ///
+    /// The bytes borrow from a memory map or in-memory buffer when the rows
+    /// stay as stored. Call [`Gguf::release_tensor`] once they are copied.
+    fn tensor_bytes(
+        &mut self,
+        name: &str,
+        hf_rows: bool,
+    ) -> Result<(GgufTensorInfo, Cow<'_, [u8]>)> {
         let info = self
             .tensors
             .get(name)
@@ -22,9 +62,36 @@ impl Gguf {
                 reason: format!("GGUF tensor not found: {name}"),
             })?
             .clone();
+        let heads = if hf_rows {
+            rope_row_heads_in(&self.metadata, name)
+        } else {
+            None
+        };
+        let bytes = self.tensor_slice(name)?;
+        let Some(heads) = heads else {
+            return Ok((info, bytes));
+        };
+        // GGML order lists the innermost axis first. The last entry is the
+        // row-major leading axis, which holds the rows.
+        let rows = info.shape.last().copied().unwrap_or(0);
+        let bytes = reorder_rope_rows(&bytes, rows, heads, RopeRowOrder::ToHf).map_err(|e| {
+            Error::ModelError {
+                reason: format!(
+                    "GGUF tensor '{name}' does not split into {heads} attention heads: {e}. \
+                     Check the file's attention head counts."
+                ),
+            }
+        })?;
+        Ok((info, Cow::Owned(bytes)))
+    }
 
-        let bytes = self.read_tensor_bytes(name)?;
-
+    /// Decode raw tensor bytes to an F32 tensor on `device`.
+    fn decode_f32<R: Runtime<DType = DType>>(
+        name: &str,
+        info: &GgufTensorInfo,
+        bytes: &[u8],
+        device: &R::Device,
+    ) -> Result<Tensor<R>> {
         // GGUF stores shape in GGML order (innermost first), reverse for row-major
         let mut shape = info.shape.clone();
         shape.reverse();
@@ -101,6 +168,27 @@ impl Gguf {
         name: &str,
         device: &R::Device,
     ) -> Result<QuantTensor<R>> {
+        self.load_quantized(name, false, device)
+    }
+
+    /// [`load_tensor_quantized`](Self::load_tensor_quantized) with query and
+    /// key rows in HuggingFace order, as
+    /// [`load_tensor_f32_hf_order`](Self::load_tensor_f32_hf_order) does.
+    /// A row is a whole number of blocks, so the host moves whole rows.
+    pub fn load_tensor_quantized_hf_order<R: Runtime<DType = DType>>(
+        &mut self,
+        name: &str,
+        device: &R::Device,
+    ) -> Result<QuantTensor<R>> {
+        self.load_quantized(name, true, device)
+    }
+
+    fn load_quantized<R: Runtime<DType = DType>>(
+        &mut self,
+        name: &str,
+        hf_rows: bool,
+        device: &R::Device,
+    ) -> Result<QuantTensor<R>> {
         let info = self
             .tensors
             .get(name)
@@ -116,13 +204,16 @@ impl Gguf {
                 reason: format!("tensor '{name}' type {:?} is not quantized", info.ggml_type),
             })?;
 
-        let bytes = self.read_tensor_bytes(name)?;
-
         // GGUF stores shape in GGML order, reverse for row-major
         let mut shape = info.shape.clone();
         shape.reverse();
 
-        QuantTensor::from_bytes(&bytes, format, &shape, device)
+        let tensor = {
+            let (_, bytes) = self.tensor_bytes(name, hf_rows)?;
+            QuantTensor::from_bytes(&bytes, format, &shape, device)?
+        };
+        self.release_tensor(name);
+        Ok(tensor)
     }
 }
 

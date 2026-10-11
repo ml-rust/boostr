@@ -7,7 +7,9 @@ use super::super::io::{
 };
 use super::super::metadata::GgufMetadata;
 use crate::error::{Error, Result};
+#[cfg(not(target_arch = "wasm32"))]
 use memmap2::Mmap;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -16,6 +18,9 @@ use std::path::Path;
 /// Backing storage for GGUF tensor data.
 pub(super) enum GgufStorage {
     File(File),
+    /// The whole file mapped read-only. Tensor reads borrow from it. No
+    /// memory map exists on wasm32.
+    #[cfg(not(target_arch = "wasm32"))]
     Mmap(Mmap),
     /// In-memory buffer (for wasm or data loaded via HTTP).
     InMemory(Vec<u8>),
@@ -38,9 +43,12 @@ impl Gguf {
 
     /// Open a GGUF file with optional memory-mapping.
     ///
-    /// When `use_mmap` is `true`, the tensor data region is memory-mapped for
-    /// zero-copy reads. The header and metadata are still read via buffered I/O.
-    /// Falls back to regular file I/O if mmap fails (e.g. on unsupported platforms).
+    /// When `use_mmap` is `true`, the file is memory-mapped and tensor reads
+    /// borrow from the map. After a loader copies a tensor out, it calls
+    /// [`Gguf::release_tensor`] and the kernel drops those pages. So the
+    /// mapped file never adds a second copy of the model to resident memory.
+    /// The header and metadata still read through buffered I/O. wasm32 has no
+    /// memory map, and a failed map falls back to file reads.
     pub fn open_with_mmap<P: AsRef<Path>>(path: P, use_mmap: bool) -> Result<Self> {
         Self::open_impl(path, use_mmap)
     }
@@ -121,12 +129,7 @@ impl Gguf {
         drop(reader);
 
         let storage = if use_mmap {
-            // SAFETY: The file is read-only and we do not mutate the mapping.
-            // The caller must not truncate or replace the file while the Gguf is live.
-            match unsafe { Mmap::map(&file) } {
-                Ok(mmap) => GgufStorage::Mmap(mmap),
-                Err(_) => GgufStorage::File(file), // graceful fallback
-            }
+            Self::map_or_file(file)
         } else {
             GgufStorage::File(file)
         };
@@ -166,39 +169,65 @@ impl Gguf {
         })
     }
 
-    /// Read a byte slice from storage at the given absolute offset.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn map_or_file(file: File) -> GgufStorage {
+        // SAFETY: The map is read-only and nothing here writes through it.
+        // The caller must not truncate or replace the file while the Gguf is live.
+        match unsafe { Mmap::map(&file) } {
+            Ok(mmap) => {
+                // Loaders read each tensor once, front to back.
+                #[cfg(unix)]
+                let _ = mmap.advise(memmap2::Advice::Sequential);
+                GgufStorage::Mmap(mmap)
+            }
+            Err(_) => GgufStorage::File(file),
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn map_or_file(file: File) -> GgufStorage {
+        GgufStorage::File(file)
+    }
+
+    /// Whether tensor reads borrow from a memory map.
+    pub fn is_memory_mapped(&self) -> bool {
+        match self.storage {
+            #[cfg(not(target_arch = "wasm32"))]
+            GgufStorage::Mmap(_) => true,
+            _ => false,
+        }
+    }
+
+    /// Read a byte range at an absolute offset. A memory map or an in-memory
+    /// buffer lends the bytes. A file read copies them.
     pub(super) fn read_slice(
         &mut self,
         abs_offset: u64,
         size: usize,
         name: &str,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Cow<'_, [u8]>> {
+        let in_range = |len: usize, what: &str| -> Result<std::ops::Range<usize>> {
+            let start = usize::try_from(abs_offset).ok();
+            let range = start.and_then(|start| Some(start..start.checked_add(size)?));
+            match range {
+                Some(range) if range.end <= len => Ok(range),
+                _ => Err(Error::ModelError {
+                    reason: format!(
+                        "tensor '{name}' data at offset {abs_offset}, {size} bytes, exceeds \
+                         {what} length {len}"
+                    ),
+                }),
+            }
+        };
         match &mut self.storage {
+            #[cfg(not(target_arch = "wasm32"))]
             GgufStorage::Mmap(mmap) => {
-                let start = abs_offset as usize;
-                let end = start + size;
-                if end > mmap.len() {
-                    return Err(Error::ModelError {
-                        reason: format!(
-                            "tensor '{name}' data at [{start}..{end}) exceeds mmap length {}",
-                            mmap.len()
-                        ),
-                    });
-                }
-                Ok(mmap[start..end].to_vec())
+                let range = in_range(mmap.len(), "mmap")?;
+                Ok(Cow::Borrowed(&mmap[range]))
             }
             GgufStorage::InMemory(buf) => {
-                let start = abs_offset as usize;
-                let end = start + size;
-                if end > buf.len() {
-                    return Err(Error::ModelError {
-                        reason: format!(
-                            "tensor '{name}' data at [{start}..{end}) exceeds buffer length {}",
-                            buf.len()
-                        ),
-                    });
-                }
-                Ok(buf[start..end].to_vec())
+                let range = in_range(buf.len(), "buffer")?;
+                Ok(Cow::Borrowed(&buf[range]))
             }
             GgufStorage::File(file) => {
                 let mut buf = vec![0u8; size];
@@ -209,16 +238,48 @@ impl Gguf {
                 file.read_exact(&mut buf).map_err(|e| Error::ModelError {
                     reason: format!("IO read error: {e}"),
                 })?;
-                Ok(buf)
+                Ok(Cow::Owned(buf))
             }
         }
     }
 
-    /// Read raw tensor data bytes.
+    /// Tell the kernel that a loader has copied tensor `name` out.
+    ///
+    /// On a memory-mapped file the tensor's pages leave resident memory.
+    /// They are clean file pages, so a later read faults them back in from
+    /// disk. Any other storage ignores the call.
+    pub fn release_tensor(&self, name: &str) {
+        #[cfg(all(unix, not(target_arch = "wasm32")))]
+        if let (GgufStorage::Mmap(mmap), Some(info)) = (&self.storage, self.tensors.get(name)) {
+            let Ok(start) = usize::try_from(self.data_offset + info.offset) else {
+                return;
+            };
+            let len = info.size_bytes();
+            if start.saturating_add(len) <= mmap.len() {
+                // SAFETY: the map is a read-only file map and no slice into
+                // it outlives this `&self` borrow. MADV_DONTNEED on such a map
+                // only drops clean pages, which reload from the file.
+                let _ = unsafe {
+                    mmap.unchecked_advise_range(memmap2::UncheckedAdvice::DontNeed, start, len)
+                };
+            }
+        }
+        #[cfg(not(all(unix, not(target_arch = "wasm32"))))]
+        let _ = name;
+    }
+
+    /// Read raw tensor data bytes into an owned buffer.
     ///
     /// When backed by mmap or in-memory buffer, this copies from the backing store.
-    /// When backed by a file, this seeks and reads.
+    /// When backed by a file, this seeks and reads. Loaders use
+    /// [`Gguf::tensor_slice`], which copies only from a file.
     pub fn read_tensor_bytes(&mut self, name: &str) -> Result<Vec<u8>> {
+        self.tensor_slice(name).map(Cow::into_owned)
+    }
+
+    /// Raw tensor data bytes, borrowed from a memory map or an in-memory
+    /// buffer, or read from the file.
+    pub fn tensor_slice(&mut self, name: &str) -> Result<Cow<'_, [u8]>> {
         let info = self
             .tensors
             .get(name)

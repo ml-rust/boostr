@@ -142,6 +142,8 @@ impl Gguf {
             // `chunk_f32` drops here, freeing the CPU buffer before the next chunk.
             row_start = row_end;
         }
+        drop(raw);
+        self.release_tensor(name);
 
         Ok(dst)
     }

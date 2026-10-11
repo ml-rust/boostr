@@ -21,7 +21,9 @@ impl<R: Runtime<DType = DType>> VarMap<R> {
     /// gets every packed weight materialized to dense F32 without this
     /// function knowing that happened. `VarMap::from_gguf` stays the
     /// GGUF-specific convenience; it is the same shape with the source and
-    /// the rename fixed.
+    /// the rename fixed. This function reorders no rows. A llama.cpp `llama`
+    /// GGUF stores query and key rows in pair order, and only `from_gguf`
+    /// restores the HuggingFace order.
     ///
     /// `rename` maps a stored tensor name to the name the model asks
     /// `VarBuilder` for: `gguf_to_hf_name` for a GGUF, identity for a

@@ -210,7 +210,8 @@ extern "C" __global__ void logits_to_token_kernel(
             }
             __syncthreads();
         }
-        topk_threshold = lo;
+        // `hi` keeps at most top_k tokens. `lo` always keeps more than top_k.
+        topk_threshold = hi;
     }
 
     // Step 7: Min-p threshold

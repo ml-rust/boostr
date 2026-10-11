@@ -21,19 +21,21 @@ static constexpr int INVALID_STATE = -1;
 //
 // Args:
 //   logits:           [vocab_size] float — modified in-place (last position logits)
-//   transition_table: [num_states * 256] int32 — flattened DFA transition table
-//   accepting_mask:   [num_states] int32 — 1 if accepting state, 0 otherwise (unused for masking)
-//   vocab_bytes:      [total_bytes] uint8 — concatenated token byte sequences
-//   vocab_offsets:    [vocab_size + 1] int32 — start/end offsets into vocab_bytes
+//   transition_table: [num_states * 256] f32 — flattened DFA transition table
+//   accepting_mask:   [num_states] f32 — 1 if accepting state, 0 otherwise (unused for masking)
+//   vocab_bytes:      [total_bytes] f32 — concatenated token byte sequences
+//   vocab_offsets:    [vocab_size + 1] f32 — start/end offsets into vocab_bytes
 //   current_state:    int32 — the DFA state to start from
 //   num_states:       int32 — number of DFA states
 //   vocab_size:       int32 — vocabulary size
 extern "C" __global__ void grammar_dfa_mask_logits_kernel(
     float* __restrict__ logits,
-    const int32_t* __restrict__ transition_table,
-    const int32_t* __restrict__ accepting_mask,
-    const uint8_t* __restrict__ vocab_bytes,
-    const int32_t* __restrict__ vocab_offsets,
+    // Every table is an F32 tensor of integer values, the layout all
+    // backends share.
+    const float* __restrict__ transition_table,
+    const float* __restrict__ accepting_mask,
+    const float* __restrict__ vocab_bytes,
+    const float* __restrict__ vocab_offsets,
     int32_t current_state,
     int32_t num_states,
     int32_t vocab_size
@@ -41,8 +43,8 @@ extern "C" __global__ void grammar_dfa_mask_logits_kernel(
     int token_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (token_id >= vocab_size) return;
 
-    int byte_start = vocab_offsets[token_id];
-    int byte_end = vocab_offsets[token_id + 1];
+    int byte_start = (int)vocab_offsets[token_id];
+    int byte_end = (int)vocab_offsets[token_id + 1];
     int num_bytes = byte_end - byte_start;
 
     int state = current_state;
@@ -50,10 +52,14 @@ extern "C" __global__ void grammar_dfa_mask_logits_kernel(
 
     // Walk the DFA through each byte of this token
     for (int i = 0; i < num_bytes; i++) {
-        uint8_t byte_val = vocab_bytes[byte_start + i];
+        int byte_val = (int)vocab_bytes[byte_start + i];
+        if (state < 0 || state >= num_states) {
+            valid = false;
+            break;
+        }
         int table_idx = state * 256 + byte_val;
 
-        int next_state = transition_table[table_idx];
+        int next_state = (int)transition_table[table_idx];
         if (next_state == INVALID_STATE) {
             valid = false;
             break;
@@ -64,7 +70,7 @@ extern "C" __global__ void grammar_dfa_mask_logits_kernel(
     // Empty tokens: only valid if current state is accepting
     if (valid && num_bytes == 0) {
         if (current_state >= 0 && current_state < num_states) {
-            valid = (accepting_mask[current_state] != 0);
+            valid = (accepting_mask[current_state] != 0.0f);
         } else {
             valid = false;
         }

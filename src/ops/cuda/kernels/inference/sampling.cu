@@ -111,7 +111,8 @@ extern "C" __global__ void sample_token_kernel(
             }
             __syncthreads();
         }
-        topk_threshold = lo;
+        // `hi` keeps at most top_k tokens. `lo` always keeps more than top_k.
+        topk_threshold = hi;
     }
 
     // Step 5: Min-p threshold

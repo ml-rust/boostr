@@ -64,6 +64,15 @@ impl SafeTensorsLoader {
         }
     }
 
+    /// Load one SafeTensors image held in memory, such as a file a browser
+    /// fetched. It has no model directory, so [`Self::model_dir`] is empty.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
+        Ok(Self {
+            files: vec![SafeTensors::from_bytes(bytes)?],
+            model_dir: PathBuf::new(),
+        })
+    }
+
     /// Get all tensor names across all files
     pub fn tensor_names(&self) -> Vec<String> {
         let mut names = Vec::new();

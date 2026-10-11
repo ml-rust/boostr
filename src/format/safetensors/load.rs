@@ -28,6 +28,12 @@ impl SafeTensors {
         let bytes = self.read_tensor_bytes(name)?;
 
         match info.dtype {
+            DType::F16 | DType::BF16 if !R::computes_float_dtype(info.dtype) => {
+                // The backend computes in F32 only. Decode the half-width
+                // payload on the host once, at load time.
+                let data = decode_half_to_f32(&bytes, info.dtype);
+                Tensor::<R>::from_slice(&data, &info.shape, device).map_err(Error::Numr)
+            }
             DType::F32 | DType::F16 | DType::BF16 => {
                 // Load raw bytes directly in native dtype
                 let storage = numr::tensor::Storage::<R>::from_bytes(&bytes, info.dtype, device)
@@ -112,6 +118,19 @@ impl SafeTensors {
     }
 }
 
+/// Decode a little-endian F16 or BF16 payload to F32.
+fn decode_half_to_f32(bytes: &[u8], dtype: DType) -> Vec<f32> {
+    let words = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| u16::from_le_bytes(*b));
+    match dtype {
+        DType::BF16 => words.map(|w| half::bf16::from_bits(w).to_f32()).collect(),
+        _ => words.map(|w| half::f16::from_bits(w).to_f32()).collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::header::tests::create_test_file;
@@ -170,6 +189,25 @@ mod tests {
         let data: Vec<half::bf16> = tensor.to_vec();
         assert!((data[0].to_f32() - 1.0).abs() < 1e-2);
         assert!((data[5].to_f32() - 6.0).abs() < 1e-2);
+    }
+
+    #[test]
+    fn decode_half_to_f32_reads_each_half_type() {
+        let values = [1.5f32, -2.25, 0.0, 65504.0];
+        let bf16: Vec<u8> = values
+            .iter()
+            .flat_map(|&v| half::bf16::from_f32(v).to_le_bytes())
+            .collect();
+        let f16: Vec<u8> = values
+            .iter()
+            .flat_map(|&v| half::f16::from_f32(v).to_le_bytes())
+            .collect();
+        let from_bf16 = decode_half_to_f32(&bf16, DType::BF16);
+        let from_f16 = decode_half_to_f32(&f16, DType::F16);
+        for (i, &v) in values.iter().enumerate() {
+            assert_eq!(from_bf16[i], half::bf16::from_f32(v).to_f32());
+            assert_eq!(from_f16[i], v);
+        }
     }
 
     // ===== load_tensor: integer dtypes =====

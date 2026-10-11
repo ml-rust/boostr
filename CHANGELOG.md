@@ -11,6 +11,9 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`SequenceScheduler::schedule_with_limit`** — `schedule` with a cap on batch growth. Waiting and
+  preempted sequences join the running set only while it holds fewer than the cap. Running sequences
+  keep decoding above it, and `max_batch_size` still applies.
 - **Kokoro on every backend** — the full synthesis path, with the harmonic source and the
   per-stage noise conditioning, runs on any runtime: CPU, CUDA and WebGPU.
 - **`KokoroClient<R>`** — the client bound of the Kokoro synthesis path, exported from

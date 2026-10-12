@@ -288,6 +288,7 @@ fn test_interleaved_vs_standard_different_outputs() {
 
 /// Decode reads the cos/sin row at the current position: a `narrow` view
 /// with a storage offset. Every backend must rotate by that row, not row 0.
+#[cfg(feature = "wgpu")]
 #[test]
 fn test_apply_rope_at_position_offset_parity() {
     let (cpu_client, cpu_device) = setup_cpu();
@@ -311,7 +312,6 @@ fn test_apply_rope_at_position_offset_parity() {
     let cpu_result = cpu_client.apply_rope(&x, &cos, &sin).unwrap();
     let cpu_result_vec = cpu_result.tensor().to_vec::<f32>();
 
-    #[cfg(feature = "wgpu")]
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use numr::runtime::wgpu::WgpuRuntime;
         use numr::tensor::Tensor;

@@ -59,22 +59,35 @@ pub(super) fn apply_yarn_scaling(
     }))
 }
 
-/// LongRoPE frequency scaling: per-dimension divisor list (Phi-3,
-/// MiniCPM4-style), unlike YaRN/llama3's single shared factor.
+/// LongRoPE frequencies (Phi-3, MiniCPM4): a per-dimension divisor list,
+/// `short_factor` for positions below `original_max_position_embeddings` and
+/// `long_factor` from there on.
+pub(super) struct LongRope {
+    /// Frequencies of positions `< original`.
+    pub short: Vec<f32>,
+    /// Frequencies of positions `>= original`. `None` when the cache never
+    /// reaches `original`.
+    pub long: Option<Vec<f32>>,
+    /// `original_max_position_embeddings`.
+    pub original: usize,
+    /// mscale, folded into the cos/sin caches.
+    pub attention_scaling: f32,
+}
+
+/// Build the LongRoPE frequency sets for a cache of `max_seq_len` rows.
 ///
-/// `max_seq_len` plays the role HF's `rope_scaling` config calls
-/// `max_position_embeddings`: the length the cache is precomputed for.
-/// Picks `short_factor` when `max_seq_len <= original_max_position_embeddings`,
-/// else `long_factor`, ONCE for the whole cache. Mutates `freqs` in place and
-/// returns the `attention_scaling` (mscale), which the caller folds into the
-/// cos/sin caches since it scales both alike.
-pub(super) fn apply_longrope_scaling(
-    freqs: &mut [f32],
+/// transformers picks one factor list per forward from the sequence length.
+/// A precomputed cache picks per row instead, which equals it for every
+/// sequence up to `original` and for each new token past it.
+///
+/// `attention_factor` comes from the config. Without it, the mscale follows
+/// `max_seq_len / original`.
+pub(super) fn longrope_freqs(
     head_dim: usize,
     base: f32,
     max_seq_len: usize,
     cfg: &RopeScalingConfig,
-) -> Result<f32> {
+) -> Result<LongRope> {
     let half_dim = head_dim / 2;
     let original = cfg
         .original_max_position_embeddings
@@ -86,55 +99,47 @@ pub(super) fn apply_longrope_scaling(
                      rope_scaling config"
                 .to_string(),
         })?;
-
-    let use_short = max_seq_len <= original;
-    let factor_list = if use_short {
-        cfg.short_factor
-            .as_ref()
-            .ok_or_else(|| Error::InvalidArgument {
-                arg: "rope_scaling.short_factor",
-                reason: "longrope RoPE scaling requires rope_scaling.short_factor when \
-                     max_seq_len <= original_max_position_embeddings; set it in the \
-                     checkpoint's rope_scaling config"
-                    .to_string(),
-            })?
-    } else {
-        cfg.long_factor
-            .as_ref()
-            .ok_or_else(|| Error::InvalidArgument {
-                arg: "rope_scaling.long_factor",
-                reason: "longrope RoPE scaling requires rope_scaling.long_factor when \
-                     max_seq_len > original_max_position_embeddings; set it in the \
-                     checkpoint's rope_scaling config"
-                    .to_string(),
-            })?
+    let scaled = |arg: &'static str, factors: Option<&Vec<f32>>| -> Result<Vec<f32>> {
+        let factors = factors.ok_or_else(|| Error::InvalidArgument {
+            arg,
+            reason: format!("longrope RoPE scaling requires {arg}; set it in the checkpoint's rope_scaling config"),
+        })?;
+        if factors.len() != half_dim {
+            return Err(Error::InvalidArgument {
+                arg,
+                reason: format!(
+                    "expected {half_dim} entries (head_dim/2={half_dim}), got {}",
+                    factors.len()
+                ),
+            });
+        }
+        Ok((0..half_dim)
+            .map(|i| 1.0 / base.powf(2.0 * i as f32 / head_dim as f32) / factors[i])
+            .collect())
     };
-    if factor_list.len() != half_dim {
-        return Err(Error::InvalidArgument {
-            arg: if use_short {
-                "rope_scaling.short_factor"
-            } else {
-                "rope_scaling.long_factor"
-            },
-            reason: format!(
-                "expected {half_dim} entries (head_dim/2={half_dim}), got {}",
-                factor_list.len()
-            ),
-        });
-    }
-
-    for (i, f) in freqs.iter_mut().enumerate() {
-        let inv_freq = 1.0 / base.powf(2.0 * i as f32 / head_dim as f32);
-        *f = inv_freq / factor_list[i];
-    }
-
-    let attention_scaling = if max_seq_len == original {
-        1.0
+    let short = scaled("rope_scaling.short_factor", cfg.short_factor.as_ref())?;
+    let long = if max_seq_len > original {
+        Some(scaled(
+            "rope_scaling.long_factor",
+            cfg.long_factor.as_ref(),
+        )?)
     } else {
-        let ratio = max_seq_len as f64 / original as f64;
-        (1.0 + ratio.ln() / (original as f64).ln()).sqrt() as f32
+        None
     };
-    Ok(attention_scaling)
+    let attention_scaling = cfg.attention_factor.unwrap_or_else(|| {
+        if max_seq_len <= original {
+            1.0
+        } else {
+            let ratio = max_seq_len as f64 / original as f64;
+            (1.0 + ratio.ln() / (original as f64).ln()).sqrt() as f32
+        }
+    });
+    Ok(LongRope {
+        short,
+        long,
+        original,
+        attention_scaling,
+    })
 }
 
 /// A YaRN scaling config with the defaults the tests in this module and in
@@ -281,33 +286,32 @@ mod tests {
 
     #[test]
     fn test_rope_longrope_long_factor_and_attention_scaling() {
-        // max_seq_len=16 > original=8 selects long_factor (short_factor=999 would
-        // give wildly different frequencies if wrongly selected, so this also
-        // pins the selection, not just the scaling).
+        // max_seq_len=16 > original=8: rows 0..8 use short_factor, rows 8..16
+        // use long_factor, as transformers does for a sequence up to 8 and
+        // for each token past it. short_factor=999 makes a wrong pick obvious.
         //   inv_freq = 10000^(-2i/8) = [1, 0.1, 0.01, 0.001]
         //   long_factor = [2, 2, 2, 2] -> divided = [0.5, 0.05, 0.005, 0.0005]
-        //   attention_scaling = sqrt(1 + ln(16/8) / ln(8)) ~= 1.1547005
+        //   attention_scaling = sqrt(1 + ln(16/8) / ln(8)) ~= 1.1547005, every row
         let device = CpuDevice::new();
         let cfg = longrope_cfg(vec![999.0; 4], vec![2.0; 4], Some(8));
         let rope =
             RoPE::<CpuRuntime>::precompute_freqs(16, 8, 10000.0, Some(&cfg), &device).unwrap();
-
-        let expected = [0.5f32, 0.05, 0.005, 0.0005];
-        let got = freqs_at_pos1(&rope, 4);
-        for (i, (&e, &g)) in expected.iter().zip(got.iter()).enumerate() {
-            assert!(
-                (g - e).abs() < 1e-6,
-                "longrope long_factor freq[{i}]: expected {e}, got {g}"
-            );
-        }
-
         let cos: Vec<f32> = rope.cos_cache().tensor().to_vec();
-        let expected_scaling = 1.154_700_5f32;
-        for (i, &c) in cos.iter().take(4).enumerate() {
-            assert!(
-                (c - expected_scaling).abs() < 1e-5,
-                "attention_scaling cos[0,{i}]: expected {expected_scaling}, got {c}"
-            );
+        let sin: Vec<f32> = rope.sin_cache().tensor().to_vec();
+        let scaling = 1.154_700_5f32;
+
+        let short = [1.0f32 / 999.0, 0.1 / 999.0, 0.01 / 999.0, 0.001 / 999.0];
+        let long = [0.5f32, 0.05, 0.005, 0.0005];
+        for (pos, freqs) in [(1usize, short), (7, short), (8, long), (15, long)] {
+            for (i, f) in freqs.iter().enumerate() {
+                let angle = pos as f32 * f;
+                let (c, s) = (cos[pos * 4 + i], sin[pos * 4 + i]);
+                assert!(
+                    (c - angle.cos() * scaling).abs() < 1e-5
+                        && (s - angle.sin() * scaling).abs() < 1e-5,
+                    "row {pos} dim {i}: cos {c} sin {s}, want angle {angle}"
+                );
+            }
         }
     }
 

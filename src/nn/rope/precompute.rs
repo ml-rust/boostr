@@ -7,7 +7,7 @@ use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
 use super::RoPE;
-use super::scaling::{apply_longrope_scaling, apply_yarn_scaling};
+use super::scaling::{apply_yarn_scaling, longrope_freqs};
 
 impl<R: Runtime> RoPE<R> {
     /// Compute frequency caches: cos(pos * freq), sin(pos * freq)
@@ -40,6 +40,44 @@ impl<R: Runtime> RoPE<R> {
     where
         R: Runtime<DType = numr::dtype::DType>,
     {
+        Self::precompute_freqs_partial(max_seq_len, head_dim, head_dim, base, scaling, device)
+    }
+
+    /// [`precompute_freqs`](Self::precompute_freqs) for a head whose leading
+    /// `rotary_dim` dims rotate, as GPT-NeoX `rotary_pct` and Phi
+    /// `partial_rotary_factor` ask.
+    ///
+    /// The frequencies are those of a `rotary_dim` head. The caches are still
+    /// `[max_seq_len, head_dim/2]`: columns past `rotary_dim/2` hold `cos = 1`,
+    /// `sin = 0`, so the split-half kernel leaves those dims untouched. The
+    /// caller orders each head's dims so the rotated pairs come first in each
+    /// half; see `model::llama` partial rotary loading.
+    pub fn precompute_freqs_partial(
+        max_seq_len: usize,
+        head_dim: usize,
+        rotary_dim: usize,
+        base: f32,
+        scaling: Option<&RopeScalingConfig>,
+        device: &<R as Runtime>::Device,
+    ) -> Result<Self>
+    where
+        R: Runtime<DType = numr::dtype::DType>,
+    {
+        if rotary_dim == 0
+            || rotary_dim > head_dim
+            || !rotary_dim.is_multiple_of(2)
+            || !head_dim.is_multiple_of(2)
+        {
+            return Err(Error::InvalidArgument {
+                arg: "rotary_dim",
+                reason: format!(
+                    "rotary_dim {rotary_dim} must be even, nonzero and at most head_dim \
+                     {head_dim}"
+                ),
+            });
+        }
+        let cache_half = head_dim / 2;
+        let head_dim = rotary_dim;
         let half_dim = head_dim / 2;
 
         // Compute base frequencies
@@ -47,8 +85,10 @@ impl<R: Runtime> RoPE<R> {
             .map(|i| 1.0 / base.powf(2.0 * i as f32 / head_dim as f32))
             .collect();
 
-        // Apply scaling
+        // Apply scaling. LongRoPE swaps in its long frequencies from row
+        // `original` on.
         let mut attention_scaling = 1.0f32;
+        let mut long_rows: Option<(usize, Vec<f32>)> = None;
         if let Some(cfg) = scaling {
             match cfg.scaling_type.as_str() {
                 "linear" => {
@@ -83,8 +123,10 @@ impl<R: Runtime> RoPE<R> {
                     attention_scaling = apply_yarn_scaling(&mut freqs, head_dim, base, cfg)?;
                 }
                 "longrope" => {
-                    attention_scaling =
-                        apply_longrope_scaling(&mut freqs, head_dim, base, max_seq_len, cfg)?;
+                    let lr = longrope_freqs(head_dim, base, max_seq_len, cfg)?;
+                    attention_scaling = lr.attention_scaling;
+                    freqs = lr.short;
+                    long_rows = lr.long.map(|long| (lr.original, long));
                 }
                 "rope_freqs" => {
                     let factors =
@@ -133,20 +175,24 @@ impl<R: Runtime> RoPE<R> {
             }
         }
 
-        // Build caches
-        let mut cos_data = vec![0.0f32; max_seq_len * half_dim];
-        let mut sin_data = vec![0.0f32; max_seq_len * half_dim];
+        // Build caches. Columns past the rotary half stay identity.
+        let mut cos_data = vec![1.0f32; max_seq_len * cache_half];
+        let mut sin_data = vec![0.0f32; max_seq_len * cache_half];
 
         for pos in 0..max_seq_len {
-            for (i, &freq) in freqs.iter().enumerate() {
+            let row_freqs = match &long_rows {
+                Some((original, long)) if pos >= *original => long,
+                _ => &freqs,
+            };
+            for (i, &freq) in row_freqs.iter().enumerate() {
                 let angle = pos as f32 * freq;
-                cos_data[pos * half_dim + i] = angle.cos() * attention_scaling;
-                sin_data[pos * half_dim + i] = angle.sin() * attention_scaling;
+                cos_data[pos * cache_half + i] = angle.cos() * attention_scaling;
+                sin_data[pos * cache_half + i] = angle.sin() * attention_scaling;
             }
         }
 
-        let cos_cache = Tensor::<R>::from_slice(&cos_data, &[max_seq_len, half_dim], device)?;
-        let sin_cache = Tensor::<R>::from_slice(&sin_data, &[max_seq_len, half_dim], device)?;
+        let cos_cache = Tensor::<R>::from_slice(&cos_data, &[max_seq_len, cache_half], device)?;
+        let sin_cache = Tensor::<R>::from_slice(&sin_data, &[max_seq_len, cache_half], device)?;
 
         Ok(Self::new(cos_cache, sin_cache))
     }

@@ -1,3 +1,4 @@
+pub mod decision;
 pub mod decode_graph;
 pub mod gdn_state;
 pub mod generate;
@@ -10,6 +11,10 @@ pub mod scheduler;
 pub mod speculative;
 pub mod ssm_state;
 
+pub use decision::{
+    Answer, AnswerOptions, CalibrationSample, DecisionResult, QuestionKind, QuestionMeta,
+    TemperatureBounds, TemperatureFit, TemperaturePolicy,
+};
 #[cfg(feature = "cuda")]
 pub use decode_graph::{DecodeGraph, DeviceScalars, PagedDecodeGraph};
 pub use gdn_state::{GdnState, LayeredGdnState};

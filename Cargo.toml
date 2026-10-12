@@ -1,6 +1,6 @@
 [package]
 name = "boostr"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.95"
 description = "ML framework built on numr - attention, quantization, model architectures"
@@ -68,7 +68,7 @@ memmap2 = "0.9"
 blake3 = "1.8"
 # Whisper variant detection and the GGUF/encoder tokenizer plumbing. No
 # vocabulary data: the bundled Whisper vocabulary is loaded by voxr.
-splintr = "0.21"
+splintr = "0.22"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
@@ -76,7 +76,7 @@ bytemuck = { version = "1.25", features = ["derive"] }
 # Tests tokenize with cl100k_base. Declaring it here rather than on the main
 # dependency keeps the ~3 MB payload out of every downstream build: dev-dependency
 # features unify only when building boostr's own tests.
-splintr = { version = "0.21", features = ["vocab-cl100k"] }
+splintr = { version = "0.22", features = ["vocab-cl100k"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 rustls = "0.23"

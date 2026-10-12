@@ -170,13 +170,13 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-boostr = "0.4"
+boostr = "0.8"
 
 # With CUDA support (requires CUDA 12.8+ or 13.x)
-# boostr = { version = "0.4", features = ["cuda"] }
+# boostr = { version = "0.8", features = ["cuda"] }
 
 # With WebGPU support
-# boostr = { version = "0.4", features = ["wgpu"] }
+# boostr = { version = "0.8", features = ["wgpu"] }
 ```
 
 ### Build

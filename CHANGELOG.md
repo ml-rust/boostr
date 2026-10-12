@@ -9,6 +9,10 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.8.0] - 2026-10-12
+
 ### Added
 
 - **`BlockConfig`** — `UniversalConfig.block` describes a non-Llama block on the Llama path: LayerNorm, GELU and plain MLPs, parallel residuals, Gemma 2 sandwich norms, partial and interleaved RoPE, attention and final logit softcaps, `logit_scale`, `clip_qkv`, a scaled ALiBi bias and per-layer sliding windows. `HuggingFaceConfig::to_universal` fills it for Gemma, Gemma 2, StarCoder2, GPT-NeoX, Falcon, DBRX and Cohere.
@@ -21,6 +25,10 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`HuggingFaceConfig::to_universal`** returns `Result`. An unsupported activation, an Lp expert norm with p other than 1, or Cohere `use_qk_norm: true` is an error.
 - **`ModelClient`** requires `SpecialFunctions`. Exact-GELU gated MLPs need it.
+- **New public fields** — `UniversalConfig.block` and `MoeConfig.norm_topk_prob`. A struct literal must set them.
+- **`HuggingFaceConfig`** — `rope_theta` is `Option<f32>` and `tie_word_embeddings` is `Option<bool>`. It gains fields for the new architectures.
+- **`build_block_from_varbuilder`** takes the layer index.
+- **splintr** — requires `0.22`.
 
 ### Fixed
 

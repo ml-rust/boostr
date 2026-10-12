@@ -7,7 +7,7 @@
 //! image.
 
 use super::build::Qwen35Model;
-use super::forward::AttentionStep;
+use super::forward_layers::AttentionStep;
 use crate::error::{Error, Result};
 use crate::inference::{LayeredGdnState, LayeredKvCache};
 use crate::model::traits::ModelClient;

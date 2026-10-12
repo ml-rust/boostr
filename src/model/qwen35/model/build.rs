@@ -365,8 +365,26 @@ pub(crate) mod tests {
         }
     }
 
+    /// How a test model's `lm_head` is built.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Head {
+        /// Its own weight, rotated when the model is.
+        Own,
+        /// A dense head over the embedding table's storage.
+        Tied,
+    }
+
     fn parts(device: &CpuDevice, seed: u64, rotated: bool) -> Parts {
-        let config = tiny_config();
+        parts_from(device, seed, rotated, tiny_config(), Head::Own)
+    }
+
+    fn parts_from(
+        device: &CpuDevice,
+        seed: u64,
+        rotated: bool,
+        config: UniversalConfig,
+        head: Head,
+    ) -> Parts {
         let gdn_cfg = config.gdn.clone().unwrap();
         let attn_cfg = config.qwen35_attention.clone().unwrap();
         let mut b = Builder {
@@ -377,7 +395,8 @@ pub(crate) mod tests {
         };
         let table = b.rng.tensor(device, &[VOCAB, HIDDEN], 1.0);
         let embed = MaybeRotatedEmbedding::Plain(MaybeQuantEmbedding::Standard(Embedding::new(
-            table, false,
+            table.clone(),
+            false,
         )));
         let mut blocks = Vec::new();
         for i in 0..config.num_layers {
@@ -403,7 +422,12 @@ pub(crate) mod tests {
             }
         }
         let norm = b.norm();
-        let lm_head = b.linear(VOCAB, HIDDEN);
+        let lm_head = match head {
+            Head::Own => b.linear(VOCAB, HIDDEN),
+            Head::Tied => MaybeRotatedLinear::Plain(MaybeQuantLinear::Standard(Linear::new(
+                table, None, false,
+            ))),
+        };
         let rope = attn_cfg.rope_table::<CpuRuntime>(MAX_POS, device).unwrap();
         (config, embed, blocks, norm, lm_head, rope)
     }
@@ -419,6 +443,24 @@ pub(crate) mod tests {
 
     pub(crate) fn rotated_model(device: &CpuDevice, seed: u64) -> Qwen35Model<CpuRuntime> {
         let (config, embed, blocks, norm, lm_head, rope) = parts(device, seed, true);
+        Qwen35Model::new(config, embed, blocks, norm, lm_head, rope).unwrap()
+    }
+
+    /// [`tiny_config`] with GDN `chunk_size`, so short prompts cross chunk
+    /// boundaries, and the `lm_head` that `head` and `rotated` pick.
+    pub(crate) fn chunked_model(
+        device: &CpuDevice,
+        seed: u64,
+        chunk_size: usize,
+        rotated: bool,
+        head: Head,
+    ) -> Qwen35Model<CpuRuntime> {
+        let mut config = tiny_config();
+        if let Some(gdn) = config.gdn.as_mut() {
+            gdn.chunk_size = chunk_size;
+        }
+        let (config, embed, blocks, norm, lm_head, rope) =
+            parts_from(device, seed, rotated, config, head);
         Qwen35Model::new(config, embed, blocks, norm, lm_head, rope).unwrap()
     }
 

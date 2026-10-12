@@ -18,7 +18,7 @@
 #[cfg(feature = "cuda")]
 use super::build::{Qwen35Block, Qwen35Model};
 #[cfg(feature = "cuda")]
-use super::forward::ffn_residual;
+use super::forward_layers::ffn_residual;
 #[cfg(feature = "cuda")]
 use crate::error::{Error, Result};
 #[cfg(feature = "cuda")]

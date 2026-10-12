@@ -12,6 +12,9 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **`format::peft`** — reads a PEFT LoRA adapter. `PeftAdapter::load` takes `adapter_config.json` and `adapter_model.safetensors` and returns per-module `lora_A`/`lora_B` pairs with their scaling. Scaling follows `use_rslora`, `rank_pattern` and `alpha_pattern`. Keys under `model.layers.N` and `model.language_model.layers.N` normalize to `model.layers.N`. The load refuses DoRA, `fan_in_fan_out`, `lora_bias`, `modules_to_save`, `.bin` weights, unpaired factors and rank mismatches.
+- **`Qwen35Model::forward_qwen35_gather`** — runs the token forward over the caches you pass and returns the normed hidden rows at chosen flat positions `b * seq + t`, with no `lm_head`. A right-padded batch gives each sequence the rows it gets alone, up to its last real token. A bad gather index is an error that names the index, and it returns before any cache is written.
+- **`Qwen35Model::candidate_logits`** — F32 logits of `K` candidate tokens per hidden row. It reads only those `lm_head` rows and works for dense, tied, Hadamard-rotated and block-quantized heads. A LoRA-adapted head is an error.
+- **`MaybeRotatedLinear::row_logits_f32`** — the projection's outputs at chosen weight rows per input row, in F32. A block-quantized weight dequantizes only those rows. An AWQ/GPTQ weight has no row gather, so it computes the full output for the given input rows and picks the chosen columns.
 
 ---
 

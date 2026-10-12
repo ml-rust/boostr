@@ -7,7 +7,7 @@
 //! the tokens it would produce alone, whatever else is in flight.
 
 use super::build::Qwen35Model;
-use super::forward::AttentionStep;
+use super::forward_layers::AttentionStep;
 use crate::error::{Error, Result};
 use crate::inference::{LaneKvStep, LayeredGdnState, LayeredKvCache};
 use crate::model::traits::ModelClient;

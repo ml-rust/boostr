@@ -2,6 +2,7 @@
 
 use super::attention::AttentionConfig;
 use super::audio::AudioConfig;
+use super::block::BlockConfig;
 use super::gdn::GdnConfig;
 use super::hybrid::HybridConfig;
 use super::moe::MoeConfig;
@@ -90,6 +91,12 @@ pub struct UniversalConfig {
     #[serde(default)]
     pub hadamard: Option<HadamardContract>,
 
+    /// Block details of non-Llama architectures on the Llama path: norm
+    /// kind, MLP activation, residual layout, partial RoPE, softcaps.
+    /// The default is the Llama block.
+    #[serde(default)]
+    pub block: BlockConfig,
+
     /// Distinct quantized weight formats the checkpoint's tensors use.
     ///
     /// `LoadedModel::load` fills this from the loading `VarBuilder`'s GGUF
@@ -129,6 +136,8 @@ impl UniversalConfig {
         }
         if let Some(attn) = &self.attention {
             attn.validate(self.hidden_size)?;
+            self.block
+                .validate(attn.head_dim(self.hidden_size), self.num_layers)?;
         }
         if let Some(ssm) = &self.ssm {
             ssm.validate(self.hidden_size)?;

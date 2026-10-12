@@ -157,6 +157,7 @@ pub fn qwen35_config_from_gguf(meta: &GgufMetadata) -> Result<UniversalConfig> {
         gdn: Some(gdn),
         qwen35_attention: Some(attention),
         hadamard,
+        block: Default::default(),
         quant_formats: Vec::new(),
     };
     config.validate()?;

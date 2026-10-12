@@ -29,7 +29,7 @@ pub fn load_config_auto<P: AsRef<Path>>(path: P) -> Result<UniversalConfig> {
 
     // Try HuggingFace format
     if let Ok(hf_config) = HuggingFaceConfig::from_json(&content) {
-        let config = hf_config.to_universal();
+        let config = hf_config.to_universal()?;
         config.validate()?;
         return Ok(config);
     }
@@ -42,7 +42,7 @@ pub fn load_config_auto<P: AsRef<Path>>(path: P) -> Result<UniversalConfig> {
 /// Load HuggingFace config.json and convert to UniversalConfig
 pub fn load_huggingface_config<P: AsRef<Path>>(path: P) -> Result<UniversalConfig> {
     let hf_config = HuggingFaceConfig::load(path)?;
-    let config = hf_config.to_universal();
+    let config = hf_config.to_universal()?;
     config.validate()?;
     Ok(config)
 }

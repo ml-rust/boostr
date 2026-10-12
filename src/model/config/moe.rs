@@ -27,6 +27,12 @@ pub struct MoeConfig {
     /// Router z-loss coefficient
     #[serde(default = "default_z_loss_alpha")]
     pub z_loss_alpha: f64,
+
+    /// Renormalize the top-k routing weights to sum to one. `None` is true
+    /// (Mixtral, DBRX). Qwen2-MoE sets `norm_topk_prob: false`, which keeps
+    /// the full-softmax probabilities of the chosen experts.
+    #[serde(default)]
+    pub norm_topk_prob: Option<bool>,
 }
 
 /// Auxiliary load-balancing loss coefficient used when a config omits it.
@@ -69,5 +75,11 @@ impl MoeConfig {
 
     pub fn has_shared_expert(&self) -> bool {
         self.shared_expert.unwrap_or(false)
+    }
+
+    /// Whether the top-k routing weights are renormalized. See
+    /// [`norm_topk_prob`](Self::norm_topk_prob).
+    pub fn renormalizes_top_k(&self) -> bool {
+        self.norm_topk_prob.unwrap_or(true)
     }
 }

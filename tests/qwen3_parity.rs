@@ -105,7 +105,7 @@ fn model_dir() -> Option<PathBuf> {
 fn load(dir: &PathBuf, device: &CpuDevice) -> (Llama<CpuRuntime>, usize) {
     let cfg_text = std::fs::read_to_string(dir.join("config.json")).expect("config.json");
     let hf = HuggingFaceConfig::from_json(&cfg_text).expect("parse config.json");
-    let config = hf.to_universal();
+    let config = hf.to_universal().expect("convert config.json");
 
     // Cast every weight to F32. The checkpoint is BF16; the HF reference was
     // produced in F32. Comparing against a BF16 forward would conflate
@@ -148,7 +148,7 @@ fn qwen3_config_parses_correctly() {
     };
     let cfg_text = std::fs::read_to_string(model_path.join("config.json")).expect("config.json");
     let hf = HuggingFaceConfig::from_json(&cfg_text).expect("parse config.json");
-    let c = hf.to_universal();
+    let c = hf.to_universal().expect("convert config.json");
     let attn = c.attention.as_ref().expect("attention config");
 
     eprintln!("hidden_size        {}", c.hidden_size);

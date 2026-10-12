@@ -327,6 +327,7 @@ fn llama_config_from_gguf(metadata: &GgufMetadata) -> Result<UniversalConfig, St
         gdn: None,
         qwen35_attention: None,
         hadamard: None,
+        block: Default::default(),
         quant_formats: Vec::new(),
     })
 }

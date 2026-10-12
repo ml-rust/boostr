@@ -70,6 +70,7 @@ pub fn tiny_config() -> ModelConfig {
         gdn: None,
         qwen35_attention: None,
         hadamard: None,
+        block: Default::default(),
         quant_formats: Vec::new(),
     }
 }

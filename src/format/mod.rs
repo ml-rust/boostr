@@ -1,6 +1,7 @@
 pub mod device_map;
 pub mod gguf;
 pub mod gguf_vocab;
+pub mod hf_qwen35;
 pub mod hf_restructure;
 pub mod safetensors;
 pub mod safetensors_loader;

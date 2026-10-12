@@ -10,8 +10,10 @@
 //!   each, with per-lane positions and per-lane key ranges
 //! - `forward_graph`: the CUDA graph-mode decode forward
 //! - `gguf` + `gguf_layers`: [`Qwen35Model::from_varbuilder`] over a
-//!   GGUF-filled `VarMap`
+//!   `VarMap` filled from a GGUF or a restructured Hugging Face checkpoint
+//! - `attach`: the Hadamard rotation attach the loader applies
 
+mod attach;
 mod build;
 mod forward;
 mod forward_batched;
@@ -23,4 +25,4 @@ mod gguf_layers;
 pub use build::{Qwen35AttentionLayer, Qwen35Block, Qwen35GdnLayer, Qwen35Model};
 
 #[cfg(test)]
-pub(crate) use build::tests::tiny_model;
+pub(crate) use build::tests::{tiny_config, tiny_model};

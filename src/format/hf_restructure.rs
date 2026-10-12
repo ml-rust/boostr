@@ -30,7 +30,7 @@ use crate::format::safetensors_name_map::normalize_hf_name;
 use crate::model::config::{BlockConfig, UniversalConfig};
 use crate::nn::{VarMap, Weight};
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, IndexingOps, ShapeOps};
+use numr::ops::{BinaryOps, IndexingOps, ShapeOps, UnaryOps};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 use std::collections::BTreeMap;
@@ -440,7 +440,7 @@ pub fn restructure_hf_checkpoint<R: Runtime<DType = DType>>(
     _device: &R::Device,
 ) -> Result<()>
 where
-    R::Client: ShapeOps<R> + BinaryOps<R> + IndexingOps<R>,
+    R::Client: ShapeOps<R> + BinaryOps<R> + IndexingOps<R> + UnaryOps<R>,
 {
     if map.is_hf_restructured() {
         return Err(Error::ModelError {
@@ -450,6 +450,9 @@ where
         });
     }
     let model_type = config.model_type.as_str();
+    if model_type == "qwen35" {
+        return crate::format::hf_qwen35::restructure(map, config);
+    }
     let names: Vec<String> = map.names().map(str::to_string).collect();
     for name in names {
         let mapped = normalize_hf_name(model_type, &name);

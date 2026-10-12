@@ -1,131 +1,78 @@
-//! [`Qwen35Model::from_varbuilder`]: build the model from a `VarMap` that
-//! [`VarMap::from_gguf`](crate::nn::VarMap::from_gguf) filled from a
-//! `qwen35` GGUF.
+//! [`Qwen35Model::from_varbuilder`]: build the model from a `VarMap` in the
+//! `qwen35` loader layout.
 //!
-//! Names are the HF-style ones `gguf_to_hf_name_for_arch(Some("qwen35"), _)`
-//! produces. The Hadamard contract is keyed on the ORIGINAL GGUF names
-//! (`blk.N.attn_q.weight`), so [`Attach`] rebuilds those from the layer
-//! index and suffix before asking `HadamardContract::rotates`.
+//! Two sources fill that layout:
+//!
+//! - [`VarMap::from_gguf`](crate::nn::VarMap::from_gguf) over a `qwen35`
+//!   GGUF. Names are the HF-style ones
+//!   `gguf_to_hf_name_for_arch(Some("qwen35"), _)` produces.
+//! - A Hugging Face Qwen3.5 SafeTensors checkpoint after
+//!   [`restructure_hf_checkpoint`](crate::format::restructure_hf_checkpoint).
 //!
 //! # Activation dtype
 //!
-//! Every rotation is built in `F32`. `VarMap::from_gguf` decodes each dense
-//! tensor to `F32` through `Gguf::load_tensor_f32`, and the quantized matmul
-//! path returns `F32`, so `F32` is the dtype every activation carries on
-//! this loader path.
+//! Every Hadamard rotation is built in `F32`. `VarMap::from_gguf` decodes
+//! each dense tensor to `F32` through `Gguf::load_tensor_f32`, and the
+//! quantized matmul path returns `F32`, so `F32` is the dtype every
+//! activation carries on the GGUF path. A SafeTensors map carries the dtype
+//! its loader gave the tensors.
 //!
-//! Per-layer builders live in `gguf_layers`.
+//! The Hadamard attach lives in `attach`, per-layer builders in
+//! `gguf_layers`.
 
+use super::attach::Attach;
 use super::build::{Qwen35Block, Qwen35Model};
 use super::gguf_layers::{attention_layer, gdn_layer, rms_norm};
 use crate::error::{Error, Result};
-use crate::format::gguf::HadamardContract;
 use crate::model::config::UniversalConfig;
-use crate::nn::{
-    HadamardRotation, MaybeQuantEmbedding, MaybeQuantLinear, MaybeRotatedEmbedding,
-    MaybeRotatedLinear, RotatedEmbedding, RotatedLinear, VarBuilder,
-};
+use crate::nn::{MaybeQuantEmbedding, MaybeQuantLinear, VarBuilder, Weight};
 use numr::dtype::DType;
 use numr::ops::ShapeOps;
 use numr::runtime::Runtime;
-use std::cell::RefCell;
-use std::collections::HashMap;
 
-/// Wraps a built module in its Hadamard rotation when the contract names
-/// its GGUF tensor.
-///
-/// `by_width` caches one `HadamardRotation` per sign width so the handful
-/// of distinct widths (one per tensor shape, not one per layer) are each
-/// uploaded to `device` once and cheaply cloned for every tensor that
-/// shares the width — `Tensor::clone` shares storage rather than copying
-/// device memory.
-pub(super) struct Attach<'a, R: Runtime> {
-    hadamard: Option<&'a HadamardContract>,
-    device: &'a R::Device,
-    by_width: RefCell<HashMap<usize, HadamardRotation<R>>>,
-}
+/// The checkpoint key of the token embedding, which a tied head reads.
+const EMBED_NAME: &str = "model.embed_tokens.weight";
 
-impl<'a, R: Runtime<DType = DType>> Attach<'a, R> {
-    pub(super) fn new(hadamard: Option<&'a HadamardContract>, device: &'a R::Device) -> Self {
-        Self {
-            hadamard,
-            device,
-            by_width: RefCell::new(HashMap::new()),
-        }
-    }
-
-    /// The rotation for an input of `width` features. Only valid to call
-    /// when `self.hadamard` is `Some`; the caller checks `rotates` /
-    /// `inverts` first, which fail closed on `None`. Cached per `width` in
-    /// `self.by_width`.
-    fn rotation(&self, hadamard: &HadamardContract, width: usize) -> Result<HadamardRotation<R>> {
-        if let Some(cached) = self.by_width.borrow().get(&width) {
-            return Ok(cached.clone());
-        }
-        let signs = hadamard.signs_for_width(width)?;
-        let built = HadamardRotation::new(hadamard.block_size, signs, DType::F32, self.device)?;
-        self.by_width.borrow_mut().insert(width, built.clone());
-        Ok(built)
-    }
-
-    /// `Rotated` when `hadamard.rotates(gguf_name)`, else `Plain`. The sign
-    /// width is `inner.shape()[1]`, the linear's `in_features`.
-    pub(super) fn linear(
-        &self,
-        gguf_name: &str,
-        inner: MaybeQuantLinear<R>,
-    ) -> Result<MaybeRotatedLinear<R>> {
-        let Some(hadamard) = self.hadamard.filter(|h| h.rotates(gguf_name)) else {
-            return Ok(MaybeRotatedLinear::Plain(inner));
-        };
-        let shape = inner.shape();
-        if shape.len() != 2 {
-            return Err(Error::ModelError {
-                reason: format!("qwen35: '{gguf_name}' must be 2-D to rotate, got {shape:?}"),
-            });
-        }
-        let rotation = self.rotation(hadamard, shape[1])?;
-        Ok(MaybeRotatedLinear::Rotated(Box::new(RotatedLinear::new(
-            inner, rotation,
-        )?)))
-    }
-
-    /// `Rotated` when `hadamard.inverts(gguf_name)`, else `Plain`. The sign
-    /// width is the embedding dim.
-    fn embedding(
-        &self,
-        gguf_name: &str,
-        inner: MaybeQuantEmbedding<R>,
-        embed_dim: usize,
-    ) -> Result<MaybeRotatedEmbedding<R>> {
-        let Some(hadamard) = self.hadamard.filter(|h| h.inverts(gguf_name)) else {
-            return Ok(MaybeRotatedEmbedding::Plain(inner));
-        };
-        let rotation = self.rotation(hadamard, embed_dim)?;
-        Ok(MaybeRotatedEmbedding::Rotated(RotatedEmbedding::new(
-            inner, rotation,
-        )?))
+/// A second handle on `weight`'s storage. `Tensor::clone` and
+/// `QuantTensor::clone` share it; nothing is copied.
+fn share_weight<R: Runtime>(weight: &Weight<R>) -> Result<Weight<R>> {
+    match weight {
+        Weight::Standard(t) => Ok(Weight::Standard(t.clone())),
+        Weight::Quantized(q) => Ok(Weight::Quantized(q.clone())),
+        Weight::DecomposedQuant(_) => Err(Error::ModelError {
+            reason: format!(
+                "qwen35: {EMBED_NAME} is AWQ/GPTQ-decomposed; a tied head needs it dense \
+                 or block-quantized"
+            ),
+        }),
     }
 }
 
-/// `blk.{i}.{suffix}`: the GGUF name a layer tensor was stored under.
-pub(super) fn gguf_layer_name(layer: usize, suffix: &str) -> String {
-    format!("blk.{layer}.{suffix}")
+/// The tied `lm_head` over the embedding's storage, bound to the
+/// embedding's checkpoint key for an importance collection.
+fn tied_lm_head<R: Runtime>(weight: Weight<R>) -> MaybeQuantLinear<R> {
+    let head = MaybeQuantLinear::from_weight(weight, None);
+    if let MaybeQuantLinear::Standard(linear) = &head {
+        crate::quant::imatrix::register_name(linear.weight().id(), EMBED_NAME);
+    }
+    head
 }
 
 impl<R: Runtime<DType = DType>> Qwen35Model<R> {
-    /// Build from a `VarBuilder` over a GGUF-filled `VarMap`.
+    /// Build from a `VarBuilder` over a `VarMap` in the loader layout.
     ///
     /// Reads `hadamard` from `config`; `None` builds every projection
-    /// `Plain`. Tied embeddings are not supported on this path: a config
-    /// with `tie_word_embeddings` errors unless `lm_head.weight` is present.
+    /// `Plain`. With `tie_word_embeddings` set and no `lm_head.weight`, the
+    /// head shares the embedding's storage. Without the flag,
+    /// `lm_head.weight` must be present.
     ///
     /// # Errors
     ///
     /// [`Error::ModelError`] when `config` fails validation, lacks `gdn`,
     /// `qwen35_attention` or `hybrid_layers`, a tensor is missing or has
     /// the wrong shape, or a rotation's sign vector is missing for a
-    /// width. `Qwen35Model::new` errors propagate.
+    /// width. A tied head with a Hadamard contract is an error.
+    /// `Qwen35Model::new` errors propagate.
     pub fn from_varbuilder(vb: &mut VarBuilder<R>, config: &UniversalConfig) -> Result<Self>
     where
         R::Client: ShapeOps<R>,
@@ -156,9 +103,24 @@ impl<R: Runtime<DType = DType>> Qwen35Model<R> {
 
         let rope = attention_config.rope_table::<R>(config.max_seq_len, &device)?;
 
+        let tied = config.tie_word_embeddings && !vb.contains("lm_head.weight");
+        if tied && config.hadamard.is_some() {
+            return Err(Error::ModelError {
+                reason: "qwen35: tie_word_embeddings is set, lm_head.weight is absent, and a \
+                         Hadamard contract is present; a tied head under a Hadamard contract \
+                         is not supported"
+                    .into(),
+            });
+        }
+
         let mut model_vb = vb.pp("model");
 
         let embed_weight = model_vb.take_weight("embed_tokens.weight")?;
+        let tied_head = if tied {
+            Some(share_weight(&embed_weight)?)
+        } else {
+            None
+        };
         let embed_inner = MaybeQuantEmbedding::from_weight(embed_weight, false)?;
         let embed_tokens = attach.embedding("token_embd.weight", embed_inner, hidden_size)?;
 
@@ -188,14 +150,10 @@ impl<R: Runtime<DType = DType>> Qwen35Model<R> {
 
         let norm = rms_norm(&mut model_vb, "norm.weight", eps)?;
 
-        if config.tie_word_embeddings && !vb.contains("lm_head.weight") {
-            return Err(Error::ModelError {
-                reason: "qwen35: tie_word_embeddings is set and output.weight is absent; \
-                         tied embeddings are not supported on the GGUF loader path"
-                    .into(),
-            });
-        }
-        let lm_head_inner = vb.take_maybe_quant_linear("lm_head.weight", None)?;
+        let lm_head_inner = match tied_head {
+            Some(weight) => tied_lm_head(weight),
+            None => vb.take_maybe_quant_linear("lm_head.weight", None)?,
+        };
         let lm_head = attach.linear("output.weight", lm_head_inner)?;
 
         Self::new(config.clone(), embed_tokens, blocks, norm, lm_head, rope)
@@ -206,8 +164,9 @@ impl<R: Runtime<DType = DType>> Qwen35Model<R> {
 mod tests {
     use super::super::build::tests::{HIDDEN, VOCAB, tiny_config};
     use super::*;
+    use crate::format::gguf::HadamardContract;
     use crate::model::config::{GdnConfig, Qwen35AttentionConfig};
-    use crate::nn::VarMap;
+    use crate::nn::{MaybeRotatedLinear, VarMap};
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::{CpuDevice, CpuRuntime};
     use numr::tensor::Tensor;
@@ -425,18 +384,64 @@ mod tests {
     }
 
     #[test]
-    fn tied_head_without_output_weight_is_an_error() {
+    fn tied_head_shares_the_embedding_storage() {
         let (_client, device) = cpu_setup();
         let mut config = tiny_config();
         config.tie_word_embeddings = true;
         let mut map = VarMap::<CpuRuntime>::new();
         fill(&mut map, &device, &config);
         map.remove("lm_head.weight");
+        let embed = map.get_tensor("model.embed_tokens.weight").unwrap().clone();
+        let mut vb = VarBuilder::new(&mut map, &device);
+        let model = Qwen35Model::<CpuRuntime>::from_varbuilder(&mut vb, &config).unwrap();
+        assert_eq!(map.len(), 0, "loader left tensors behind");
+        let MaybeRotatedLinear::Plain(MaybeQuantLinear::Standard(head)) = &model.lm_head else {
+            panic!("a tied head over a dense embedding is a plain dense linear");
+        };
+        let head = head.weight().tensor();
+        assert_eq!(head.shape(), &[VOCAB, HIDDEN]);
+        assert!(head.shares_storage_with(&embed));
+        assert_eq!(head.to_vec::<f32>(), embed.to_vec::<f32>());
+    }
+
+    /// The flag alone ties nothing when the file carries its own head.
+    #[test]
+    fn tied_flag_with_lm_head_present_loads_the_head() {
+        let (_client, device) = cpu_setup();
+        let mut config = tiny_config();
+        config.tie_word_embeddings = true;
+        let mut map = VarMap::<CpuRuntime>::new();
+        fill(&mut map, &device, &config);
+        let mut vb = VarBuilder::new(&mut map, &device);
+        Qwen35Model::<CpuRuntime>::from_varbuilder(&mut vb, &config).unwrap();
+        assert_eq!(map.len(), 0, "lm_head.weight must be consumed");
+    }
+
+    #[test]
+    fn tied_head_with_hadamard_contract_is_an_error() {
+        let (_client, device) = cpu_setup();
+        let mut config = tiny_config();
+        config.tie_word_embeddings = true;
+        config.hadamard = Some(hadamard_contract());
+        let mut map = VarMap::<CpuRuntime>::new();
+        fill(&mut map, &device, &config);
+        map.remove("lm_head.weight");
         let mut vb = VarBuilder::new(&mut map, &device);
         let err = match Qwen35Model::<CpuRuntime>::from_varbuilder(&mut vb, &config) {
-            Ok(_) => panic!("tied head without lm_head.weight must fail"),
+            Ok(_) => panic!("a tied head under a Hadamard contract must fail"),
             Err(e) => e.to_string(),
         };
-        assert!(err.contains("tie_word_embeddings"), "{err}");
+        assert!(err.contains("Hadamard"), "{err}");
+    }
+
+    #[test]
+    fn untied_config_without_lm_head_is_an_error() {
+        let (_client, device) = cpu_setup();
+        let config = tiny_config();
+        let mut map = VarMap::<CpuRuntime>::new();
+        fill(&mut map, &device, &config);
+        map.remove("lm_head.weight");
+        let mut vb = VarBuilder::new(&mut map, &device);
+        assert!(Qwen35Model::<CpuRuntime>::from_varbuilder(&mut vb, &config).is_err());
     }
 }

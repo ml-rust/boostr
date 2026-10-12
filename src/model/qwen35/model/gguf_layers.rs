@@ -8,8 +8,8 @@
 //! qkv_dim]`, reversed by the reader). `GdnBlock::new` reshapes it to the
 //! `[qkv_dim, 1, conv_kernel]` layout `causal_conv1d` takes.
 
+use super::attach::{Attach, gguf_layer_name};
 use super::build::{Qwen35AttentionLayer, Qwen35GdnLayer};
-use super::gguf::{Attach, gguf_layer_name};
 use crate::error::Result;
 use crate::model::config::{GdnConfig, Qwen35AttentionConfig};
 use crate::model::hybrid::{GdnBlock, GdnWeights, Qwen35AttentionBlock, Qwen35AttentionWeights};

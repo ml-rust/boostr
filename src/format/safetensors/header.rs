@@ -289,6 +289,8 @@ pub(super) fn parse_dtype(s: &str) -> Result<DType> {
         "I64" | "i64" | "int64" => Ok(DType::I64),
         "U32" | "u32" | "uint32" => Ok(DType::U32),
         "I8" | "i8" | "int8" => Ok(DType::I8),
+        // GPT-NeoX checkpoints store their causal-mask buffer as U8.
+        "U8" | "u8" | "uint8" => Ok(DType::U8),
         "BOOL" | "bool" => Ok(DType::Bool),
         _ => Err(Error::ModelError {
             reason: format!("unsupported SafeTensors dtype: {s}"),

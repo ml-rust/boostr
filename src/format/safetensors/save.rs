@@ -35,8 +35,8 @@ fn tensor_to_le_bytes(tensor: &Tensor<CpuRuntime>) -> Result<Vec<u8>> {
         DType::I32 => encode_le(tensor.to_vec::<i32>(), i32::to_le_bytes),
         DType::I8 => encode_le(tensor.to_vec::<i8>(), i8::to_le_bytes),
         DType::U32 => encode_le(tensor.to_vec::<u32>(), u32::to_le_bytes),
-        // Bool is stored one byte per element, same as u8.
-        DType::Bool => encode_le(tensor.to_vec::<u8>(), u8::to_le_bytes),
+        // U8 and Bool are stored one byte per element.
+        DType::U8 | DType::Bool => encode_le(tensor.to_vec::<u8>(), u8::to_le_bytes),
         other => {
             return Err(Error::ModelError {
                 reason: format!("unsupported SafeTensors save dtype: {other:?}"),
@@ -60,6 +60,7 @@ fn dtype_name(dtype: DType) -> Result<&'static str> {
         DType::I64 => Ok("I64"),
         DType::U32 => Ok("U32"),
         DType::I8 => Ok("I8"),
+        DType::U8 => Ok("U8"),
         DType::Bool => Ok("BOOL"),
         other => Err(Error::ModelError {
             reason: format!("unsupported SafeTensors save dtype: {other:?}"),
@@ -196,7 +197,7 @@ mod tests {
     // ===== Save path: per-dtype writing =====
 
     /// Every dtype `parse_dtype` reads, `save_safetensors` must write.
-    const SAVE_DTYPES: [DType; 9] = [
+    const SAVE_DTYPES: [DType; 10] = [
         DType::F32,
         DType::F16,
         DType::BF16,
@@ -205,6 +206,7 @@ mod tests {
         DType::I64,
         DType::U32,
         DType::I8,
+        DType::U8,
         DType::Bool,
     ];
 
@@ -222,6 +224,7 @@ mod tests {
                 DType::I64 => out.extend_from_slice(&(v as i64).to_le_bytes()),
                 DType::I32 => out.extend_from_slice(&(v as i32).to_le_bytes()),
                 DType::I8 => out.extend_from_slice(&(v as i8).to_le_bytes()),
+                DType::U8 => out.push(v as u8),
                 DType::U32 => out.extend_from_slice(&(v as u32).to_le_bytes()),
                 DType::Bool => out.push((i % 2) as u8),
                 other => panic!("unsupported test dtype: {other:?}"),

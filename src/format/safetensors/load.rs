@@ -84,7 +84,7 @@ impl SafeTensors {
                     .collect();
                 Tensor::<R>::from_slice(&data, &info.shape, device).map_err(Error::Numr)
             }
-            DType::I8 | DType::Bool => {
+            DType::I8 | DType::U8 | DType::Bool => {
                 // Single-byte types have no endianness to decode; load the
                 // raw bytes directly, same as the float arm above.
                 let storage = numr::tensor::Storage::<R>::from_bytes(&bytes, info.dtype, device)
@@ -93,7 +93,7 @@ impl SafeTensors {
             }
             // Reached only if `parse_dtype` is ever extended to accept a
             // SafeTensors dtype string this arm doesn't yet decode (e.g.
-            // I16/U16/U64/U8, which numr's DType supports but this loader
+            // I16/U16/U64, which numr's DType supports but this loader
             // does not yet handle) or DType gains a variant `parse_dtype`
             // can never produce (Complex64/128, FP8). Names the dtype so
             // the caller sees what to add rather than silently coercing it.
@@ -298,6 +298,18 @@ mod tests {
         let tensor = st.load_tensor::<CpuRuntime>("w", &device).unwrap();
         assert_eq!(tensor.dtype(), DType::I8);
         assert_eq!(tensor.to_vec::<i8>(), values);
+    }
+
+    /// GPT-NeoX stores its causal-mask buffer as U8.
+    #[test]
+    fn test_load_tensor_u8_roundtrip() {
+        let (_, device) = cpu_setup();
+        let bytes: Vec<u8> = vec![0, 1, 200, 255];
+        let f = write_int_tensor_file("U8", &bytes, &[4]);
+        let mut st = SafeTensors::open(f.path()).unwrap();
+        let tensor = st.load_tensor::<CpuRuntime>("w", &device).unwrap();
+        assert_eq!(tensor.dtype(), DType::U8);
+        assert_eq!(tensor.to_vec::<u8>(), bytes);
     }
 
     #[test]

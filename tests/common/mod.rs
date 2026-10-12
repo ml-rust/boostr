@@ -3,6 +3,7 @@
 // there. The helpers ARE used — just not all of them by every crate.
 #![allow(dead_code)]
 
+pub mod decision_fixture;
 pub mod kv_start;
 #[cfg(feature = "cuda")]
 pub mod llama_graph;

@@ -47,6 +47,10 @@ pub trait DecisionBackbone<R: Runtime<DType = DType>> {
     /// The number of positions, prefix included, the model can address.
     fn max_positions(&self) -> usize;
 
+    /// The number of token ids the model scores: `candidate_logits` takes
+    /// ids in `[0, vocab_size)`.
+    fn vocab_size(&self) -> usize;
+
     /// Run `tokens` as one batch-1 sequence from position 0 and keep the
     /// normed hidden rows at `rows` (each `< tokens.len()`, any order,
     /// repeats allowed). An empty `tokens` gives an empty state.

@@ -73,6 +73,12 @@ where
         self.rope_table_len()
     }
 
+    /// The config's `vocab_size`, the row count of `lm_head` and of the
+    /// embedding, as the build checks.
+    fn vocab_size(&self) -> usize {
+        self.config().vocab_size
+    }
+
     /// Text-only: the suffix's rope positions start at the prefix length.
     ///
     /// # Errors

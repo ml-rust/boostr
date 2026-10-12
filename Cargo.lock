@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "boostr"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2219,9 +2219,9 @@ dependencies = [
 
 [[package]]
 name = "splintr"
-version = "0.21.1"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "024f6f87fc962c647f5ec494afa4a9c854f0e0b9c94121c7496f61f649c42c08"
+checksum = "21a0cca20510b5fad3a3fdd55557839da2b839b2ac38e776726379f7c2ad54ea"
 dependencies = [
  "aho-corasick",
  "base64",

@@ -13,7 +13,9 @@ pub(super) mod builders;
 pub(super) mod helpers;
 pub(crate) mod mlp;
 pub(super) mod moe;
+pub(crate) mod norm;
 
 pub(super) use block::LlamaBlock;
 pub(super) use builders::{build_block_from_config, build_block_from_varbuilder};
 pub use moe::{ExpertWeights, LlamaFfn, LlamaMoeMlp};
+pub(crate) use norm::BlockNorm;

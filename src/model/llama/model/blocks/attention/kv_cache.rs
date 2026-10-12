@@ -5,8 +5,8 @@ use super::LlamaAttention;
 use crate::error::{Error, Result};
 use crate::inference::KvCache;
 use crate::model::traits::ModelClient;
-use crate::nn::{MaybeQuantLinear, RoPE};
-use crate::ops::impl_generic::attention::multi_head_attention_impl;
+use crate::nn::RoPE;
+use crate::ops::impl_generic::attention::softcapped_attention_impl;
 use crate::ops::traits::{AttnOutLayout, KvSeqLen};
 use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_narrow, var_reshape};
@@ -45,12 +45,7 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         let batch = shape[0];
         let seq_len = shape[1];
 
-        // Q/K/V projections (batched: quantize activation once for all 3)
-        let qkv = MaybeQuantLinear::forward_batch(
-            &[&self.q_proj, &self.k_proj, &self.v_proj],
-            client,
-            x,
-        )?;
+        let qkv = self.project_qkv(client, x)?;
         let (q, k, v) = (&qkv[0], &qkv[1], &qkv[2]);
 
         // Reshape to [B, S, H, D] then permute to [B, H, S, D]
@@ -84,8 +79,9 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         kv_cache.update_fused(k.tensor(), v.tensor(), client)?;
 
         let kv_seq_len = kv_cache.seq_len();
-        let attn_out = if self.use_alibi {
-            // ALiBi: use generic attention with bias (no flash attention)
+        let attn_out = if self.use_alibi || self.softcap.is_some() {
+            // ALiBi bias or score softcap: the materialized-score path. The
+            // flash kernel takes neither.
             let k_full = Var::new(
                 kv_cache
                     .k_cache_raw()
@@ -111,23 +107,41 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             } else {
                 (k_full, v_full)
             };
-            // Build ALiBi + causal mask (single backend-specific kernel call)
             let sq = seq_len;
             let sk = kv_seq_len;
-            let mask = Tensor::<R>::zeros(
-                &[batch, self.num_heads, sq, sk],
-                DType::F32,
-                q.tensor().device(),
-            )?;
-            client.alibi_add_bias_causal(&mask, batch, self.num_heads, sq, sk, position)?;
+            let mask = if self.use_alibi {
+                // ALiBi + causal mask (single backend-specific kernel call),
+                // scaled as the architecture asks. `-inf` stays `-inf`.
+                let mask = Tensor::<R>::zeros(
+                    &[batch, self.num_heads, sq, sk],
+                    DType::F32,
+                    q.tensor().device(),
+                )?;
+                client.alibi_add_bias_causal(&mask, batch, self.num_heads, sq, sk, position)?;
+                if self.alibi_scale == 1.0 {
+                    mask
+                } else {
+                    client.mul_scalar(&mask, f64::from(self.alibi_scale))?
+                }
+            } else {
+                crate::model::attention_mask::causal_window_mask::<R, C>(
+                    client,
+                    sq,
+                    sk,
+                    self.sliding_window,
+                    q.tensor().dtype(),
+                    q.tensor().device(),
+                )?
+            };
             let mask_var = Var::new(mask, false);
-            let attn_out = multi_head_attention_impl(
+            let attn_out = softcapped_attention_impl(
                 client,
                 &q,
                 &k_full,
                 &v_full,
                 Some(&mask_var),
-                self.num_heads,
+                (self.head_dim as f64).sqrt().recip(),
+                self.softcap.map(f64::from),
             )?;
             // [B, H, S, D] -> [B, S, H, D]
             let attn_out =

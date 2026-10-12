@@ -58,6 +58,12 @@ where
         )?;
         // `alibi_add_bias_causal` writes F32 slopes, so the bias is built in
         // F32 and cast once here, exactly as `causal_window_mask` does.
+        // Scaling keeps the `-inf` future entries at `-inf`.
+        let mask = if spec.alibi_scale == 1.0 {
+            mask
+        } else {
+            client.mul_scalar(&mask, f64::from(spec.alibi_scale))?
+        };
         Var::new(mask.to_dtype(dtype)?, false)
     } else {
         // `causal_window_mask` owns causality, the inclusive sliding window,

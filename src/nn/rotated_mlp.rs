@@ -208,11 +208,7 @@ mod tests {
             MaybeRotatedLinear::Plain(plain(down.clone())),
         )
         .unwrap();
-        let llama = LlamaMlp {
-            gate_proj: plain(gate),
-            up_proj: plain(up),
-            down_proj: plain(down),
-        };
+        let llama = LlamaMlp::swiglu(plain(gate), plain(up), plain(down));
         assert_eq!(rotated.hidden_size(), HIDDEN);
         assert_eq!(rotated.intermediate_size(), INTER);
 
@@ -257,11 +253,7 @@ mod tests {
         let out = mlp.forward(&client, &x).unwrap();
 
         let x_rotated = Var::new(rotation.forward(&client, x.tensor()).unwrap(), false);
-        let llama = LlamaMlp {
-            gate_proj: plain(gate_w),
-            up_proj: plain(up_w),
-            down_proj: plain(down_w),
-        };
+        let llama = LlamaMlp::swiglu(plain(gate_w), plain(up_w), plain(down_w));
         let manual = llama.forward(&client, &x_rotated).unwrap();
 
         let a: Vec<f32> = out.tensor().to_vec();

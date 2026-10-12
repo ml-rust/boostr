@@ -220,6 +220,32 @@ where
         }
     }
 
+    /// Why the paged-attention path cannot serve this model, or `None`.
+    ///
+    /// The paged kernel adds no ALiBi bias and no score softcap. A sliding
+    /// window is checked per forward instead, since it matters only past the
+    /// window length.
+    pub fn paged_attention_refusal(&self) -> Option<String> {
+        let config = match self {
+            LoadedModel::Llama(m) => m.config(),
+            LoadedModel::LlamaTp(m) => m.config(),
+            LoadedModel::Multimodal(m) => return m.llm().paged_attention_refusal(),
+            _ => return None,
+        };
+        let feature = if config.attention.as_ref().is_some_and(|a| a.use_alibi) {
+            "ALiBi"
+        } else if config.block.attn_logit_softcap.is_some() {
+            "attention logit softcapping"
+        } else {
+            return None;
+        };
+        Some(format!(
+            "model type '{}' uses {feature}, which the paged-attention kernel does not apply; \
+             turn paged attention off",
+            config.model_type
+        ))
+    }
+
     /// Whether this model uses Mixture of Experts.
     pub fn is_moe(&self) -> bool {
         match self {

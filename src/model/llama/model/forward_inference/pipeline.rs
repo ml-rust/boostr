@@ -40,7 +40,7 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
             + ConditionalOps<R>
             + DequantOps<R>,
     {
-        let mut hidden = self.embed_tokens.forward(client, input_ids)?;
+        let mut hidden = self.embed(client, input_ids)?;
         for layer in &self.layers {
             hidden = layer.forward(client, &hidden, &self.rope)?;
         }
@@ -68,9 +68,9 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
     ) -> Result<numr::autograd::Var<R>>
     where
         C: ModelClient<R>,
-        R::Client: IndexingOps<R>,
+        R::Client: IndexingOps<R> + ScalarOps<R> + TensorOps<R>,
     {
-        self.embed_tokens.forward(client, input_ids)
+        self.embed(client, input_ids)
     }
 
     /// Run a range of transformer layers with KV cache.
@@ -173,7 +173,7 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
             hidden = numr::autograd::var_add(&hidden, &last_mlp, client).map_err(Error::Numr)?;
         }
         hidden = self.norm.forward(client, &hidden)?;
-        let logits = self.lm_head.forward(client, &hidden)?;
+        let logits = self.head(client, &hidden)?;
         Ok(logits.tensor().clone())
     }
 
@@ -224,7 +224,7 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
             + DequantOps<R>,
     {
         // Embed tokens: [B, S] -> [B, S, hidden]
-        let mut hidden = self.embed_tokens.forward(client, input_ids)?;
+        let mut hidden = self.embed(client, input_ids)?;
 
         // Transformer blocks with paged KV cache — deferred residual add fusion
         let mut prev_mlp_out: Option<numr::autograd::Var<R>> = None;
@@ -254,7 +254,7 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
         hidden = self.norm.forward(client, &hidden)?;
 
         // LM head: [B, S, hidden] -> [B, S, vocab]
-        let logits = self.lm_head.forward(client, &hidden)?;
+        let logits = self.head(client, &hidden)?;
 
         Ok(logits.tensor().clone())
     }

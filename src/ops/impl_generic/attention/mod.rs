@@ -6,7 +6,7 @@ pub mod mla;
 pub mod paged;
 pub mod rope;
 
-pub use flash::multi_head_attention_impl;
+pub use flash::{multi_head_attention_impl, softcapped_attention_impl};
 pub use flash_standard::{
     StandardAttnConfig, build_attention_mask, standard_attention_bwd, standard_attention_fwd,
     standard_attention_fwd_kv_start, sum_gqa_grads,

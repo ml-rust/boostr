@@ -56,6 +56,7 @@ impl Llama<numr::runtime::cuda::CudaRuntime> {
         use crate::ops::cuda::attention::paged_decode::paged_decode_attention_fwd_graph;
         use numr::autograd::Var;
 
+        self.ensure_plain_llama("CUDA paged graph")?;
         // Embed tokens
         let mut hidden = self.embed_tokens.forward(client, input_ids)?;
 
@@ -172,7 +173,14 @@ impl Llama<numr::runtime::cuda::CudaRuntime> {
 
             // Post-attention norm + MLP
             let post_attn = var_add(&hidden, &attn_out, client).map_err(Error::Numr)?;
-            let normed_post = layer.post_attention_layernorm.forward(client, &post_attn)?;
+            let post_norm =
+                layer
+                    .post_attention_layernorm
+                    .as_ref()
+                    .ok_or_else(|| Error::ModelError {
+                        reason: format!("layer {i} has no post_attention_layernorm"),
+                    })?;
+            let normed_post = post_norm.forward(client, &post_attn)?;
             let mlp_out = layer.mlp.forward(client, &normed_post)?;
 
             hidden = post_attn;

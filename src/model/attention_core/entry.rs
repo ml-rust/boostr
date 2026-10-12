@@ -29,7 +29,7 @@ use super::spec::{AttentionCoreSpec, AttentionKernel};
 use super::stages::{attention_epilogue, attention_epilogue_token_major, attention_prologue};
 use crate::error::{Error, Result};
 use crate::nn::var_ops::{repeat_kv, var_contiguous};
-use crate::ops::impl_generic::attention::multi_head_attention_impl;
+use crate::ops::impl_generic::attention::{multi_head_attention_impl, softcapped_attention_impl};
 use crate::ops::traits::position::alibi::AlibiOps;
 use crate::ops::traits::{AttnOutLayout, FlashAttentionOps, RoPEOps};
 use crate::ops::var_flash_attention;
@@ -104,7 +104,8 @@ where
         + BinaryOps<R>
         + NormalizationOps<R>
         + RoPEOps<R>
-        + AlibiOps<R>,
+        + AlibiOps<R>
+        + TensorOps<R>,
     R::Client: TensorOps<R> + ScalarOps<R> + FlashAttentionOps<R>,
 {
     match spec.kernel {
@@ -144,6 +145,14 @@ where
     C: RuntimeClient<R> + NormalizationOps<R> + RoPEOps<R>,
     R::Client: TensorOps<R> + ScalarOps<R> + FlashAttentionOps<R>,
 {
+    if spec.softcap.is_some() {
+        return Err(Error::InvalidArgument {
+            arg: "spec.kernel",
+            reason: "AttentionKernel::Flash cannot serve softcap: the flash kernel has no \
+                     score softcap. Use AttentionKernel::Masked."
+                .into(),
+        });
+    }
     if spec.use_alibi {
         // Hard error, never a downgrade to `Masked` and never a silently
         // dropped bias: either choice yields a model that trains, runs, and
@@ -214,7 +223,8 @@ where
         + BinaryOps<R>
         + NormalizationOps<R>
         + RoPEOps<R>
-        + AlibiOps<R>,
+        + AlibiOps<R>
+        + TensorOps<R>,
     R::Client: TensorOps<R> + ScalarOps<R>,
 {
     let (q, k, v) = attention_prologue(client, q, k, v, cos, sin, spec)?;
@@ -241,7 +251,18 @@ where
         q.tensor().dtype(),
         q.tensor().device(),
     )?;
-    let attn_out = multi_head_attention_impl(client, &q, &k, &v, Some(&mask), spec.num_heads)?;
+    let attn_out = match spec.softcap {
+        None => multi_head_attention_impl(client, &q, &k, &v, Some(&mask), spec.num_heads)?,
+        Some(cap) => softcapped_attention_impl(
+            client,
+            &q,
+            &k,
+            &v,
+            Some(&mask),
+            (spec.head_dim as f64).sqrt().recip(),
+            Some(f64::from(cap)),
+        )?,
+    };
 
     attention_epilogue(&attn_out, batch, spec)
 }
@@ -282,6 +303,8 @@ mod tests {
             use_alibi: false,
             skip_rope: false,
             sliding_window: 0,
+            softcap: None,
+            alibi_scale: 1.0,
             kernel: AttentionKernel::Masked,
         };
 

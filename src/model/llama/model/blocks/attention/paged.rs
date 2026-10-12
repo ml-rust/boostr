@@ -5,7 +5,7 @@ use super::LlamaAttention;
 use crate::error::{Error, Result};
 use crate::inference::kv_cache::LayeredPagedKvCache;
 use crate::model::traits::ModelClient;
-use crate::nn::{MaybeQuantLinear, RoPE};
+use crate::nn::RoPE;
 use crate::ops::traits::{KvCacheOps, KvSeqLen, PagedAttentionOps, RoPEPackedOps};
 use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_narrow, var_reshape};
@@ -73,16 +73,19 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             + PagedAttentionOps<R>
             + DequantOps<R>,
     {
+        if let Some(feature) = self.paged_unsupported(seq_len_k) {
+            return Err(Error::ModelError {
+                reason: format!(
+                    "the paged-attention path does not apply {feature}; serve this model \
+                     with paged attention off"
+                ),
+            });
+        }
         let shape = x.shape().to_vec();
         let batch = shape[0];
         let seq_len = shape[1];
 
-        // Q/K/V projections
-        let qkv = MaybeQuantLinear::forward_batch(
-            &[&self.q_proj, &self.k_proj, &self.v_proj],
-            client,
-            x,
-        )?;
+        let qkv = self.project_qkv(client, x)?;
         let (q, k, v) = (&qkv[0], &qkv[1], &qkv[2]);
 
         // Reshape to [B, S, H, D] then permute to [B, H, S, D]
@@ -318,6 +321,9 @@ mod tests {
             k_norm: None,
             use_alibi: false,
             sliding_window: 0,
+            softcap: None,
+            clip_qkv: None,
+            alibi_scale: 1.0,
         }
     }
 

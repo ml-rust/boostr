@@ -44,6 +44,15 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
         comm: Arc<dyn Communicator>,
     ) -> Result<Self> {
         config.validate()?;
+        if !config.block.is_llama() {
+            return Err(Error::ModelError {
+                reason: format!(
+                    "tensor parallelism runs the Llama block only; model type '{}' needs its \
+                     own norms, MLP or attention options. Load it on one device",
+                    config.model_type
+                ),
+            });
+        }
 
         let attn_cfg = config.attention.as_ref().ok_or_else(|| Error::ModelError {
             reason: "LLaMA requires attention config".into(),
@@ -200,6 +209,15 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
         comm: Arc<dyn Communicator>,
     ) -> Result<Self> {
         config.validate()?;
+        if !config.block.is_llama() {
+            return Err(Error::ModelError {
+                reason: format!(
+                    "tensor parallelism runs the Llama block only; model type '{}' needs its \
+                     own norms, MLP or attention options. Load it on one device",
+                    config.model_type
+                ),
+            });
+        }
 
         let attn_cfg = config.attention.as_ref().ok_or_else(|| Error::ModelError {
             reason: "LLaMA requires attention config".into(),

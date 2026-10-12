@@ -7,6 +7,35 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **`BlockConfig`** — `UniversalConfig.block` describes a non-Llama block on the Llama path: LayerNorm, GELU and plain MLPs, parallel residuals, Gemma 2 sandwich norms, partial and interleaved RoPE, attention and final logit softcaps, `logit_scale`, `clip_qkv`, a scaled ALiBi bias and per-layer sliding windows. `HuggingFaceConfig::to_universal` fills it for Gemma, Gemma 2, StarCoder2, GPT-NeoX, Falcon, DBRX and Cohere.
+- **`format::restructure_hf_checkpoint`** — puts a Hugging Face checkpoint into the Llama tensor layout. It splits fused QKV and gate-up projections, stacks MoE experts, adds Gemma's norm offset, folds the query scale and reorders partial-RoPE rows.
+- **`RoPE::precompute_freqs_partial`** — RoPE over the leading `rotary_dim` dims of each head.
+- **`LoadedModel::paged_attention_refusal`** — names a model feature the paged kernel does not apply.
+- **SafeTensors `U8`** — load and save. GPT-NeoX stores its mask buffer as `U8`.
+
+### Changed
+
+- **`HuggingFaceConfig::to_universal`** returns `Result`. An unsupported activation, an Lp expert norm with p other than 1, or Cohere `use_qk_norm: true` is an error.
+- **`ModelClient`** requires `SpecialFunctions`. Exact-GELU gated MLPs need it.
+
+### Fixed
+
+- **ALiBi slopes** — every backend used `2^(-8h/H)`, so head 0 got slope 1. The slopes now follow the ALiBi paper and `transformers`, including head counts that are not a power of two.
+- **MoE on the Llama path** — `LlamaFfn` flattens `[B, S, hidden]` before routing. Routing refused 3-D input, so no Mixtral, Qwen2-MoE or DBRX model ran.
+- **Qwen2-MoE routing** — `norm_topk_prob: false` keeps the full-softmax weights. The shared expert takes its sigmoid gate, and experts take the configured activation.
+- **DBRX expert names** — the fused `w1`, `v1`, `w2` tensors map to gate, up and down. The old map swapped gate and up and matched no real tensor name.
+- **Qwen2 sliding window** — `use_sliding_window: false` turns the window off. The window applied to every layer before.
+- **LongRoPE** — the cache uses `short_factor` below `original_max_position_embeddings` and `long_factor` from there on. A cache longer than the original used `long_factor` at every position. The attention factor follows the config lengths, as `transformers` computes it. A top-level `original_max_position_embeddings` (Phi-3) is read.
+- **Falcon names** — `post_attention_layernorm` maps. Falcon-RW failed to load before.
+- **Paged attention** — the paged path refuses ALiBi, softcaps and a sliding window shorter than the sequence. It ignored them before.
+- **transformers v5 configs** — `rope_parameters.rope_theta` is read.
+
+---
+
 ## [0.7.0] - 2026-10-11
 
 ### Added

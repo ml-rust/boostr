@@ -103,3 +103,75 @@ where
 fn weight_rows(shape: &[usize]) -> usize {
     shape.first().copied().unwrap_or(0)
 }
+
+impl<R: Runtime<DType = DType>> super::Llama<R> {
+    /// Token embeddings, times `block.embedding_multiplier` when set (Gemma).
+    pub(crate) fn embed<C>(
+        &self,
+        client: &C,
+        input_ids: &numr::tensor::Tensor<R>,
+    ) -> Result<numr::autograd::Var<R>>
+    where
+        C: crate::model::traits::ModelClient<R>,
+        R::Client: numr::ops::IndexingOps<R> + numr::ops::ScalarOps<R> + numr::ops::TensorOps<R>,
+    {
+        let hidden = self.embed_tokens.forward(client, input_ids)?;
+        match self.config.block.embedding_multiplier {
+            Some(m) => {
+                numr::autograd::var_mul_scalar(&hidden, f64::from(m), client).map_err(Error::Numr)
+            }
+            None => Ok(hidden),
+        }
+    }
+
+    /// `lm_head(hidden)`, times `block.logit_scale` (Cohere), then
+    /// `cap * tanh(logits / cap)` for `block.final_logit_softcap` (Gemma 2).
+    pub(crate) fn head<C>(
+        &self,
+        client: &C,
+        hidden: &numr::autograd::Var<R>,
+    ) -> Result<numr::autograd::Var<R>>
+    where
+        C: crate::model::traits::ModelClient<R>,
+        R::Client: numr::ops::TensorOps<R>
+            + numr::ops::ScalarOps<R>
+            + numr::ops::ReduceOps<R>
+            + numr::ops::IndexingOps<R>
+            + numr::ops::ShapeOps<R>
+            + numr::ops::ActivationOps<R>
+            + numr::ops::BinaryOps<R>
+            + numr::ops::UnaryOps<R>
+            + numr::ops::CompareOps<R>
+            + numr::ops::ConditionalOps<R>
+            + crate::quant::traits::DequantOps<R>,
+    {
+        use numr::autograd::{var_mul_scalar, var_tanh};
+        let mut logits = self.lm_head.forward(client, hidden)?;
+        if let Some(scale) = self.config.block.logit_scale {
+            logits = var_mul_scalar(&logits, f64::from(scale), client).map_err(Error::Numr)?;
+        }
+        if let Some(cap) = self.config.block.final_logit_softcap {
+            let cap = f64::from(cap);
+            let t = var_mul_scalar(&logits, cap.recip(), client).map_err(Error::Numr)?;
+            let t = var_tanh(&t, client).map_err(Error::Numr)?;
+            logits = var_mul_scalar(&t, cap, client).map_err(Error::Numr)?;
+        }
+        Ok(logits)
+    }
+
+    /// An error unless every block is the plain Llama block, for the CUDA
+    /// graph paths, which implement only that block.
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    pub(crate) fn ensure_plain_llama(&self, path: &str) -> Result<()> {
+        if self.config.block.is_llama() && self.layers.iter().all(|l| l.is_plain_llama()) {
+            return Ok(());
+        }
+        Err(Error::ModelError {
+            reason: format!(
+                "the {path} path runs the Llama block only; model type '{}' needs its own \
+                 norms, MLP or attention options. Run it without graph mode",
+                self.config.model_type
+            ),
+        })
+    }
+}

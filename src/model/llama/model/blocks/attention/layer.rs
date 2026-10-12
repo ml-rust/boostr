@@ -6,7 +6,7 @@ use crate::model::attention_core::{AttentionCoreSpec, AttentionKernel, attention
 use crate::model::traits::ModelClient;
 use crate::nn::{MaybeQuantLinear, RoPE};
 use crate::quant::traits::DequantOps;
-use numr::autograd::Var;
+use numr::autograd::{Var, var_clamp};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
@@ -39,9 +39,66 @@ pub struct LlamaAttention<R: Runtime> {
     /// structure together with the distance bias; the two mechanisms do not
     /// compose here, so ALiBi models always attend the full context.
     pub(crate) sliding_window: usize,
+    /// `cap * tanh(score / cap)` on the scaled scores (Gemma 2). Runs the
+    /// materialized-score path; the paged path refuses it.
+    pub(crate) softcap: Option<f32>,
+    /// Clamp Q, K and V to `[-c, c]` after projection (DBRX).
+    pub(crate) clip_qkv: Option<f32>,
+    /// Multiplies the ALiBi bias (Falcon: `1/sqrt(head_dim)`).
+    pub(crate) alibi_scale: f32,
 }
 
 impl<R: Runtime<DType = DType>> LlamaAttention<R> {
+    /// Why the paged-KV path cannot serve this block at `seq_len_k` keys,
+    /// or `None`.
+    ///
+    /// The paged kernel takes no additive bias and no score softcap, and it
+    /// applies no sliding window. A window wider than the keys changes
+    /// nothing, so only a longer sequence is refused. Running the kernel
+    /// anyway computes a different model while every shape stays valid.
+    pub(crate) fn paged_unsupported(&self, seq_len_k: usize) -> Option<&'static str> {
+        if self.use_alibi {
+            Some("ALiBi")
+        } else if self.softcap.is_some() {
+            Some("attention logit softcapping")
+        } else if self.sliding_window > 0 && seq_len_k > self.sliding_window {
+            Some("a sliding window shorter than the sequence")
+        } else {
+            None
+        }
+    }
+
+    /// Q, K and V projections of `x`, clamped when `clip_qkv` is set.
+    pub(super) fn project_qkv<C>(&self, client: &C, x: &Var<R>) -> Result<Vec<Var<R>>>
+    where
+        C: ModelClient<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>
+            + DequantOps<R>,
+    {
+        // Batched: quantize the activation once for all three.
+        let qkv = MaybeQuantLinear::forward_batch(
+            &[&self.q_proj, &self.k_proj, &self.v_proj],
+            client,
+            x,
+        )?;
+        let Some(c) = self.clip_qkv else {
+            return Ok(qkv);
+        };
+        let c = f64::from(c);
+        qkv.iter()
+            .map(|t| var_clamp(t, -c, c, client).map_err(crate::error::Error::Numr))
+            .collect()
+    }
+
     /// Borrowed view of this block's attention parameters, for
     /// [`attention_core_masked`].
     pub(super) fn core_spec(&self) -> AttentionCoreSpec<'_, R> {
@@ -56,6 +113,8 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             // VoxCPM2 `residual_lm` property, never one of theirs.
             skip_rope: false,
             sliding_window: self.sliding_window,
+            softcap: self.softcap,
+            alibi_scale: self.alibi_scale,
             // This block runs the materialized-mask kernel. Its ALiBi variants
             // require it, and `tests/qwen3_parity.rs` pins its numbers.
             kernel: AttentionKernel::Masked,
@@ -121,12 +180,7 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             + ConditionalOps<R>
             + DequantOps<R>,
     {
-        // Q/K/V projections (batched: quantize activation once for all 3)
-        let qkv = MaybeQuantLinear::forward_batch(
-            &[&self.q_proj, &self.k_proj, &self.v_proj],
-            client,
-            x,
-        )?;
+        let qkv = self.project_qkv(client, x)?;
         let (q, k, v) = (&qkv[0], &qkv[1], &qkv[2]);
 
         // Everything between the projections and `o_proj` — reshape/permute,
@@ -305,7 +359,8 @@ attention:
             );
         }
         let mut vb = VarBuilder::new(&mut varmap, &device);
-        let block = build_block_from_varbuilder::<CpuRuntime>(&mut vb, &config, 2, 2, 4).unwrap();
+        let block =
+            build_block_from_varbuilder::<CpuRuntime>(&mut vb, &config, 0, 2, 2, 4).unwrap();
         block.self_attn.sliding_window
     }
 

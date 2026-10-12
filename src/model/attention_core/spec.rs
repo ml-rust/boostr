@@ -71,6 +71,13 @@ pub struct AttentionCoreSpec<'a, R: Runtime> {
     /// structure together with the distance bias; the two mechanisms do not
     /// compose here, so ALiBi models always attend the full context.
     pub sliding_window: usize,
+    /// `cap * tanh(score / cap)` on the scaled scores, before the mask
+    /// (Gemma 2). Requires [`AttentionKernel::Masked`]; the flash kernel
+    /// refuses it.
+    pub softcap: Option<f32>,
+    /// Multiplies the ALiBi bias. `1.0` for BLOOM and MPT. Falcon adds
+    /// `alibi / sqrt(head_dim)`.
+    pub alibi_scale: f32,
     /// Which attention kernel to run. Defaults to [`AttentionKernel::Masked`].
     pub kernel: AttentionKernel,
 }

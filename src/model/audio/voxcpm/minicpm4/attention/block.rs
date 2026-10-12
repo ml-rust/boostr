@@ -61,6 +61,8 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
             use_alibi: false,
             skip_rope: self.no_rope,
             sliding_window: 0,
+            softcap: None,
+            alibi_scale: 1.0,
             // Only `forward` reads this field. `attention_core_flash` builds a
             // backward node that resolves its client from the runtime, so it
             // requires `R::Client: FlashAttentionOps<R>` — a bound this block's

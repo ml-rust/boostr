@@ -146,6 +146,8 @@ fn run_case(num_heads: usize, num_kv_heads: usize, dtype: DType, label: &str) {
         use_alibi: false,
         skip_rope: false,
         sliding_window: 0,
+        softcap: None,
+        alibi_scale: 1.0,
         // Ignored by `attention_core_flash`; stated for honesty.
         kernel: AttentionKernel::Flash,
     };

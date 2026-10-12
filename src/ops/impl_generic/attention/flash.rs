@@ -4,8 +4,11 @@
 //! Composes numr autograd primitives: matmul, softmax, add, mul_scalar, transpose.
 
 use crate::error::{Error, Result};
-use numr::autograd::{Var, var_add, var_matmul, var_mul_scalar, var_softmax, var_transpose};
-use numr::ops::ScalarOps;
+use numr::autograd::{
+    Var, var_add, var_matmul, var_mul_scalar, var_softmax, var_tanh, var_transpose,
+};
+use numr::dtype::DType;
+use numr::ops::{ScalarOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
 
 /// Multi-head attention: softmax((Q @ K^T) / sqrt(d)) @ V
@@ -86,7 +89,54 @@ where
 
     // Scale by 1/sqrt(d)
     let scores = var_mul_scalar(&scores, scale, client).map_err(Error::Numr)?;
+    softmax_values(client, scores, mask, v)
+}
 
+/// `softmax(cap * tanh((Q @ K^T) * scale / cap) + mask) @ V`, Gemma 2's
+/// attention. `softcap: None` skips the tanh.
+///
+/// Same layout as [`multi_head_attention_impl`]: `q` `[B, H, S, D]`, `k`/`v`
+/// `[B, H, S_kv, D]` with the KV heads already repeated.
+pub fn softcapped_attention_impl<R, C>(
+    client: &C,
+    q: &Var<R>,
+    k: &Var<R>,
+    v: &Var<R>,
+    mask: Option<&Var<R>>,
+    scale: f64,
+    softcap: Option<f64>,
+) -> Result<Var<R>>
+where
+    R: Runtime<DType = DType>,
+    C: RuntimeClient<R> + ScalarOps<R> + TensorOps<R>,
+    R::Client: ScalarOps<R> + TensorOps<R>,
+{
+    let k_t = var_transpose(k).map_err(Error::Numr)?;
+    let scores = var_matmul(q, &k_t, client).map_err(Error::Numr)?;
+    let scores = var_mul_scalar(&scores, scale, client).map_err(Error::Numr)?;
+    let scores = match softcap {
+        Some(cap) => {
+            let t = var_mul_scalar(&scores, cap.recip(), client).map_err(Error::Numr)?;
+            let t = var_tanh(&t, client).map_err(Error::Numr)?;
+            var_mul_scalar(&t, cap, client).map_err(Error::Numr)?
+        }
+        None => scores,
+    };
+    softmax_values(client, scores, mask, v)
+}
+
+/// `softmax(scores + mask) @ v`.
+fn softmax_values<R, C>(
+    client: &C,
+    scores: Var<R>,
+    mask: Option<&Var<R>>,
+    v: &Var<R>,
+) -> Result<Var<R>>
+where
+    R: Runtime,
+    C: RuntimeClient<R> + ScalarOps<R>,
+    R::Client: ScalarOps<R>,
+{
     // Add mask if provided
     let scores = match mask {
         Some(m) => var_add(&scores, m, client).map_err(Error::Numr)?,

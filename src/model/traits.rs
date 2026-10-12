@@ -11,7 +11,7 @@ use crate::quant::traits::{DequantOps, QuantMatmulOps, ScheduleTuning};
 use numr::autograd::Var;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, ConvOps, FwhtOps, IndexingOps, MatmulOps,
-    NormalizationOps, ReduceOps, ScalarOps, ShapeOps, TensorOps, UnaryOps,
+    NormalizationOps, ReduceOps, ScalarOps, ShapeOps, SpecialFunctions, TensorOps, UnaryOps,
 };
 use numr::runtime::{Runtime, RuntimeClient};
 
@@ -43,6 +43,7 @@ pub trait ModelClient<R: Runtime>:
     + ConvOps<R>
     + DequantOps<R>
     + ScheduleTuning<R>
+    + SpecialFunctions<R>
 {
 }
 
@@ -74,7 +75,8 @@ where
         + MatmulOps<R>
         + ConvOps<R>
         + DequantOps<R>
-        + ScheduleTuning<R>,
+        + ScheduleTuning<R>
+        + SpecialFunctions<R>,
 {
 }
 

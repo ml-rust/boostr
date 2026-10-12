@@ -4,7 +4,9 @@
 use super::types::Llama;
 use crate::error::{Error, Result};
 use crate::model::config::ModelConfig;
-use crate::model::llama::model::blocks::{build_block_from_config, build_block_from_varbuilder};
+use crate::model::llama::model::blocks::{
+    BlockNorm, build_block_from_config, build_block_from_varbuilder,
+};
 use crate::model::llama::model::lm_head::build_lm_head;
 use crate::model::traits::{Model, ModelClient};
 use crate::model::vocab_growth::fit_vocab_rows;
@@ -38,10 +40,12 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
         let num_kv_heads = attn_cfg.kv_heads();
         let head_dim = attn_cfg.head_dim(hidden);
 
-        // RoPE cache (borrow device before mutable borrows)
-        let rope = RoPE::<R>::precompute_freqs(
+        // RoPE cache (borrow device before mutable borrows). A partial
+        // rotary head rotates its leading `rotary_dim` dims only.
+        let rope = RoPE::<R>::precompute_freqs_partial(
             config.max_seq_len,
             head_dim,
+            config.block.rotary_dim(head_dim),
             attn_cfg.rope_theta,
             attn_cfg.rope_scaling.as_ref(),
             vb.device(),
@@ -75,6 +79,7 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
             let block = build_block_from_varbuilder(
                 &mut layer_vb,
                 config,
+                i,
                 num_heads,
                 num_kv_heads,
                 head_dim,
@@ -83,11 +88,15 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
         }
 
         // Final norm
-        let norm = RmsNorm::new(
-            model_vb.take_tensor("norm.weight")?,
+        let norm_weight = model_vb.take_tensor("norm.weight")?;
+        let norm_bias = model_vb.take_tensor_optional("norm.bias")?;
+        let norm = BlockNorm::build(
+            norm_weight,
+            norm_bias,
             config.rms_norm_eps as f32,
+            &config.block,
             false,
-        );
+        )?;
 
         // LM head (may be tied to embedding weights)
         let lm_head = build_lm_head(vb, config, &embed_tokens, &embed_name)?;
@@ -152,11 +161,11 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
         }
 
         // Final norm
-        let norm = RmsNorm::new(
+        let norm = BlockNorm::Rms(RmsNorm::new(
             Tensor::<R>::ones(&[hidden], dt, device)?,
             config.rms_norm_eps as f32,
             true,
-        );
+        ));
 
         // LM head. When tied, it must share the embedding's autograd identity,
         // not just its values: autograd accumulates by `TensorId`, so a shared
@@ -209,7 +218,7 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
             + DequantOps<R>,
     {
         let hidden = self.forward_hidden(client, input_ids.tensor())?;
-        self.lm_head.forward(client, &hidden)
+        self.head(client, &hidden)
     }
 
     fn config(&self) -> &ModelConfig {
@@ -349,23 +358,23 @@ attention:
         use crate::model::llama::model::blocks::mlp::LlamaMlp;
         use crate::nn::MaybeQuantLinear;
         let (client, device) = cpu_setup();
-        let mlp = LlamaMlp {
-            gate_proj: MaybeQuantLinear::Standard(Linear::new(
+        let mlp = LlamaMlp::swiglu(
+            MaybeQuantLinear::Standard(Linear::new(
                 Tensor::<CpuRuntime>::from_slice(&[0.1f32; 8], &[2, 4], &device).unwrap(),
                 None,
                 false,
             )),
-            up_proj: MaybeQuantLinear::Standard(Linear::new(
+            MaybeQuantLinear::Standard(Linear::new(
                 Tensor::<CpuRuntime>::from_slice(&[0.1f32; 8], &[2, 4], &device).unwrap(),
                 None,
                 false,
             )),
-            down_proj: MaybeQuantLinear::Standard(Linear::new(
+            MaybeQuantLinear::Standard(Linear::new(
                 Tensor::<CpuRuntime>::from_slice(&[0.1f32; 8], &[4, 2], &device).unwrap(),
                 None,
                 false,
             )),
-        };
+        );
 
         let x = Var::new(
             Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[1, 4], &device).unwrap(),

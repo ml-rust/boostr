@@ -41,6 +41,7 @@ impl Llama<numr::runtime::cuda::CudaRuntime> {
             + numr::ops::CompareOps<numr::runtime::cuda::CudaRuntime>
             + numr::ops::ConditionalOps<numr::runtime::cuda::CudaRuntime>,
     {
+        self.ensure_plain_llama("CUDA graph")?;
         // Embed tokens
         let mut hidden = self.embed_tokens.forward(client, input_ids)?;
 

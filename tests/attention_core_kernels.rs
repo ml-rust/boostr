@@ -117,6 +117,8 @@ fn run(case: &Case, kernel: AttentionKernel, sliding_window: usize) -> Vec<f32> 
         use_alibi: false,
         skip_rope: false,
         sliding_window,
+        softcap: None,
+        alibi_scale: 1.0,
         kernel,
     };
 
@@ -176,6 +178,8 @@ fn run_flash_entry(case: &Case, sliding_window: usize) -> Vec<f32> {
         use_alibi: false,
         skip_rope: false,
         sliding_window,
+        softcap: None,
+        alibi_scale: 1.0,
         // Deliberately mismatched: `attention_core_flash` must ignore this
         // and always run the flash kernel, exactly like `attention_core_masked`
         // ignores a `Flash` request.
@@ -389,6 +393,8 @@ fn alibi_with_flash_is_an_error() {
         use_alibi: true,
         skip_rope: false,
         sliding_window: 0,
+        softcap: None,
+        alibi_scale: 1.0,
         kernel,
     };
 

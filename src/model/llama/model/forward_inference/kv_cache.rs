@@ -66,7 +66,7 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
         let t = std::time::Instant::now();
 
         // Embed tokens: [B, S] -> [B, S, hidden]
-        let mut hidden = self.embed_tokens.forward(client, input_ids)?;
+        let mut hidden = self.embed(client, input_ids)?;
         sync_log!(t, "embed");
 
         // Transformer blocks with KV cache — deferred residual add fusion
@@ -99,7 +99,7 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
 
         // LM head: [B, S, hidden] -> [B, S, vocab]
         let t_lm = std::time::Instant::now();
-        let logits = self.lm_head.forward(client, &hidden)?;
+        let logits = self.head(client, &hidden)?;
         sync_log!(t_lm, "lm_head");
 
         if profile {

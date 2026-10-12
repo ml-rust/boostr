@@ -6,5 +6,7 @@ mod types;
 
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod variant_tests;
 
 pub use types::Llama;

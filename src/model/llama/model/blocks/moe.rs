@@ -5,9 +5,11 @@
 //! which have dedicated kernels on CPU, CUDA, and WebGPU.
 
 use crate::error::{Error, Result};
+use crate::model::config::MlpActivation;
 use crate::model::config::moe::MoeConfig;
 use crate::model::traits::ModelClient;
 use crate::nn::MaybeQuantLinear;
+use crate::nn::var_ops::var_contiguous;
 use crate::ops::traits::architecture::moe::{MoEActivation, MoEOps};
 use crate::quant::traits::DequantOps;
 use numr::autograd::Var;
@@ -53,6 +55,10 @@ pub struct LlamaMoeMlp<R: Runtime> {
     shared_gate_proj: Option<MaybeQuantLinear<R>>,
     shared_up_proj: Option<MaybeQuantLinear<R>>,
     shared_down_proj: Option<MaybeQuantLinear<R>>,
+    /// Qwen2-MoE: `sigmoid(shared_expert_gate(x))` scales the shared expert.
+    shared_expert_gate: Option<MaybeQuantLinear<R>>,
+    /// Activation of every expert's gate projection.
+    activation: MoEActivation,
     /// MoE configuration
     config: MoeConfig,
 }
@@ -73,8 +79,26 @@ impl<R: Runtime<DType = DType>> LlamaMoeMlp<R> {
             shared_gate_proj: None,
             shared_up_proj: None,
             shared_down_proj: None,
+            shared_expert_gate: None,
+            activation: MoEActivation::SiLU,
             config,
         }
+    }
+
+    /// The expert activation, SiLU by default.
+    pub fn with_activation(mut self, activation: MlpActivation) -> Self {
+        self.activation = match activation {
+            MlpActivation::Silu => MoEActivation::SiLU,
+            MlpActivation::GeluTanh => MoEActivation::GeluTanh,
+            MlpActivation::GeluErf => MoEActivation::Gelu,
+        };
+        self
+    }
+
+    /// A sigmoid gate on the shared expert's output (Qwen2-MoE).
+    pub fn with_shared_expert_gate(mut self, gate: MaybeQuantLinear<R>) -> Self {
+        self.shared_expert_gate = Some(gate);
+        self
     }
 
     /// Extract the weight tensors for a single expert as a 2-D view.
@@ -294,10 +318,25 @@ impl<R: Runtime<DType = DType>> LlamaMoeMlp<R> {
             reason: "down_weights lock poisoned".into(),
         })?;
 
-        // 1. Router: gate logits → top-k expert selection
+        // 1. Router: gate logits → top-k expert selection. The kernel
+        //    renormalizes the top-k weights. Without renormalization the
+        //    weights are the full-softmax probabilities of the chosen experts.
         let gate_logits_var = self.router_gate.forward(client, x)?;
         let (indices, weights) =
             client.moe_top_k_routing(gate_logits_var.tensor(), self.config.experts_per_tok)?;
+        let weights = if self.config.renormalizes_top_k() {
+            weights
+        } else {
+            let probs = client
+                .softmax(gate_logits_var.tensor(), -1)
+                .map_err(Error::Numr)?;
+            let picked = client.gather(&probs, 1, &indices).map_err(Error::Numr)?;
+            if picked.dtype() == weights.dtype() {
+                picked
+            } else {
+                picked.to_dtype(weights.dtype())?
+            }
+        };
 
         // 2. Permute tokens into expert-contiguous order
         let (permuted, offsets, sort_indices) =
@@ -308,12 +347,8 @@ impl<R: Runtime<DType = DType>> LlamaMoeMlp<R> {
         //    up_out   = permuted @ up_weights
         //    hidden   = gate_out * up_out
         //    output   = hidden @ down_weights
-        let gate_out = client.moe_grouped_gemm_fused(
-            &permuted,
-            &*gate_weights,
-            &offsets,
-            MoEActivation::SiLU,
-        )?;
+        let gate_out =
+            client.moe_grouped_gemm_fused(&permuted, &*gate_weights, &offsets, self.activation)?;
         let up_out = client.moe_grouped_gemm(&permuted, &*up_weights, &offsets)?;
         let hidden = client.mul(&gate_out, &up_out).map_err(Error::Numr)?;
         let expert_output = client.moe_grouped_gemm(&hidden, &*down_weights, &offsets)?;
@@ -330,12 +365,20 @@ impl<R: Runtime<DType = DType>> LlamaMoeMlp<R> {
         ) {
             let sg_out = sg.forward(client, x)?;
             let su_out = su.forward(client, x)?;
-            let sg_silu = numr::autograd::var_silu(&sg_out, client).map_err(Error::Numr)?;
-            let sh = numr::autograd::var_mul(&sg_silu, &su_out, client).map_err(Error::Numr)?;
-            let shared_out = sd.forward(client, &sh)?;
-            output = client
-                .add(&output, shared_out.tensor())
-                .map_err(Error::Numr)?;
+            let sh = match self.activation {
+                MoEActivation::Gelu => numr::autograd::var_gelu_erf_mul(&sg_out, &su_out, client),
+                MoEActivation::GeluTanh => numr::autograd::var_gelu_mul(&sg_out, &su_out, client),
+                _ => numr::autograd::var_silu_mul(&sg_out, &su_out, client),
+            }
+            .map_err(Error::Numr)?;
+            let mut shared_out = sd.forward(client, &sh)?.tensor().clone();
+            if let Some(gate) = &self.shared_expert_gate {
+                // [tokens, 1] gate broadcasts over the hidden axis.
+                let g = gate.forward(client, x)?;
+                let g = client.sigmoid(g.tensor()).map_err(Error::Numr)?;
+                shared_out = client.mul(&shared_out, &g).map_err(Error::Numr)?;
+            }
+            output = client.add(&output, &shared_out).map_err(Error::Numr)?;
         }
 
         Ok(Var::new(output, false))
@@ -366,7 +409,20 @@ impl<R: Runtime<DType = DType>> LlamaFfn<R> {
     {
         match self {
             LlamaFfn::Dense(mlp) => mlp.forward(client, x),
-            LlamaFfn::Moe(moe) => moe.forward(client, x),
+            LlamaFfn::Moe(moe) => {
+                // Routing reads `[tokens, hidden]`. Flatten `[B, S, hidden]`
+                // and restore the shape after.
+                let shape = x.shape().to_vec();
+                if shape.len() == 2 {
+                    return moe.forward(client, x);
+                }
+                let hidden = shape[shape.len() - 1];
+                let tokens = shape.iter().product::<usize>() / hidden.max(1);
+                let flat = numr::autograd::var_reshape(&var_contiguous(x)?, &[tokens, hidden])
+                    .map_err(Error::Numr)?;
+                let out = moe.forward(client, &flat)?;
+                numr::autograd::var_reshape(&out, &shape).map_err(Error::Numr)
+            }
         }
     }
 }
@@ -410,6 +466,7 @@ mod tests {
             intermediate_size: Some(inter),
             load_balance_alpha: 0.01,
             z_loss_alpha: 1e-3,
+            norm_topk_prob: None,
         };
 
         let moe_mlp = LlamaMoeMlp::new(gate_w, up_w, down_w, router, config);

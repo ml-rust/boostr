@@ -29,6 +29,10 @@ pub(super) enum AttentionStep<'a, R: Runtime> {
     /// One lane per sequence: `[4, batch, 1]` positions and each lane's
     /// own key range and write position.
     PerLane { lanes: &'a LaneKvStep<'a, R> },
+    /// Every lane continues one batch-1 prefix held in `prefix_kv`: `[4,
+    /// seq]` positions shared by the batch, each lane's cache holding only
+    /// its own suffix. An empty `prefix_kv` is [`AttentionStep::Shared`].
+    SharedPrefix { prefix_kv: &'a LayeredKvCache<R> },
 }
 
 impl<R: Runtime<DType = DType>> Qwen35Model<R>
@@ -70,8 +74,8 @@ where
     /// Walk every block over `hidden` `[batch, seq, hidden]` and return the
     /// last block's output, before `output_norm`. `positions` is the
     /// `[4, seq]` i32 IMROPE tensor every attention layer reads for
-    /// [`AttentionStep::Shared`], or the `[4, batch, 1]` per-lane tensor for
-    /// [`AttentionStep::PerLane`].
+    /// [`AttentionStep::Shared`] and [`AttentionStep::SharedPrefix`], or the
+    /// `[4, batch, 1]` per-lane tensor for [`AttentionStep::PerLane`].
     ///
     /// Under [`AttentionStep::PerLane`], a GDN block's recurrence runs over
     /// every row, occupied or not: there is no per-lane mask. A free row's
@@ -126,6 +130,18 @@ where
                         AttentionStep::PerLane { lanes } => layer.mixer.forward_batched_decode(
                             client, &normed, &self.rope, positions, cache, lanes,
                         )?,
+                        AttentionStep::SharedPrefix { prefix_kv } => {
+                            let prefix =
+                                prefix_kv.layer(attn_idx).ok_or_else(|| Error::ModelError {
+                                    reason: format!(
+                                        "qwen35: prefix KV cache missing for layer {i} \
+                                             (attn_idx={attn_idx})"
+                                    ),
+                                })?;
+                            layer.mixer.forward_shared_prefix(
+                                client, &normed, &self.rope, positions, prefix, cache,
+                            )?
+                        }
                     };
                     hidden = ffn_residual(
                         client,

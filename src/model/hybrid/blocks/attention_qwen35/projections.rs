@@ -1,7 +1,9 @@
-//! Step 1-2 of [`Qwen35AttentionBlock::forward`]: `attn_q`/`attn_k`/`attn_v`
-//! projections (fused via [`MaybeRotatedLinear::forward_batch`]), the joint
-//! query/gate split, and per-head q/k RMS norm. Covered by its own inline
-//! tests for the rotation-batching behavior and the query/gate split.
+//! The projection steps every prefill forward of [`Qwen35AttentionBlock`]
+//! shares: `attn_q`/`attn_k`/`attn_v` projections (fused via
+//! [`MaybeRotatedLinear::forward_batch`]), the joint query/gate split,
+//! per-head q/k RMS norm, IMROPE and the head-major layout
+//! (`rotated_heads`), and the sigmoid gate with `attn_output`
+//! (`gated_output`).
 //!
 //! `attn_q` is stored regrouped (see `layer`), so its output is
 //! `[query: num_heads * head_dim | gate: num_heads * head_dim]` and each
@@ -13,16 +15,29 @@
 use super::layer::Qwen35AttentionBlock;
 use crate::error::{Error, Result};
 use crate::model::traits::ModelClient;
-use crate::nn::MaybeRotatedLinear;
 use crate::nn::var_ops::var_contiguous;
+use crate::nn::{MaybeRotatedLinear, RoPE};
 use crate::quant::traits::DequantOps;
-use numr::autograd::{Var, var_narrow, var_reshape};
+use numr::autograd::{Var, var_narrow, var_permute, var_reshape, var_sigmoid_mul};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, FwhtOps, IndexingOps, ReduceOps,
     ScalarOps, ShapeOps, TensorOps, UnaryOps,
 };
 use numr::runtime::Runtime;
+use numr::tensor::Tensor;
+
+/// `q`, `k`, `v` head-major `[batch, heads, seq, head_dim]` and contiguous,
+/// `q`/`k` under IMROPE; `gate` token-major `[batch, seq, num_heads,
+/// head_dim]`.
+pub(super) struct Heads<R: Runtime> {
+    pub(super) q: Var<R>,
+    pub(super) gate: Var<R>,
+    pub(super) k: Var<R>,
+    pub(super) v: Var<R>,
+    pub(super) batch: usize,
+    pub(super) seq: usize,
+}
 
 /// `q`, `gate`, `k`, `v`, each `[batch, seq, heads, head_dim]` (`q`/`gate`
 /// with `heads = num_heads`, `k`/`v` with `heads = num_kv_heads`), `q`/`k`
@@ -88,6 +103,116 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
         let (q, k) = self.qk_norm.forward(client, &q, &k)?;
 
         Ok(Projections { q, gate, k, v })
+    }
+
+    /// The input side of a prefill forward over `x` `[batch, seq,
+    /// hidden_size]`: shape and rope-table checks, [`project`](Self::project),
+    /// IMROPE on q and k at `positions` (`[4, seq]`), and the head-major
+    /// layout.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ModelError`] when `x` is not `[batch, seq, hidden_size]` or
+    /// the rope table width is not `rope_dim / 2`; op errors propagate.
+    pub(super) fn rotated_heads<C>(
+        &self,
+        client: &C,
+        x: &Var<R>,
+        rope: &RoPE<R>,
+        positions: &Tensor<R>,
+    ) -> Result<Heads<R>>
+    where
+        C: ModelClient<R> + FwhtOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>
+            + DequantOps<R>,
+    {
+        let cfg = &self.cfg;
+        let shape = x.shape().to_vec();
+        if shape.len() != 3 || shape[2] != cfg.hidden_size {
+            return Err(Error::ModelError {
+                reason: format!(
+                    "qwen35_attention: expected [batch, seq, {}], got {shape:?}",
+                    cfg.hidden_size
+                ),
+            });
+        }
+        let (batch, seq) = (shape[0], shape[1]);
+        let half_rot = cfg.rope_dim / 2;
+        if rope.cos_cache().shape().get(1) != Some(&half_rot) {
+            return Err(Error::ModelError {
+                reason: format!(
+                    "qwen35_attention: rope table must be [max_pos, {half_rot}], got {:?}",
+                    rope.cos_cache().shape()
+                ),
+            });
+        }
+
+        let Projections { q, gate, k, v } = self.project(client, x, batch, seq)?;
+
+        // IMROPE on [batch, seq, heads, head_dim]. `mrope_selector` is built
+        // once in `new()` and reused for both q and k.
+        let (cos, sin) = (rope.cos_cache(), rope.sin_cache());
+        let n_rot = cfg.rope_dim;
+        let q =
+            client.mrope_interleaved_fused(&q, cos, sin, positions, &self.mrope_selector, n_rot)?;
+        let k =
+            client.mrope_interleaved_fused(&k, cos, sin, positions, &self.mrope_selector, n_rot)?;
+
+        // [B, S, H, D] -> [B, H, S, D].
+        let head_major = |t: &Var<R>| -> Result<Var<R>> {
+            var_contiguous(&var_permute(t, &[0, 2, 1, 3]).map_err(Error::Numr)?)
+        };
+        Ok(Heads {
+            q: head_major(&q)?,
+            gate,
+            k: head_major(&k)?,
+            v: head_major(&v)?,
+            batch,
+            seq,
+        })
+    }
+
+    /// The output side of a prefill forward: `attn` `[batch, num_heads,
+    /// seq, head_dim]` back to token-major, times `sigmoid(gate)`, heads
+    /// flattened, through `attn_output`. Returns `[batch, seq, hidden_size]`
+    /// as a detached `Var`.
+    pub(super) fn gated_output<C>(
+        &self,
+        client: &C,
+        attn: &Var<R>,
+        gate: &Var<R>,
+        batch: usize,
+        seq: usize,
+    ) -> Result<Var<R>>
+    where
+        C: ModelClient<R> + FwhtOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>
+            + DequantOps<R>,
+    {
+        let hd_total = self.cfg.num_heads * self.cfg.head_dim;
+        let attn = var_contiguous(&var_permute(attn, &[0, 2, 1, 3]).map_err(Error::Numr)?)?;
+        let gated = var_sigmoid_mul(gate, &attn, client).map_err(Error::Numr)?;
+        let gated = var_reshape(&gated, &[batch, seq, hd_total]).map_err(Error::Numr)?;
+        let out = self.attn_output.forward(client, &gated)?;
+        Ok(Var::new(out.tensor().clone(), false))
     }
 }
 

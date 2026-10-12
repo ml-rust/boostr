@@ -77,6 +77,49 @@ where
             + DequantOps<R>
             + MatmulOps<R>,
     {
+        self.gather_hidden(
+            client,
+            input_ids,
+            kv_cache,
+            gdn_state,
+            start_pos,
+            gather,
+            &AttentionStep::Shared,
+        )
+    }
+
+    /// [`forward_qwen35_gather`](Self::forward_qwen35_gather) with the
+    /// attention layers taking `step`. `step` is
+    /// [`AttentionStep::Shared`] or [`AttentionStep::SharedPrefix`]; both
+    /// read `[4, seq]` positions from `start_pos`. Errors as
+    /// `forward_qwen35_gather`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn gather_hidden<C>(
+        &self,
+        client: &C,
+        input_ids: &Tensor<R>,
+        kv_cache: &mut LayeredKvCache<R>,
+        gdn_state: &mut LayeredGdnState<R>,
+        start_pos: usize,
+        gather: &Tensor<R>,
+        step: &AttentionStep<'_, R>,
+    ) -> Result<Tensor<R>>
+    where
+        C: ModelClient<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>
+            + ConvOps<R>
+            + DequantOps<R>
+            + MatmulOps<R>,
+    {
         let shape = input_ids.shape();
         if shape.len() != 2 || shape[0] * shape[1] == 0 {
             return Err(Error::ModelError {
@@ -102,7 +145,7 @@ where
             &positions,
             kv_cache,
             gdn_state,
-            &AttentionStep::Shared,
+            step,
         )?;
         let flat = hidden
             .tensor()

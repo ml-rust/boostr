@@ -10,16 +10,16 @@
 //! 5. `attn ⊙ sigmoid(gate)`, then `attn_output`
 
 use super::layer::Qwen35AttentionBlock;
-use super::projections::Projections;
+use super::projections::Heads;
 use crate::error::{Error, Result};
 use crate::inference::KvCache;
 use crate::model::attention_mask::causal_window_mask;
 use crate::model::traits::ModelClient;
 use crate::nn::RoPE;
-use crate::nn::var_ops::{repeat_kv, var_contiguous};
+use crate::nn::var_ops::repeat_kv;
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
 use crate::quant::traits::DequantOps;
-use numr::autograd::{Var, var_permute, var_reshape, var_sigmoid_mul};
+use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, FwhtOps, IndexingOps, ReduceOps,
@@ -39,14 +39,18 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
     /// - `kv_cache`: holds the left context; the new k/v rows are appended.
     ///   The causal mask offsets queries by `kv_cache.seq_len()` before the
     ///   append, so `seq > 1` is a prefill and `seq == 1` a decode step.
+    ///   Every lane is written at `kv_cache.seq_len()`, so every lane must
+    ///   hold that many keys: lanes that start empty and take equal-length
+    ///   (right-padded) rows do.
     ///
     /// The output is a detached `Var`.
     ///
     /// # Errors
     ///
     /// [`Error::ModelError`] when `x` is not `[batch, seq, hidden_size]` or
-    /// the rope table width is not `rope_dim / 2`; cache and op errors
-    /// propagate.
+    /// the rope table width is not `rope_dim / 2`.
+    /// [`Error::InferenceError`] when the cache's lanes hold different
+    /// numbers of keys. Cache and op errors propagate.
     pub fn forward<C>(
         &self,
         client: &C,
@@ -70,54 +74,22 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
             + DequantOps<R>,
     {
         let cfg = &self.cfg;
-        let shape = x.shape().to_vec();
-        if shape.len() != 3 || shape[2] != cfg.hidden_size {
-            return Err(Error::ModelError {
-                reason: format!(
-                    "qwen35_attention: expected [batch, seq, {}], got {shape:?}",
-                    cfg.hidden_size
-                ),
-            });
-        }
-        let (batch, seq) = (shape[0], shape[1]);
-        let (h, hd) = (cfg.num_heads, cfg.head_dim);
-        let half_rot = cfg.rope_dim / 2;
-        if rope.cos_cache().shape().get(1) != Some(&half_rot) {
-            return Err(Error::ModelError {
-                reason: format!(
-                    "qwen35_attention: rope table must be [max_pos, {half_rot}], got {:?}",
-                    rope.cos_cache().shape()
-                ),
-            });
-        }
+        let h = cfg.num_heads;
 
-        // 1-2. `attn_q`/`attn_k`/`attn_v` projections (fused via
-        // `forward_batch` — any shared Hadamard rotation runs once), joint
-        // query/gate split, per-head q/k RMS norm. See `super::projections`.
-        let Projections { q, gate, k, v } = self.project(client, x, batch, seq)?;
+        // 1-3. Fused projections (any shared Hadamard rotation runs once),
+        // query/gate split, q/k RMS norm, IMROPE, head-major layout. See
+        // `super::projections`.
+        let Heads {
+            q,
+            gate,
+            k,
+            v,
+            batch,
+            seq,
+        } = self.rotated_heads(client, x, rope, positions)?;
 
-        // 3. IMROPE on [batch, seq, heads, head_dim]. `mrope_selector` is
-        // built once in `new()` and reused for both q and k.
-        let (cos, sin) = (rope.cos_cache(), rope.sin_cache());
-        let n_rot = cfg.rope_dim;
-        let q =
-            client.mrope_interleaved_fused(&q, cos, sin, positions, &self.mrope_selector, n_rot)?;
-        let k =
-            client.mrope_interleaved_fused(&k, cos, sin, positions, &self.mrope_selector, n_rot)?;
-
-        // 4. [B, S, H, D] -> [B, H, S, D]; append; causal GQA attention.
-        let q = var_contiguous(&var_permute(&q, &[0, 2, 1, 3]).map_err(Error::Numr)?)?;
-        let k = var_contiguous(&var_permute(&k, &[0, 2, 1, 3]).map_err(Error::Numr)?)?;
-        let v = var_contiguous(&var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?)?;
-
-        kv_cache.update_fused(k.tensor(), v.tensor(), client)?;
-        let (cached_k, cached_v) = kv_cache.get_kv()?;
-        let cached_k = Var::new(cached_k.contiguous()?, false);
-        let cached_v = Var::new(cached_v.contiguous()?, false);
-        let rep = cfg.head_repeat();
-        let cached_k = repeat_kv(&cached_k, rep).map_err(Error::Numr)?;
-        let cached_v = repeat_kv(&cached_v, rep).map_err(Error::Numr)?;
-
+        // 4. Append at the shared cursor; causal GQA attention.
+        let (cached_k, cached_v) = append_shared(client, kv_cache, &k, &v, cfg.head_repeat())?;
         let sk = kv_cache.seq_len();
         let (dtype, device) = (q.tensor().dtype(), q.tensor().device());
         let mask = Var::new(
@@ -126,13 +98,55 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
         );
         let attn = multi_head_attention_impl(client, &q, &cached_k, &cached_v, Some(&mask), h)?;
 
-        // 5. [B, H, S, D] -> [B, S, H, D]; gate; flatten heads; project.
-        let attn = var_contiguous(&var_permute(&attn, &[0, 2, 1, 3]).map_err(Error::Numr)?)?;
-        let gated = var_sigmoid_mul(&gate, &attn, client).map_err(Error::Numr)?;
-        let gated = var_reshape(&gated, &[batch, seq, h * hd]).map_err(Error::Numr)?;
-        let out = self.attn_output.forward(client, &gated)?;
-        Ok(Var::new(out.tensor().clone(), false))
+        // 5. Gate, flatten heads, `attn_output`.
+        self.gated_output(client, &attn, &gate, batch, seq)
     }
+}
+
+/// Append head-major `k`/`v` `[batch, num_kv_heads, seq, head_dim]` to
+/// every lane at the cache's shared cursor, then read every cached key and
+/// value with the KV heads repeated `rep` times: `[batch, num_heads, sk,
+/// head_dim]` each.
+///
+/// The shared cursor is right only while every lane holds the same number
+/// of keys: a fused append writes all lanes at `seq_len()`, so a shorter
+/// lane would gain a gap and a longer one would lose keys.
+///
+/// # Errors
+///
+/// [`Error::InferenceError`] when the stepped lanes hold different numbers
+/// of keys, naming each lane's length; cache errors propagate.
+pub(super) fn append_shared<R, C>(
+    client: &C,
+    kv_cache: &mut KvCache<R>,
+    k: &Var<R>,
+    v: &Var<R>,
+    rep: usize,
+) -> Result<(Var<R>, Var<R>)>
+where
+    R: Runtime<DType = DType>,
+    C: ModelClient<R>,
+    R::Client: TensorOps<R> + IndexingOps<R>,
+{
+    let cursor = kv_cache.seq_len();
+    if kv_cache.lane_lens().iter().any(|&len| len != cursor) {
+        return Err(Error::InferenceError {
+            reason: format!(
+                "qwen35_attention: a shared-cursor append writes every lane at position \
+                 {cursor}, but the lanes hold {:?} keys; lanes of unequal length need the \
+                 per-lane decode step",
+                kv_cache.lane_lens()
+            ),
+        });
+    }
+    kv_cache.update_fused(k.tensor(), v.tensor(), client)?;
+    let (cached_k, cached_v) = kv_cache.get_kv()?;
+    let cached_k = Var::new(cached_k.contiguous()?, false);
+    let cached_v = Var::new(cached_v.contiguous()?, false);
+    Ok((
+        repeat_kv(&cached_k, rep).map_err(Error::Numr)?,
+        repeat_kv(&cached_v, rep).map_err(Error::Numr)?,
+    ))
 }
 
 #[cfg(test)]

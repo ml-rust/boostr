@@ -6,7 +6,9 @@
 //! row-major; llama.cpp's `ne[0]` is the last axis here.
 
 use super::common::check_gdn_shapes;
+use super::ut_transform::ut_transform;
 use crate::error::{Error, Result};
+use numr::algorithm::linalg::LinearAlgebraAlgorithms;
 use numr::dtype::DType;
 use numr::ops::{
     BinaryOps, CumulativeOps, LinalgOps, MatmulOps, ScalarOps, ShapeOps, TensorOps, UnaryOps,
@@ -62,31 +64,6 @@ fn chunk_of<R: Runtime>(t: &Tensor<R>, c: usize) -> Result<Tensor<R>> {
     Ok(t.narrow(1, c, 1)?.contiguous()?.reshape(&shape)?)
 }
 
-/// `(I + A)^-1` for strictly lower-triangular `A: [.., n, n]`.
-///
-/// The fork solves `(I + A) X = -A` and adds `I`. `A` is nilpotent
-/// (`A^n = 0`), so the same inverse is the finite Neumann series
-/// `sum_{p < n} (-A)^p`, taken here as the product
-/// `(I + N)(I + N^2)(I + N^4)...` with `N = -A`. Every factor is a batched
-/// matmul, so no per-matrix triangular solve is needed.
-fn ut_inverse<R, C>(client: &C, a: &Tensor<R>, eye: &Tensor<R>, n: usize) -> Result<Tensor<R>>
-where
-    R: Runtime,
-    C: BinaryOps<R> + UnaryOps<R> + MatmulOps<R>,
-{
-    let neg = client.neg(a)?;
-    let mut inv = client.add(eye, &neg)?;
-    let mut power = neg;
-    // Factors needed so that the series reaches N^(n-1): ceil(log2(n)).
-    let levels = usize::BITS - (n - 1).leading_zeros();
-    for _ in 1..levels {
-        power = client.matmul(&power, &power)?;
-        let factor = client.add(eye, &power)?;
-        inv = client.matmul(&inv, &factor)?;
-    }
-    Ok(inv)
-}
-
 /// Chunked gated delta rule over a whole sequence.
 ///
 /// Per chunk (rows `j`, `i` index tokens in the chunk):
@@ -96,7 +73,8 @@ where
 /// decay   = exp(g_cs[j] - g_cs[i])  for i <= j          1 above the diagonal
 /// A       = (k_b @ k^T) * decay     strictly lower       k_b = k * beta
 /// KQ      = (q @ k^T) * decay       lower incl. diagonal
-/// T       = (I + A)^-1                                  UT transform
+/// T       = (I + A)^-1                                  UT transform, by
+///                                                       forward substitution
 /// U       = T @ v_b                                     v_b = v * beta
 /// W       = T @ (k_b * exp(g_cs))
 /// Q_g     = q * exp(g_cs)
@@ -129,6 +107,7 @@ where
         + CumulativeOps<R>
         + UtilityOps<R>
         + LinalgOps<R>
+        + LinearAlgebraAlgorithms<R>
         + TensorOps<R>,
 {
     let dims = check_gdn_shapes(q, k, v, g, beta, state)?;
@@ -161,9 +140,8 @@ where
 
     // Masks: [1, 1, cs, cs], broadcast over (N, n_chunks).
     let ones = Tensor::<R>::ones(&[cs, cs], dtype, device)?;
-    let mask_lower = client.tril(&ones, 0)?.reshape(&[1, 1, cs, cs])?;
-    let mask_strict = client.tril(&ones, -1)?.reshape(&[1, 1, cs, cs])?;
-    let eye = client.eye(cs, None, dtype)?.reshape(&[1, 1, cs, cs])?;
+    let mask_lower = LinalgOps::tril(client, &ones, 0)?.reshape(&[1, 1, cs, cs])?;
+    let mask_strict = LinalgOps::tril(client, &ones, -1)?.reshape(&[1, 1, cs, cs])?;
 
     // decay[j][i] = exp(g_cs[j] - g_cs[i]) for i <= j. The difference is
     // zeroed above the diagonal before exp (as ggml_tri does) so no
@@ -181,7 +159,7 @@ where
     let kq = client.matmul(&q, &k_t)?; // KQ[j][i] = q_j . k_i
     let kq = client.mul(&client.mul(&kq, &decay)?, &mask_lower)?;
 
-    let t = ut_inverse(client, &a, &eye, cs)?;
+    let t = ut_transform(client, &a, n, n_chunks, cs)?; // [N, n_chunks, cs, cs]
 
     let u = client.matmul(&t, &v_b)?; // [N, n_chunks, cs, S_v]
     let g_exp = client.exp(&g_cs)?.unsqueeze(3)?; // [N, n_chunks, cs, 1]
@@ -248,6 +226,40 @@ mod tests {
         }
     }
 
+    /// How gates and keys are drawn.
+    #[derive(Clone, Copy)]
+    struct Regime {
+        /// `g` is drawn from `-hi..-lo`.
+        g: (f32, f32),
+        /// `beta` is drawn from `lo..hi`.
+        beta: (f32, f32),
+        /// `None`: independent unit keys. `Some(eps)`: unit keys within
+        /// about `eps` of one shared direction, so all keys nearly coincide.
+        key_spread: Option<f32>,
+    }
+
+    /// Strong decay, independent keys.
+    const STRONG_DECAY: Regime = Regime {
+        g: (0.05, 1.0),
+        beta: (0.1, 0.9),
+        key_spread: None,
+    };
+
+    /// Weak decay, independent unit keys: the decay barely damps `A`.
+    const WEAK_DECAY: Regime = Regime {
+        g: (0.001, 0.02),
+        beta: (0.1, 0.9),
+        key_spread: None,
+    };
+
+    /// Weak decay and nearly parallel keys: every strictly lower entry of
+    /// `A` is close to `beta`, so `I + A` is far from the identity.
+    const OVERLAPPING_KEYS: Regime = Regime {
+        g: (0.001, 0.02),
+        beta: (0.7, 0.9),
+        key_spread: Some(0.02),
+    };
+
     struct Inputs {
         q: Tensor<CpuRuntime>,
         k: Tensor<CpuRuntime>,
@@ -257,19 +269,40 @@ mod tests {
         state: Tensor<CpuRuntime>,
     }
 
+    fn normalize(row: &[f32]) -> Vec<f32> {
+        let norm = row.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+        row.iter().map(|x| x / norm).collect()
+    }
+
     fn unit_rows(rng: &mut Lcg, rows: usize, dim: usize) -> Vec<f32> {
         let mut out = Vec::with_capacity(rows * dim);
         for _ in 0..rows {
             let row: Vec<f32> = (0..dim).map(|_| rng.uniform(-1.0, 1.0)).collect();
-            let norm = row.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
-            out.extend(row.iter().map(|x| x / norm));
+            out.extend(normalize(&row));
         }
         out
     }
 
+    /// Unit rows that each sit within about `eps` of one random direction.
+    fn clustered_unit_rows(rng: &mut Lcg, rows: usize, dim: usize, eps: f32) -> Vec<f32> {
+        let center: Vec<f32> = (0..dim).map(|_| rng.uniform(-1.0, 1.0)).collect();
+        let center = normalize(&center);
+        let mut out = Vec::with_capacity(rows * dim);
+        for _ in 0..rows {
+            let row: Vec<f32> = center
+                .iter()
+                .map(|c| c + eps * rng.uniform(-1.0, 1.0))
+                .collect();
+            out.extend(normalize(&row));
+        }
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn random_inputs(
         device: &CpuDevice,
         seed: u64,
+        regime: Regime,
         batch: usize,
         seq: usize,
         heads: usize,
@@ -279,10 +312,17 @@ mod tests {
         let mut rng = Lcg(seed);
         let rows = batch * seq * heads;
         let q = unit_rows(&mut rng, rows, s_k);
-        let k = unit_rows(&mut rng, rows, s_k);
+        let k = match regime.key_spread {
+            None => unit_rows(&mut rng, rows, s_k),
+            Some(eps) => clustered_unit_rows(&mut rng, rows, s_k, eps),
+        };
         let v: Vec<f32> = (0..rows * s_v).map(|_| rng.uniform(-1.0, 1.0)).collect();
-        let g: Vec<f32> = (0..rows).map(|_| -rng.uniform(0.05, 1.0)).collect();
-        let beta: Vec<f32> = (0..rows).map(|_| rng.uniform(0.1, 0.9)).collect();
+        let g: Vec<f32> = (0..rows)
+            .map(|_| -rng.uniform(regime.g.0, regime.g.1))
+            .collect();
+        let beta: Vec<f32> = (0..rows)
+            .map(|_| rng.uniform(regime.beta.0, regime.beta.1))
+            .collect();
         let state: Vec<f32> = (0..batch * heads * s_k * s_v)
             .map(|_| rng.uniform(-0.5, 0.5))
             .collect();
@@ -330,10 +370,23 @@ mod tests {
             .fold(0.0, f32::max)
     }
 
-    fn check_chunk_matches_step(seq: usize, chunk_size: usize, seed: u64) {
+    fn max_abs(a: &[f32]) -> f32 {
+        a.iter().map(|x| x.abs()).fold(0.0, f32::max)
+    }
+
+    /// Chunked prefill against the token-by-token recurrence.
+    ///
+    /// Both paths run in F32 with different operation orders. Each output
+    /// and state entry is a sum of O(1) terms over at most `seq` steps, so
+    /// the rounding gap stays near `seq` times the F32 unit roundoff
+    /// (6e-8) relative to the largest entry. The bound 1e-4 times
+    /// `max(1, largest entry)` leaves a margin of about 10x over that.
+    /// A UT transform that loses precision on overlapping keys misses it by
+    /// orders of magnitude.
+    fn check_chunk_matches_step(seq: usize, chunk_size: usize, seed: u64, regime: Regime) {
         let (client, device) = cpu_setup();
         let (batch, heads, s_k, s_v) = (2, 3, 8, 8);
-        let inp = random_inputs(&device, seed, batch, seq, heads, s_k, s_v);
+        let inp = random_inputs(&device, seed, regime, batch, seq, heads, s_k, s_v);
 
         let (o_chunk, s_chunk) = gdn_chunk_prefill_impl(
             &client, &inp.q, &inp.k, &inp.v, &inp.g, &inp.beta, &inp.state, chunk_size,
@@ -343,65 +396,70 @@ mod tests {
         assert_eq!(s_chunk.shape(), &[batch, heads, s_k, s_v]);
 
         let (o_step, s_step) = sequential(&client, &inp, seq);
+        let o_tol = 1e-4 * max_abs(&o_step).max(1.0);
+        let s_tol = 1e-4 * max_abs(&s_step).max(1.0);
         let o_diff = max_abs_diff(&o_chunk.to_vec::<f32>(), &o_step);
         let s_diff = max_abs_diff(&s_chunk.to_vec::<f32>(), &s_step);
         assert!(
-            o_diff < 1e-4,
-            "seq={seq} chunk={chunk_size}: output diff {o_diff}"
+            o_diff < o_tol,
+            "seq={seq} chunk={chunk_size}: output diff {o_diff} (tol {o_tol})"
         );
         assert!(
-            s_diff < 1e-4,
-            "seq={seq} chunk={chunk_size}: state diff {s_diff}"
+            s_diff < s_tol,
+            "seq={seq} chunk={chunk_size}: state diff {s_diff} (tol {s_tol})"
         );
     }
 
     #[test]
     fn chunk_matches_step_seq_130() {
-        check_chunk_matches_step(130, 64, 0x5eed_0001);
+        check_chunk_matches_step(130, 64, 0x5eed_0001, STRONG_DECAY);
     }
 
     #[test]
     fn chunk_matches_step_seq_64() {
-        check_chunk_matches_step(64, 64, 0x5eed_0002);
+        check_chunk_matches_step(64, 64, 0x5eed_0002, STRONG_DECAY);
     }
 
     #[test]
     fn chunk_matches_step_seq_1() {
-        check_chunk_matches_step(1, 64, 0x5eed_0003);
+        check_chunk_matches_step(1, 64, 0x5eed_0003, STRONG_DECAY);
     }
 
-    /// Chunk size that is not a power of two exercises the series length.
+    /// A chunk size that is not a power of two.
     #[test]
     fn chunk_matches_step_odd_chunk() {
-        check_chunk_matches_step(7, 3, 0x5eed_0004);
+        check_chunk_matches_step(7, 3, 0x5eed_0004, STRONG_DECAY);
     }
 
     #[test]
-    fn ut_inverse_is_exact_for_nilpotent() {
-        let (client, device) = cpu_setup();
-        // A strictly lower 3x3; (I + A) (I + A)^-1 must be I.
-        let a = Tensor::<CpuRuntime>::from_slice(
-            &[0.0f32, 0.0, 0.0, 0.5, 0.0, 0.0, -1.0, 2.0, 0.0],
-            &[1, 1, 3, 3],
-            &device,
-        )
-        .unwrap();
-        let eye = client
-            .eye(3, None, DType::F32)
-            .unwrap()
-            .reshape(&[1, 1, 3, 3])
-            .unwrap();
-        let inv = ut_inverse(&client, &a, &eye, 3).unwrap();
-        let lhs = client.add(&eye, &a).unwrap();
-        let prod = client.matmul(&lhs, &inv).unwrap().to_vec::<f32>();
-        let want = [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-        assert!(max_abs_diff(&prod, &want) < 1e-6, "{prod:?}");
+    fn chunk_32_matches_step_seq_130() {
+        check_chunk_matches_step(130, 32, 0x5eed_0005, STRONG_DECAY);
+    }
+
+    #[test]
+    fn weak_decay_chunk_64_matches_step() {
+        check_chunk_matches_step(130, 64, 0x5eed_0006, WEAK_DECAY);
+    }
+
+    #[test]
+    fn weak_decay_chunk_32_matches_step() {
+        check_chunk_matches_step(130, 32, 0x5eed_0007, WEAK_DECAY);
+    }
+
+    #[test]
+    fn overlapping_keys_chunk_64_matches_step() {
+        check_chunk_matches_step(130, 64, 0x5eed_0008, OVERLAPPING_KEYS);
+    }
+
+    #[test]
+    fn overlapping_keys_chunk_32_matches_step() {
+        check_chunk_matches_step(130, 32, 0x5eed_0009, OVERLAPPING_KEYS);
     }
 
     #[test]
     fn rejects_zero_chunk() {
         let (client, device) = cpu_setup();
-        let inp = random_inputs(&device, 1, 1, 2, 1, 4, 4);
+        let inp = random_inputs(&device, 1, STRONG_DECAY, 1, 2, 1, 4, 4);
         let out = gdn_chunk_prefill_impl(
             &client, &inp.q, &inp.k, &inp.v, &inp.g, &inp.beta, &inp.state, 0,
         );

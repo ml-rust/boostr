@@ -5,7 +5,8 @@
 //! otherwise. `gdn_step_from_conv` does the same with the kernel in
 //! `gdn_step_from_conv`, which also absorbs the split, L2 norm, head tiling
 //! and gate chain. `gdn_chunk_prefill` delegates to impl_generic: batched
-//! matmul plus elementwise ops, already native on this backend.
+//! matmul, elementwise ops and numr's batched triangular solve, all native
+//! on this backend.
 
 use crate::error::Result;
 use crate::ops::cuda::architecture::gdn_step::{gdn_step_fused, supports};

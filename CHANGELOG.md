@@ -23,6 +23,10 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`Qwen35AttentionBlock::forward`** — refuses a cache whose lanes hold different numbers of keys. The shared append writes every lane at one position, so such a cache produced wrong keys before. The error names each lane's length.
 
+### Fixed
+
+- **Chunked GDN prefill precision** — chunked prefill of Qwen3.5-style gated delta net layers lost precision on prompts longer than a few dozen tokens. The error grew through the layers, so the logits drifted from the reference model. The UT transform of each chunk now runs as forward substitution through numr's batched triangular solve, in one call for all chunks and heads. F16 and BF16 inputs solve in F32.
+
 ---
 
 ## [0.8.0] - 2026-10-12

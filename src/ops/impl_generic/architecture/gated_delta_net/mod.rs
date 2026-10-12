@@ -4,6 +4,7 @@ pub mod chunk;
 pub mod common;
 pub mod from_conv;
 pub mod step;
+pub mod ut_transform;
 
 pub use chunk::gdn_chunk_prefill_impl;
 pub use common::{GdnConvDims, GdnDims, check_gdn_conv_shapes, check_gdn_shapes};

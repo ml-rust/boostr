@@ -1,7 +1,8 @@
 //! WebGPU implementation of GatedDeltaNetOps
 //!
 //! Delegates to impl_generic: both paths are batched matmul plus
-//! elementwise ops, which are already native on this backend.
+//! elementwise ops, and the chunked path adds numr's batched triangular
+//! solve. All of them are native on this backend.
 
 use crate::error::Result;
 use crate::ops::impl_generic::architecture::gated_delta_net::{

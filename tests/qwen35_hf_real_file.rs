@@ -168,6 +168,80 @@ fn build_model(
     model
 }
 
+/// A long prompt's logits must match a reference at positions around the
+/// chunk boundaries of the recurrent layers.
+///
+/// `BOOSTR_QWEN35_HF_LONG` is a path prefix: `<prefix>.json` holds `ids` and
+/// `positions`, `<prefix>.f32` holds the reference logits at those positions,
+/// `[positions, vocab]` little-endian F32.
+#[test]
+fn long_prefill_matches_reference_logits() {
+    let Some(dir) = require_dir() else {
+        return;
+    };
+    let Some(prefix) = std::env::var("BOOSTR_QWEN35_HF_LONG").ok() else {
+        println!("skip: BOOSTR_QWEN35_HF_LONG not set");
+        return;
+    };
+    let meta: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(format!("{prefix}.json")).unwrap_or_else(|e| panic!("read ids: {e}")),
+    )
+    .unwrap_or_else(|e| panic!("parse ids: {e}"));
+    let ids: Vec<i64> = meta["ids"]
+        .as_array()
+        .expect("ids")
+        .iter()
+        .map(|v| v.as_i64().expect("id"))
+        .collect();
+    let positions: Vec<usize> = meta["positions"]
+        .as_array()
+        .expect("positions")
+        .iter()
+        .map(|v| v.as_u64().expect("position") as usize)
+        .collect();
+
+    let device = CpuDevice::new();
+    let client = CpuClient::new(device.clone());
+    let config = config(&dir);
+    let model = build_model(&dir, &config, &client, &device);
+    let vocab = config.vocab_size;
+
+    let (mut kv, mut gdn) = caches(&model, &config, &device);
+    let ids_t = Tensor::<CpuRuntime>::from_slice(&ids, &[1, ids.len()], &device)
+        .unwrap_or_else(|e| panic!("prompt tensor: {e}"));
+    let logits = model
+        .forward_qwen35(&client, &ids_t, &mut kv, &mut gdn, 0)
+        .unwrap_or_else(|e| panic!("prefill forward: {e}"));
+    let got = finite(&logits, "long prefill");
+
+    let bytes = std::fs::read(format!("{prefix}.f32")).unwrap_or_else(|e| panic!("read ref: {e}"));
+    let (words, tail) = bytes.as_chunks::<4>();
+    assert!(tail.is_empty(), "reference file is not whole f32 values");
+    let want: Vec<f32> = words.iter().map(|b| f32::from_le_bytes(*b)).collect();
+    assert_eq!(
+        want.len(),
+        positions.len() * vocab,
+        "reference size mismatch"
+    );
+
+    let mut worst = 0.0f32;
+    for (i, &pos) in positions.iter().enumerate() {
+        let g = &got[pos * vocab..(pos + 1) * vocab];
+        let w = &want[i * vocab..(i + 1) * vocab];
+        let diff = g
+            .iter()
+            .zip(w)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        println!("pos {pos}: max abs diff {diff}");
+        worst = worst.max(diff);
+    }
+    assert!(
+        worst < 5e-2,
+        "long prefill differs from the reference by {worst}"
+    );
+}
+
 /// Prefill logits must match a reference dump of the same checkpoint.
 ///
 /// `BOOSTR_QWEN35_HF_REF` names a little-endian F32 file holding the

@@ -48,7 +48,7 @@ pub use groupnorm::GroupNorm;
 pub use hadamard::HadamardRotation;
 pub use layernorm::LayerNorm;
 pub use linear::{Linear, MaybeQuantLinear, MaybeRotatedLinear, QuantLinear, RotatedLinear};
-pub use lora::LoraLinear;
+pub use lora::{FusedLoraPart, LoraFactors, LoraLinear};
 pub use lora_metadata::{
     LoraMetadata, build_lora_metadata, check_lora_metadata, parse_lora_metadata,
 };

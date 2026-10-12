@@ -6,9 +6,10 @@
 //!
 //! The permutation touches output rows only: an input-side Hadamard
 //! rotation, a quantized weight's activation contract and the bias all
-//! carry over. Dense and block-quantized weights regroup; an AWQ/GPTQ
-//! packed weight interleaves output columns inside its packing and is
-//! refused.
+//! carry over. A LoRA adapter's `lora_b` rows move with the base rows, and
+//! its input-side `lora_a` stays. Dense and block-quantized weights
+//! regroup; an AWQ/GPTQ packed weight interleaves output columns inside
+//! its packing and is refused.
 
 use super::dense::Linear;
 use super::maybe_quant_linear::MaybeQuantLinear;
@@ -16,6 +17,7 @@ use super::maybe_rotated::MaybeRotatedLinear;
 use super::quant_linear::QuantLinear;
 use super::rotated_linear::RotatedLinear;
 use crate::error::{Error, Result};
+use crate::nn::lora::LoraLinear;
 use crate::quant::regroup_rows::regroup_stride;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
@@ -108,10 +110,33 @@ impl<R: Runtime<DType = DType>> MaybeQuantLinear<R> {
     }
 }
 
+impl<R: Runtime<DType = DType>> LoraLinear<R> {
+    /// Output rows of the base and of `lora_b` regrouped identically from
+    /// `[groups, parts, per]` to `[parts, groups, per]`. `lora_a`, the
+    /// scaling and the trainable flag carry over. The factors carry fresh
+    /// parameter ids.
+    ///
+    /// # Errors
+    ///
+    /// As [`MaybeQuantLinear::regroup_rows`] and [`regroup_leading_axis`].
+    pub fn regroup_rows(&self, groups: usize, parts: usize) -> Result<Self> {
+        let base = self.base().regroup_rows(groups, parts)?;
+        let lora_b = regroup_leading_axis(self.lora_b().tensor(), groups, parts)?;
+        LoraLinear::from_scaled_weights(
+            base,
+            self.lora_a().tensor().clone(),
+            lora_b,
+            self.scaling(),
+            self.is_trainable(),
+        )
+    }
+}
+
 impl<R: Runtime<DType = DType>> MaybeRotatedLinear<R> {
     /// Output rows regrouped from `[groups, parts, per]` to
     /// `[parts, groups, per]`; a Hadamard rotation stays attached, as it
-    /// acts on the input side.
+    /// acts on the input side, and an adapter's `lora_b` rows move with the
+    /// base rows.
     ///
     /// # Errors
     ///
@@ -126,6 +151,7 @@ impl<R: Runtime<DType = DType>> MaybeRotatedLinear<R> {
                     rotated.rotation().clone(),
                 )?)))
             }
+            Self::Lora(lora) => Ok(Self::Lora(Box::new(lora.regroup_rows(groups, parts)?))),
         }
     }
 }
@@ -221,6 +247,54 @@ mod tests {
                     "token {t} row {r}: {got} vs {want}"
                 );
             }
+        }
+    }
+
+    /// Regrouping an adapted projection equals regrouping the weight with
+    /// the adapter merged in.
+    #[test]
+    fn adapted_regroup_matches_regrouped_merged_weight() {
+        use numr::ops::{BinaryOps, MatmulOps, ScalarOps};
+
+        const RANK: usize = 3;
+        const SCALING: f64 = 1.25;
+        let (client, device) = cpu_setup();
+        let small = |shape: &[usize], seed: u32| {
+            client
+                .mul_scalar(&tensor(&device, shape, seed), 0.1)
+                .unwrap()
+        };
+        let w = small(&[ROWS, COLS], 13);
+        let a = small(&[RANK, COLS], 17);
+        let b = small(&[ROWS, RANK], 19);
+        let mut layer = MaybeRotatedLinear::Plain(MaybeQuantLinear::Standard(Linear::new(
+            w.clone(),
+            None,
+            false,
+        )));
+        layer
+            .attach_adapter(a.clone(), b.clone(), SCALING as f32)
+            .unwrap();
+        let regrouped = layer.regroup_rows(GROUPS, PARTS).unwrap();
+        assert!(regrouped.is_adapted());
+
+        let ba = client.matmul(&b, &a).unwrap();
+        let merged = client
+            .add(&w, &client.mul_scalar(&ba, SCALING).unwrap())
+            .unwrap();
+        let merged = regroup_leading_axis(&merged, GROUPS, PARTS).unwrap();
+        let merged_t = merged.t().unwrap().contiguous().unwrap();
+        let x = small(&[2, COLS], 23);
+        let want: Vec<f32> = client.matmul(&x, &merged_t).unwrap().to_vec();
+
+        let got: Vec<f32> = regrouped
+            .forward(&client, &Var::new(x, false))
+            .unwrap()
+            .tensor()
+            .to_vec();
+        assert_eq!(got.len(), want.len());
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!((g - w).abs() < 1e-5, "element {i}: {g} vs {w}");
         }
     }
 }

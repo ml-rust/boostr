@@ -27,12 +27,26 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
         R::Client: TensorOps<R> + BinaryOps<R> + ScalarOps<R> + DequantOps<R>,
     {
         let base_out = self.base.forward(client, input)?;
+        self.add_adapter(client, input, &base_out)
+    }
 
+    /// `base_out + (input @ A^T @ B^T) * scaling`: the adapter half of
+    /// [`Self::forward`] over a base output the caller already holds.
+    ///
+    /// A caller that runs several bases through one fused
+    /// [`MaybeQuantLinear::forward_batch`](crate::nn::MaybeQuantLinear::forward_batch)
+    /// adds each adapter here. `base_out` must be this layer's base applied
+    /// to `input`.
+    pub fn add_adapter<C>(&self, client: &C, input: &Var<R>, base_out: &Var<R>) -> Result<Var<R>>
+    where
+        C: RuntimeClient<R> + TensorOps<R> + ScalarOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R>,
+    {
         // LoRA path: input @ A^T @ B^T * scaling
-        let a_t = var_transpose(&self.lora_a).map_err(crate::error::Error::Numr)?;
-        let lora_mid = var_matmul(input, &a_t, client).map_err(crate::error::Error::Numr)?;
-        let b_t = var_transpose(&self.lora_b).map_err(crate::error::Error::Numr)?;
-        let lora_out = var_matmul(&lora_mid, &b_t, client).map_err(crate::error::Error::Numr)?;
+        let a_t = var_transpose(&self.lora_a)?;
+        let lora_mid = var_matmul(input, &a_t, client)?;
+        let b_t = var_transpose(&self.lora_b)?;
+        let lora_out = var_matmul(&lora_mid, &b_t, client)?;
 
         // Scale and add — TRACKED.
         //
@@ -40,11 +54,8 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
         // with `Var::new` produces a LEAF with grad_fn = None, which severs the
         // graph: backward would reach neither `lora_a`/`lora_b` nor the base, so
         // every LoRA adapter would silently never train.
-        let scaled = var_mul_scalar(&lora_out, self.scaling as f64, client)
-            .map_err(crate::error::Error::Numr)?;
-        let result = var_add(&base_out, &scaled, client).map_err(crate::error::Error::Numr)?;
-
-        Ok(result)
+        let scaled = var_mul_scalar(&lora_out, f64::from(self.scaling), client)?;
+        Ok(var_add(base_out, &scaled, client)?)
     }
 }
 

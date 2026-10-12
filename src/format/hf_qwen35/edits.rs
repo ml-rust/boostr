@@ -3,7 +3,7 @@
 //! `1 + w` norm offset. Every edit stays in the tensor's dtype and on its
 //! device.
 
-use super::reorder::reorder_v_heads;
+use super::reorder::{reorder_qkv_v_rows, reorder_v_heads};
 use crate::error::{Error, Result};
 use crate::model::config::GdnConfig;
 use crate::nn::{VarMap, Weight};
@@ -56,30 +56,6 @@ where
     Ok(client.neg(&client.exp(a_log)?)?)
 }
 
-/// `t` (`[q | k | v, ..]` rows) with only the V rows reordered.
-fn reorder_v_tail<R: Runtime<DType = DType>>(t: &Tensor<R>, gdn: &GdnConfig) -> Result<Tensor<R>>
-where
-    R::Client: ShapeOps<R>,
-{
-    let qk = 2 * gdn.key_dim();
-    let rows = t.shape().first().copied().unwrap_or(0);
-    if rows != gdn.qkv_dim() {
-        return Err(model_error(format!(
-            "{rows} rows; q, k and v need {}",
-            gdn.qkv_dim()
-        )));
-    }
-    let head = t.narrow(0, 0, qk)?.contiguous()?;
-    let tail = reorder_v_heads(
-        &t.narrow(0, qk, rows - qk)?,
-        0,
-        gdn.key_heads,
-        gdn.head_repeat(),
-        gdn.state_size,
-    )?;
-    Ok(Tensor::cat(&[&head, &tail], 0)?)
-}
-
 /// The value-head reorder and the `A_log` edit of the GDN layer whose
 /// tensors sit under `prefix` (`model.layers.{i}.linear_attn`).
 pub(super) fn edit_gdn_layer<R: Runtime<DType = DType>>(
@@ -92,7 +68,9 @@ where
 {
     let (h_k, rep, s) = (gdn.key_heads, gdn.head_repeat(), gdn.state_size);
     for name in ["in_proj_qkv.weight", "conv1d.weight"] {
-        edit(map, &format!("{prefix}.{name}"), |t| reorder_v_tail(t, gdn))?;
+        edit(map, &format!("{prefix}.{name}"), |t| {
+            reorder_qkv_v_rows(t, gdn)
+        })?;
     }
     edit(map, &format!("{prefix}.in_proj_z.weight"), |t| {
         reorder_v_heads(t, 0, h_k, rep, s)
@@ -120,22 +98,6 @@ mod tests {
         Tensor::from_slice(v, shape, device).unwrap()
     }
 
-    /// Two key heads, two value heads each, head width 1: key dim 2,
-    /// q/k rows `0..4`, v rows `4..8`.
-    fn gdn() -> GdnConfig {
-        GdnConfig {
-            hidden_size: 4,
-            conv_kernel: 2,
-            state_size: 1,
-            key_heads: 2,
-            value_heads: 4,
-            inner_size: 4,
-            rms_eps: 1e-6,
-            chunk_size: 64,
-            v_grouped: false,
-        }
-    }
-
     #[test]
     fn plus_one_keeps_the_dtype() {
         let device = CpuDevice::new();
@@ -150,18 +112,6 @@ mod tests {
         let device = CpuDevice::new();
         let out = neg_exp(&t(&[0.0, 0.0], &[2], &device)).unwrap();
         assert_eq!(out.to_vec::<f32>(), vec![-1.0, -1.0]);
-    }
-
-    #[test]
-    fn only_the_v_rows_move() {
-        let device = CpuDevice::new();
-        let rows: Vec<f32> = (0..8).map(|r| r as f32).collect();
-        let out = reorder_v_tail(&t(&rows, &[8, 1], &device), &gdn()).unwrap();
-        assert_eq!(
-            out.to_vec::<f32>(),
-            vec![0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 5.0, 7.0]
-        );
-        assert!(reorder_v_tail(&t(&rows[..6], &[6, 1], &device), &gdn()).is_err());
     }
 
     #[test]

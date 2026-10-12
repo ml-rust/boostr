@@ -63,6 +63,8 @@ pub struct Qwen35Model<R: Runtime> {
     pub(super) norm: RmsNorm<R>,
     pub(super) lm_head: MaybeRotatedLinear<R>,
     pub(super) rope: RoPE<R>,
+    /// Modules an attached PEFT adapter targets, by base-checkpoint name.
+    pub(super) adapted_modules: Vec<String>,
 }
 
 impl<R: Runtime<DType = DType>> Qwen35Model<R> {
@@ -159,6 +161,7 @@ impl<R: Runtime<DType = DType>> Qwen35Model<R> {
             norm,
             lm_head,
             rope,
+            adapted_modules: Vec::new(),
         })
     }
 }

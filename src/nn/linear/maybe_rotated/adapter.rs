@@ -1,10 +1,12 @@
 //! [`MaybeRotatedLinear::attach_adapter`]: turning a plain projection into
-//! a LoRA-adapted one in place.
+//! a LoRA-adapted one in place, and [`MaybeRotatedLinear::attach_factors`],
+//! the same after casting the factors to the projection's compute dtype.
 
 use super::layer::MaybeRotatedLinear;
 use crate::error::{Error, Result};
-use crate::nn::lora::LoraLinear;
+use crate::nn::lora::{LoraFactors, LoraLinear};
 use numr::dtype::DType;
+use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -50,6 +52,23 @@ impl<R: Runtime<DType = DType>> MaybeRotatedLinear<R> {
         let lora = LoraLinear::from_scaled_weights(base, lora_a, lora_b, scaling, false)?;
         *self = Self::Lora(Box::new(lora));
         Ok(())
+    }
+
+    /// [`Self::attach_adapter`] after casting `factors` with
+    /// [`LoraFactors::cast_for`]: to a dense base's weight dtype, else to
+    /// `activation_dtype`, the dtype the projection's input arrives in.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::attach_adapter`]; numr errors from the cast propagate.
+    pub fn attach_factors<C: TypeConversionOps<R>>(
+        &mut self,
+        client: &C,
+        factors: LoraFactors<R>,
+        activation_dtype: DType,
+    ) -> Result<()> {
+        let factors = factors.cast_for(client, self.base(), activation_dtype)?;
+        self.attach_adapter(factors.lora_a, factors.lora_b, factors.scaling)
     }
 }
 
@@ -137,6 +156,31 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    /// F32 factors over an F64 dense base attach as F64.
+    #[test]
+    fn attach_factors_casts_to_the_dense_base_dtype() {
+        let (client, device) = cpu_setup();
+        let w = client
+            .cast(&tensor(&device, &[OUT, IN], 0.05), DType::F64)
+            .unwrap();
+        let mut layer: MaybeRotatedLinear<CpuRuntime> = dense(&w).into();
+        let factors = LoraFactors {
+            lora_a: tensor(&device, &[RANK, IN], 0.3),
+            lora_b: tensor(&device, &[OUT, RANK], 0.4),
+            scaling: SCALING,
+        };
+        assert!(
+            layer
+                .attach_adapter(factors.lora_a.clone(), factors.lora_b.clone(), SCALING)
+                .is_err(),
+            "uncast F32 factors over an F64 base are refused"
+        );
+        layer.attach_factors(&client, factors, DType::F32).unwrap();
+        let adapter = layer.adapter().expect("attached");
+        assert_eq!(adapter.lora_a().tensor().dtype(), DType::F64);
+        assert_eq!(adapter.lora_b().tensor().dtype(), DType::F64);
     }
 
     #[test]

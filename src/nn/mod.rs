@@ -73,7 +73,7 @@ pub use quant_embedding::{MaybeQuantEmbedding, QuantEmbedding};
 pub use rmsnorm::RmsNorm;
 pub use rope::RoPE;
 pub use rotated_embedding::{MaybeRotatedEmbedding, RotatedEmbedding};
-pub use rotated_mlp::RotatedMlp;
+pub use rotated_mlp::{MlpProjection, RotatedMlp};
 pub use stochastic_depth::StochasticDepth;
 pub use timestep_embedding::{SinusoidalPosEmb, TimestepEmbedding};
 pub use var_builder::VarBuilder;

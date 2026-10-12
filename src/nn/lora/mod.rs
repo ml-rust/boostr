@@ -10,10 +10,12 @@
 //!   adapter updates
 //! - `scaled`: construction from loaded factors with a given scaling
 //! - `fused`: one block-diagonal adapter over a row-concatenated base
+//! - `cast`: loaded factors cast to the dtype the adapter computes in
 //! - `forward`: the tracked forward pass
 //! - `merge`: folding the adapter into a dense base
 //! - `module`: the [`Module`](crate::nn::module::Module) impl
 
+mod cast;
 mod forward;
 mod fused;
 mod layer;

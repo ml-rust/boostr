@@ -13,13 +13,15 @@
 //! runs one dot product per output row with a fixed reduction order at
 //! these shapes. The concatenated rows therefore hold the same bits the
 //! separate projections would.
+//!
+//! `gate_adapter` adds unmerged LoRA adapters to either form.
 
 use crate::error::{Error, Result};
-use crate::nn::{Linear, MaybeQuantLinear};
+use crate::nn::{Linear, LoraLinear, MaybeLoraLinear, MaybeQuantLinear};
 use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::Var;
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, MatmulOps, ShapeOps, TensorOps, TypeConversionOps};
+use numr::ops::{BinaryOps, MatmulOps, ScalarOps, ShapeOps, TensorOps, TypeConversionOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 
@@ -35,15 +37,25 @@ pub(super) enum GateProjections<R: Runtime> {
         alpha_id: TensorId,
         beta_id: TensorId,
     },
+    /// `Fused` with one unmerged block-diagonal adapter: rows `[0, heads)`
+    /// read the `ssm_alpha` adapter, rows `[heads, 2 * heads)` the
+    /// `ssm_beta` one. A projection without an adapter owns zero rows of
+    /// `lora_b`.
+    FusedAdapted {
+        lora: Box<LoraLinear<R>>,
+        heads: usize,
+        alpha_id: TensorId,
+        beta_id: TensorId,
+    },
     /// Kept apart: at least one projection is block-quantized, so there is
     /// no dense weight to concatenate.
     Separate(Box<SeparateGates<R>>),
 }
 
-/// The two projections kept apart.
+/// The two projections kept apart, each with its own adapter or none.
 pub(super) struct SeparateGates<R: Runtime> {
-    pub(super) alpha: MaybeQuantLinear<R>,
-    pub(super) beta: MaybeQuantLinear<R>,
+    pub(super) alpha: MaybeLoraLinear<R>,
+    pub(super) beta: MaybeLoraLinear<R>,
 }
 
 impl<R: Runtime<DType = DType>> GateProjections<R> {
@@ -60,7 +72,12 @@ impl<R: Runtime<DType = DType>> GateProjections<R> {
     {
         let (alpha_dense, beta_dense) = match (&alpha, &beta) {
             (MaybeQuantLinear::Standard(a), MaybeQuantLinear::Standard(b)) => (a, b),
-            _ => return Ok(Self::Separate(Box::new(SeparateGates { alpha, beta }))),
+            _ => {
+                return Ok(Self::Separate(Box::new(SeparateGates {
+                    alpha: alpha.into(),
+                    beta: beta.into(),
+                })));
+            }
         };
         let heads = alpha_dense.weight().tensor().shape()[0];
         let alpha_id = alpha_dense.weight().id();
@@ -87,10 +104,11 @@ impl<R: Runtime<DType = DType>> GateProjections<R> {
     where
         C: RuntimeClient<R>
             + TensorOps<R>
+            + ScalarOps<R>
             + QuantMatmulOps<R>
             + BinaryOps<R>
             + TypeConversionOps<R>,
-        R::Client: TensorOps<R> + DequantOps<R> + MatmulOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + DequantOps<R> + MatmulOps<R>,
     {
         match self {
             Self::Fused {
@@ -99,15 +117,19 @@ impl<R: Runtime<DType = DType>> GateProjections<R> {
                 alpha_id,
                 beta_id,
             } => {
-                if crate::quant::imatrix::is_armed() {
-                    crate::quant::imatrix::observe(*alpha_id, client, x.tensor())?;
-                    crate::quant::imatrix::observe(*beta_id, client, x.tensor())?;
-                }
+                observe_both(client, x, *alpha_id, *beta_id)?;
                 let both = linear.forward(client, x)?;
-                let both = both.tensor();
-                let alpha = both.narrow(-1, 0, *heads).map_err(Error::Numr)?;
-                let beta = both.narrow(-1, *heads, *heads).map_err(Error::Numr)?;
-                Ok((alpha, beta))
+                split_heads(both.tensor(), *heads)
+            }
+            Self::FusedAdapted {
+                lora,
+                heads,
+                alpha_id,
+                beta_id,
+            } => {
+                observe_both(client, x, *alpha_id, *beta_id)?;
+                let both = lora.forward(client, x)?;
+                split_heads(both.tensor(), *heads)
             }
             Self::Separate(gates) => {
                 let SeparateGates { alpha, beta } = gates.as_ref();
@@ -119,6 +141,26 @@ impl<R: Runtime<DType = DType>> GateProjections<R> {
     }
 }
 
+/// Record `x` for both gate weights when an importance collection is armed.
+fn observe_both<R, C>(client: &C, x: &Var<R>, alpha_id: TensorId, beta_id: TensorId) -> Result<()>
+where
+    R: Runtime<DType = DType>,
+    C: RuntimeClient<R> + TensorOps<R>,
+{
+    if crate::quant::imatrix::is_armed() {
+        crate::quant::imatrix::observe(alpha_id, client, x.tensor())?;
+        crate::quant::imatrix::observe(beta_id, client, x.tensor())?;
+    }
+    Ok(())
+}
+
+/// `(alpha_raw, beta_raw)`: views of the first and second `heads` columns.
+fn split_heads<R: Runtime>(both: &Tensor<R>, heads: usize) -> Result<(Tensor<R>, Tensor<R>)> {
+    let alpha = both.narrow(-1, 0, heads).map_err(Error::Numr)?;
+    let beta = both.narrow(-1, heads, heads).map_err(Error::Numr)?;
+    Ok((alpha, beta))
+}
+
 /// The concatenated bias, `None` when neither projection has one.
 fn fused_bias<R: Runtime<DType = DType>>(
     alpha: &Linear<R>,
@@ -128,10 +170,10 @@ fn fused_bias<R: Runtime<DType = DType>>(
 where
     R::Client: ShapeOps<R>,
 {
-    let (a, b) = match (alpha.bias(), beta.bias()) {
-        (None, None) => return Ok(None),
-        (a, b) => (a, b),
-    };
+    let (a, b) = (alpha.bias(), beta.bias());
+    if a.is_none() && b.is_none() {
+        return Ok(None);
+    }
     let weight = alpha.weight().tensor();
     let zeros = || Tensor::<R>::zeros(&[heads], weight.dtype(), weight.device());
     let a = match a {
@@ -183,8 +225,8 @@ mod tests {
         let x = Var::new(tensor(4, &[2, 3, HIDDEN], &device), false);
 
         let separate = GateProjections::Separate(Box::new(SeparateGates {
-            alpha: dense(wa.clone(), None),
-            beta: dense(wb.clone(), Some(bb.clone())),
+            alpha: dense(wa.clone(), None).into(),
+            beta: dense(wb.clone(), Some(bb.clone())).into(),
         }));
         let fused = GateProjections::new(dense(wa, None), dense(wb, Some(bb))).unwrap();
         assert!(matches!(fused, GateProjections::Fused { heads: HEADS, .. }));

@@ -5,8 +5,14 @@
 //! tiled order, where value head `h_v` reads key head `h_v % key_heads`:
 //! `[k0v0, k1v0, .., k0v1, k1v1, ..]`. The llama.cpp converter makes the same
 //! move in `_LinearAttentionVReorderBase._reorder_v_heads`.
+//!
+//! [`reorder_qkv_v_rows`] applies it to the V rows of an `in_proj_qkv`-shaped
+//! tensor only.
 
 use crate::error::{Error, Result};
+use crate::model::config::GdnConfig;
+use numr::dtype::DType;
+use numr::ops::ShapeOps;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -60,10 +66,79 @@ pub fn reorder_v_heads<R: Runtime>(
         .reshape(&shape)?)
 }
 
+/// `t` with `[q | k | v]` rows (`gdn.qkv_dim()` of them, `2 * key_dim`
+/// query and key rows first) and only the V rows moved from grouped to
+/// tiled order, value heads of width `state_size`. Other dims keep their
+/// order. Fits `in_proj_qkv`, `conv1d` and a LoRA `lora_B` of
+/// `in_proj_qkv`.
+///
+/// # Errors
+///
+/// [`Error::ModelError`] when the row count is not `gdn.qkv_dim()`; numr
+/// errors propagate.
+pub fn reorder_qkv_v_rows<R: Runtime<DType = DType>>(
+    t: &Tensor<R>,
+    gdn: &GdnConfig,
+) -> Result<Tensor<R>>
+where
+    R::Client: ShapeOps<R>,
+{
+    let qk = 2 * gdn.key_dim();
+    let rows = t.shape().first().copied().unwrap_or(0);
+    if rows != gdn.qkv_dim() {
+        return Err(Error::ModelError {
+            reason: format!(
+                "reorder_qkv_v_rows: shape {:?} has {rows} rows; q, k and v need {}",
+                t.shape(),
+                gdn.qkv_dim()
+            ),
+        });
+    }
+    let head = t.narrow(0, 0, qk)?.contiguous()?;
+    let tail = reorder_v_heads(
+        &t.narrow(0, qk, rows - qk)?,
+        0,
+        gdn.key_heads,
+        gdn.head_repeat(),
+        gdn.state_size,
+    )?;
+    Ok(Tensor::cat(&[&head, &tail], 0)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use numr::runtime::cpu::{CpuDevice, CpuRuntime};
+
+    /// Two key heads, two value heads each, head width 1: key dim 2,
+    /// q/k rows `0..4`, v rows `4..8`.
+    fn gdn() -> GdnConfig {
+        GdnConfig {
+            hidden_size: 4,
+            conv_kernel: 2,
+            state_size: 1,
+            key_heads: 2,
+            value_heads: 4,
+            inner_size: 4,
+            rms_eps: 1e-6,
+            chunk_size: 64,
+            v_grouped: false,
+        }
+    }
+
+    #[test]
+    fn only_the_v_rows_move() {
+        let device = CpuDevice::new();
+        let rows: Vec<f32> = (0..8).map(|r| r as f32).collect();
+        let t = Tensor::<CpuRuntime>::from_slice(&rows, &[8, 1], &device).unwrap();
+        let out = reorder_qkv_v_rows(&t, &gdn()).unwrap();
+        assert_eq!(
+            out.to_vec::<f32>(),
+            vec![0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 5.0, 7.0]
+        );
+        let short = Tensor::<CpuRuntime>::from_slice(&rows[..6], &[6, 1], &device).unwrap();
+        assert!(reorder_qkv_v_rows(&short, &gdn()).is_err());
+    }
 
     fn iota(shape: &[usize], device: &CpuDevice) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();

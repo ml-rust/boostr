@@ -10,9 +10,13 @@
 //! share ONCE and each fused `quant_matmul_batch` (rotated and plain
 //! members split into one call each) instead of one `forward` per
 //! projection, then numr's fused `var_silu_mul`, then `down`.
+//!
+//! [`RotatedMlp::attach_adapter`] gives one projection an unmerged LoRA
+//! adapter.
 
 use crate::error::{Error, Result};
 use crate::nn::linear::MaybeRotatedLinear;
+use crate::nn::lora::LoraFactors;
 use crate::nn::module::Module;
 use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::{Var, var_silu_mul};
@@ -23,6 +27,14 @@ use numr::ops::{
 };
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::TensorId;
+
+/// One projection of a [`RotatedMlp`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MlpProjection {
+    Gate,
+    Up,
+    Down,
+}
 
 /// SwiGLU MLP whose three projections may each be Hadamard-rotated.
 pub struct RotatedMlp<R: Runtime> {
@@ -118,6 +130,28 @@ impl<R: Runtime<DType = DType>> RotatedMlp<R> {
 
     pub fn down(&self) -> &MaybeRotatedLinear<R> {
         &self.down
+    }
+
+    /// Attach an unmerged adapter to `projection` through
+    /// [`MaybeRotatedLinear::attach_factors`]. The base shape is unchanged,
+    /// so the shape checks of [`Self::new`] still hold.
+    ///
+    /// # Errors
+    ///
+    /// As [`MaybeRotatedLinear::attach_factors`].
+    pub fn attach_adapter<C: TypeConversionOps<R>>(
+        &mut self,
+        client: &C,
+        projection: MlpProjection,
+        factors: LoraFactors<R>,
+        activation_dtype: DType,
+    ) -> Result<()> {
+        let linear = match projection {
+            MlpProjection::Gate => &mut self.gate,
+            MlpProjection::Up => &mut self.up,
+            MlpProjection::Down => &mut self.down,
+        };
+        linear.attach_factors(client, factors, activation_dtype)
     }
 
     pub fn parameters(&self) -> Vec<(TensorId, &Var<R>)> {

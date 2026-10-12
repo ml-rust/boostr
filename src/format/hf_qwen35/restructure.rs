@@ -107,7 +107,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::format::restructure_hf_checkpoint;
     use crate::inference::{LayeredGdnState, LayeredKvCache, LayeredKvCacheConfig};
@@ -325,7 +325,7 @@ mod tests {
 
     /// The checkpoint in Hugging Face naming, plus one MTP and one vision
     /// tensor, and the same weights in the loader layout.
-    fn maps(
+    pub(crate) fn maps(
         client: &CpuClient,
         device: &CpuDevice,
         config: &UniversalConfig,

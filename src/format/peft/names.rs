@@ -19,21 +19,23 @@ pub struct AdapterKey {
     pub module: String,
     /// The module name PEFT matched patterns against: the key without its
     /// `base_model.model.` prefix and LoRA suffix, e.g.
-    /// `model.language_model.layers.3.self_attn.q_proj`.
+    /// `model.language_model.layers.3.self_attn.q_proj` or, for an adapter
+    /// trained on a bare text model, `layers.3.self_attn.q_proj`.
     pub peft_module: String,
     /// The LoRA factor.
     pub part: LoraPart,
 }
 
 const PEFT_PREFIX: &str = "base_model.model.";
-const LAYER_PREFIXES: [&str; 2] = ["model.layers.", "model.language_model.layers."];
+const LAYER_PREFIXES: [&str; 3] = ["model.layers.", "model.language_model.layers.", "layers."];
 
 /// Parse a PEFT adapter tensor key.
 ///
 /// Accepts `base_model.model.<module>.lora_A.weight` and `lora_B`, with an
 /// optional adapter-name segment before `weight` (`lora_A.default.weight`).
-/// `<module>` must start with `model.layers.N.` or
-/// `model.language_model.layers.N.`. Both normalize to `model.layers.N.<sub>`.
+/// `<module>` must start with `model.layers.N.`,
+/// `model.language_model.layers.N.`, or `layers.N.` (an adapter trained on a
+/// bare text model). All three normalize to `model.layers.N.<sub>`.
 pub fn parse_adapter_key(key: &str) -> Result<AdapterKey> {
     let not_lora = || Error::ModelError {
         reason: format!(
@@ -64,8 +66,9 @@ pub fn parse_adapter_key(key: &str) -> Result<AdapterKey> {
     let module = normalize_module(peft_module).ok_or_else(|| Error::ModelError {
         reason: format!(
             "adapter tensor `{key}` has an unknown module prefix: expected \
-             `{PEFT_PREFIX}model.layers.N.<module>` or \
-             `{PEFT_PREFIX}model.language_model.layers.N.<module>`"
+             `{PEFT_PREFIX}model.layers.N.<module>`, \
+             `{PEFT_PREFIX}model.language_model.layers.N.<module>` or \
+             `{PEFT_PREFIX}layers.N.<module>`"
         ),
     })?;
     Ok(AdapterKey {
@@ -83,7 +86,7 @@ fn lora_part(segment: &str) -> Option<LoraPart> {
     }
 }
 
-/// `model.layers.N.<sub>` for a PEFT module under either layer prefix, if
+/// `model.layers.N.<sub>` for a PEFT module under any layer prefix, if
 /// `N` is a layer index and `<sub>` is a non-empty dotted path.
 fn normalize_module(peft_module: &str) -> Option<String> {
     let rest = LAYER_PREFIXES
@@ -124,6 +127,18 @@ mod tests {
     }
 
     #[test]
+    fn bare_text_model_key() {
+        let k = parsed("base_model.model.layers.7.linear_attn.in_proj_a.lora_A.weight");
+        assert_eq!(k.module, "model.layers.7.linear_attn.in_proj_a");
+        assert_eq!(k.peft_module, "layers.7.linear_attn.in_proj_a");
+        assert_eq!(k.part, LoraPart::A);
+        let b = parsed("base_model.model.layers.0.mlp.gate_proj.lora_B.default.weight");
+        assert_eq!(b.module, "model.layers.0.mlp.gate_proj");
+        assert_eq!(b.peft_module, "layers.0.mlp.gate_proj");
+        assert_eq!(b.part, LoraPart::B);
+    }
+
+    #[test]
     fn adapter_name_infix() {
         let a = parsed(
             "base_model.model.model.layers.0.linear_attn.in_proj_qkvz.lora_A.default.weight",
@@ -160,6 +175,10 @@ mod tests {
             "base_model.model.model.layers.x.self_attn.q_proj.lora_A.weight",
             "base_model.model.model.layers.3.lora_A.weight",
             "base_model.model.model.layers.3..q_proj.lora_A.weight",
+            "base_model.model.layers.x.self_attn.q_proj.lora_A.weight",
+            "base_model.model.layers.3.lora_A.weight",
+            "base_model.model.model.model.layers.3.self_attn.q_proj.lora_A.weight",
+            "base_model.model.language_model.layers.3.self_attn.q_proj.lora_A.weight",
         ] {
             let text = parse_adapter_key(key).unwrap_err().to_string();
             assert!(text.contains("unknown"), "{key}: {text}");

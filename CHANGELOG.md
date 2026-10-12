@@ -9,6 +9,10 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`format::peft`** — reads a PEFT LoRA adapter. `PeftAdapter::load` takes `adapter_config.json` and `adapter_model.safetensors` and returns per-module `lora_A`/`lora_B` pairs with their scaling. Scaling follows `use_rslora`, `rank_pattern` and `alpha_pattern`. Keys under `model.layers.N` and `model.language_model.layers.N` normalize to `model.layers.N`. The load refuses DoRA, `fan_in_fan_out`, `lora_bias`, `modules_to_save`, `.bin` weights, unpaired factors and rank mismatches.
+
 ---
 
 ## [0.8.0] - 2026-10-12

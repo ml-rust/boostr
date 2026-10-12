@@ -70,6 +70,8 @@ blake3 = "1.8"
 # vocabulary data: the bundled Whisper vocabulary is loaded by voxr.
 splintr = "0.22"
 zip = { version = "9", default-features = false, features = ["deflate"] }
+# PEFT `rank_pattern` / `alpha_pattern` keys are regexes.
+regexr = { version = "0.6", default-features = false }
 
 [dev-dependencies]
 bytemuck = { version = "1.25", features = ["derive"] }

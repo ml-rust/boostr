@@ -1,18 +1,16 @@
-//! Host-side math of decision models over read-back option logits.
+//! Decision models: host math over read-back option logits, and the run
+//! that drives a backbone over one shared prefix and many rows.
 //!
-//! - `types`: question metadata, answer shapes, the per-request result
-//! - `temperature`: temperature policies and the tempered softmax
-//! - `confidence`: Choice and Score confidence rules
-//! - `noul`: the Noul yes-probability map and the abstention band
-//! - `answer`: one question's distribution to its answer
-//! - `objective`: calibration samples and the temperature-scaling objective
-//! - `calibrate`: fitting one temperature to labelled logits
+//! - `types`, `temperature`, `confidence`, `noul`, `answer`: logits to answers
+//! - `objective`, `calibrate`: fitting one temperature to labelled logits
+//! - `run`: the plan, backbone and head traits, packing, and the runner
 
 pub mod answer;
 pub mod calibrate;
 pub mod confidence;
 pub mod noul;
 pub mod objective;
+pub mod run;
 pub mod temperature;
 pub mod types;
 
@@ -21,5 +19,9 @@ pub use calibrate::{FitOutcome, TemperatureBounds, TemperatureFit, fit_temperatu
 pub use confidence::{ScoreConfidence, choice_confidence, score_confidence};
 pub use noul::{NoulBand, NoulMap};
 pub use objective::{CalibrationSample, Target};
+pub use run::{
+    DecisionBackbone, DecisionHead, DecisionPlan, Gather, OptionLogits, PrefixInput, PrefixState,
+    RunnerConfig, run_decision,
+};
 pub use temperature::{TemperaturePolicy, tempered_softmax};
 pub use types::{Answer, DecisionResult, QuestionKind, QuestionMeta};

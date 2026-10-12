@@ -15,6 +15,13 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`Qwen35Model::forward_qwen35_gather`** — runs the token forward over the caches you pass and returns the normed hidden rows at chosen flat positions `b * seq + t`, with no `lm_head`. A right-padded batch gives each sequence the rows it gets alone, up to its last real token. A bad gather index is an error that names the index, and it returns before any cache is written.
 - **`Qwen35Model::candidate_logits`** — F32 logits of `K` candidate tokens per hidden row. It reads only those `lm_head` rows and works for dense, tied, Hadamard-rotated and block-quantized heads. A LoRA-adapted head is an error.
 - **`MaybeRotatedLinear::row_logits_f32`** — the projection's outputs at chosen weight rows per input row, in F32. A block-quantized weight dequantizes only those rows. An AWQ/GPTQ weight has no row gather, so it computes the full output for the given input rows and picks the chosen columns.
+- **`inference::decision::run`** — answers decision questions over one shared prefix and many rows. `DecisionPlan` holds the prefix tokens, each row's suffix tokens and the positions to read. `run_decision` runs the prefix once, packs the rows longest first into passes of right-padded lanes, and returns the gathered rows in plan order. A `DecisionHead` scores them. One device softmax applies each question's temperature, and the answers come from one read-back. An isolated Score question takes one `[no, yes]` row per level. `prefill_prefix` builds a `PrefixState` that a caller can keep and reuse for later requests with the same prefix. A gather at a padded or missing position, a reused prefix of the wrong length, and a row past the model's positions are errors that name the value.
+- **`DecisionBackbone` for `Qwen35Model`** — the lanes of a pass attend to the one cached prefix without copying its keys and values into each lane. Each lane starts from a copy of the prefix's GDN state.
+- **`Qwen35AttentionBlock::forward_shared_prefix`** — attention for lanes that share one batch-1 prefix cache. Each lane attends to every prefix key and to its own suffix under one softmax. An empty prefix runs the ordinary forward.
+
+### Changed
+
+- **`Qwen35AttentionBlock::forward`** — refuses a cache whose lanes hold different numbers of keys. The shared append writes every lane at one position, so such a cache produced wrong keys before. The error names each lane's length.
 
 ---
 

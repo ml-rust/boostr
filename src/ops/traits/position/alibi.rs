@@ -2,13 +2,29 @@
 //!
 //! Adds position-dependent bias to attention scores before softmax.
 //! Formula: `bias[i,j]` = -slope * |i - j|
-//! Slope per head: slope_h = 2^(-8h/H)
+//! Slope per head, as the ALiBi paper and transformers define it, with
+//! `P = 2^floor(log2 H)`:
+//! - `h < P`: `slope_h = 2^(-8 (h + 1) / P)`
+//! - `h >= P`: `slope_h = 2^(-4 (2 (h - P) + 1) / P)`
+//!
+//! Every backend computes this formula. [`alibi_slope`] is the CPU copy.
 //!
 //! Used in BLOOM, MPT, Falcon for length extrapolation.
 
 use crate::error::Result;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
+
+/// The ALiBi slope of head `head` among `num_heads`. See the module docs.
+pub fn alibi_slope(head: usize, num_heads: usize) -> f32 {
+    let p = 1usize << num_heads.max(1).ilog2();
+    let p_f = p as f32;
+    if head < p {
+        2.0f32.powf(-8.0 * (head + 1) as f32 / p_f)
+    } else {
+        2.0f32.powf(-4.0 * (2 * (head - p) + 1) as f32 / p_f)
+    }
+}
 
 /// ALiBi attention operations
 ///
@@ -97,4 +113,28 @@ pub trait AlibiOps<R: Runtime> {
         head_dim: usize,
         scale: f32,
     ) -> Result<(Tensor<R>, Tensor<R>, Tensor<R>)>;
+}
+
+#[cfg(test)]
+mod slope_tests {
+    use super::alibi_slope;
+
+    /// `transformers` `build_alibi_tensor` slopes.
+    #[test]
+    fn slopes_match_transformers() {
+        let eight: Vec<f32> = (0..8).map(|h| alibi_slope(h, 8)).collect();
+        let want: Vec<f32> = (1..=8).map(|i| 0.5f32.powi(i)).collect();
+        assert_eq!(eight, want);
+        // 12 heads: 8 from base 2^-1, then 4 from base 2^-0.5 at odd powers.
+        let twelve: Vec<f32> = (0..12).map(|h| alibi_slope(h, 12)).collect();
+        assert_eq!(twelve[7], 0.5f32.powi(8));
+        for (k, slope) in twelve[8..].iter().enumerate() {
+            let want = 2.0f32.powf(-0.5 * (2 * k + 1) as f32);
+            assert!(
+                (slope - want).abs() < 1e-7,
+                "head {}: {slope} vs {want}",
+                8 + k
+            );
+        }
+    }
 }

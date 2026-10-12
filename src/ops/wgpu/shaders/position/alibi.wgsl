@@ -1,7 +1,7 @@
 //! ALiBi (Attention with Linear Biases) shader
 //! Adds position-dependent bias to attention scores in-place
 //! bias[i, j] = -slope * |i - j|
-//! Slope per head: slope_h = 2^(-8h/H)
+//! Slope per head: transformers' ALiBi slopes, see `ops/traits/position/alibi.rs`
 
 struct AlibiParams {
     batch_size: u32,
@@ -17,10 +17,18 @@ struct AlibiParams {
 @group(0) @binding(0) var<storage, read_write> scores: array<f32>;
 @group(0) @binding(1) var<uniform> params: AlibiParams;
 
-/// Compute 2^(-8h/H)
+/// The ALiBi slope of head h
 fn compute_alibi_slope(h: u32, num_heads: u32) -> f32 {
-    let slope_log2 = -8.0 * f32(h) / f32(num_heads);
-    return pow(2.0, slope_log2);
+    // transformers / ALiBi paper: P = 2^floor(log2 H).
+    var p: u32 = 1u;
+    loop {
+        if (p * 2u > num_heads) { break; }
+        p = p * 2u;
+    }
+    if (h < p) {
+        return pow(2.0, -8.0 * f32(h + 1u) / f32(p));
+    }
+    return pow(2.0, -4.0 * f32(2u * (h - p) + 1u) / f32(p));
 }
 
 @compute @workgroup_size(256)

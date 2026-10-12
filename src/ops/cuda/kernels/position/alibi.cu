@@ -11,7 +11,7 @@
 // ALiBi attention:
 //   scores = Q @ K^T / sqrt(d) + bias
 //   bias[i,j] = -m * |i - j|
-//   m = head-specific slope (geometric sequence: m_h = 2^(-8h/H))
+//   m = head-specific slope (see get_alibi_slope)
 //
 // Benefits:
 //   - No positional encodings needed (simpler architecture)
@@ -29,18 +29,20 @@
 // ALiBi Bias Computation
 // ============================================================================
 
-// Compute head-specific ALiBi slope
-// Formula: m_h = 2^(-8h/H) where h = head index, H = total heads
+// Compute head-specific ALiBi slope, as transformers' build_alibi_tensor.
+// P = 2^floor(log2 H). Head h < P: m = 2^(-8(h+1)/P).
+// Head h >= P: m = 2^(-4(2(h-P)+1)/P).
 //
-// Example (H=8):
-//   Head 0: m = 2^0 = 1.0
-//   Head 1: m = 2^(-1) = 0.5
-//   Head 2: m = 2^(-2) = 0.25
-//   ...
-//   Head 7: m = 2^(-7) = 0.0078125
+// Example (H=8): 0.5, 0.25, ..., 2^-8.
 
 __device__ __forceinline__ float get_alibi_slope(int head_idx, int num_heads) {
-    return powf(2.0f, -8.0f * head_idx / (float)num_heads);
+    // transformers / ALiBi paper: P = 2^floor(log2 H).
+    int p = 1;
+    while (p * 2 <= num_heads) p *= 2;
+    if (head_idx < p) {
+        return powf(2.0f, -8.0f * (float)(head_idx + 1) / (float)p);
+    }
+    return powf(2.0f, -4.0f * (float)(2 * (head_idx - p) + 1) / (float)p);
 }
 
 // ============================================================================

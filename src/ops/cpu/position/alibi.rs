@@ -5,6 +5,7 @@
 
 use crate::error::{Error, Result};
 use crate::ops::traits::AlibiOps;
+use crate::ops::traits::position::alibi::alibi_slope;
 use numr::dtype::DType;
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;
@@ -34,7 +35,7 @@ impl AlibiOps<CpuRuntime> for CpuClient {
         unsafe {
             for b in 0..batch_size {
                 for h in 0..num_heads {
-                    let slope = 2.0f32.powf(-8.0 * h as f32 / num_heads as f32);
+                    let slope = alibi_slope(h, num_heads);
                     for qi in 0..seq_len_q {
                         for ki in 0..seq_len_k {
                             let idx = ((b * num_heads + h) * seq_len_q + qi) * seq_len_k + ki;
@@ -64,7 +65,7 @@ impl AlibiOps<CpuRuntime> for CpuClient {
         unsafe {
             for b in 0..batch_size {
                 for h in 0..num_heads {
-                    let slope = 2.0f32.powf(-8.0 * h as f32 / num_heads as f32);
+                    let slope = alibi_slope(h, num_heads);
                     for qi in 0..seq_len_q {
                         let abs_qi = qi + position;
                         for ki in 0..seq_len_k {
@@ -127,10 +128,13 @@ mod tests {
         client.alibi_add_bias(&scores, b, h, sq, sk).unwrap();
 
         let result = scores.to_vec::<f32>();
-        // Head 0: slope = 2^0 = 1.0, diagonal (i==j) should be 0
-        assert!((result[0] - 0.0).abs() < 1e-6); // [0,0] bias = -1*|0-0| = 0
-        assert!((result[1] - (-1.0)).abs() < 1e-6); // [0,1] bias = -1*|0-1| = -1
-        assert!((result[4] - 0.0).abs() < 1e-6); // [1,1] bias = -1*|1-1| = 0
+        // 2 heads: slopes 2^-4 and 2^-8, as transformers builds them.
+        let m0 = 2.0f32.powi(-4);
+        assert!((result[0] - 0.0).abs() < 1e-6); // [0,0] bias = -m0*|0-0| = 0
+        assert!((result[1] + m0).abs() < 1e-6); // [0,1] bias = -m0*|0-1|
+        assert!((result[4] - 0.0).abs() < 1e-6); // [1,1] bias = -m0*|1-1| = 0
+        // Head 1 starts at element 9: [0,2] bias = -2^-8 * 2.
+        assert!((result[11] + 2.0 * 2.0f32.powi(-8)).abs() < 1e-7);
     }
 
     #[test]
@@ -148,13 +152,14 @@ mod tests {
             .unwrap();
 
         let result = scores.to_vec::<f32>();
-        // Head 0: slope = 1.0, query at abs position 2
-        // ki=0: bias = -1.0 * 2 = -2.0
-        // ki=1: bias = -1.0 * 1 = -1.0
-        // ki=2: bias = -1.0 * 0 = 0.0
+        // Head 0: slope = 2^-4 for 2 heads, query at abs position 2
+        // ki=0: bias = -2 * 2^-4
+        // ki=1: bias = -1 * 2^-4
+        // ki=2: bias = 0
         // ki=3: causal mask → -inf (3 > 2)
-        assert!((result[0] - (-2.0)).abs() < 1e-6);
-        assert!((result[1] - (-1.0)).abs() < 1e-6);
+        let m0 = 2.0f32.powi(-4);
+        assert!((result[0] + 2.0 * m0).abs() < 1e-6);
+        assert!((result[1] + m0).abs() < 1e-6);
         assert!((result[2] - 0.0).abs() < 1e-6);
         assert!(result[3] == f32::NEG_INFINITY);
     }

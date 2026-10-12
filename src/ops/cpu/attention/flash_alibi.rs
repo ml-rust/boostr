@@ -2,7 +2,7 @@
 //!
 //! Reuses the existing ALiBi bias ops (`AlibiOps::alibi_add_bias` /
 //! `alibi_add_bias_causal`, `ops/cpu/position/alibi.rs`) rather than a third
-//! copy of the slope formula — its slope (`2^(-8h/H)`) and sign convention
+//! copy of the slope formula — its slope (`alibi_slope`) and sign convention
 //! (`-slope * |qi - ki|`) already match `flash_attention_alibi_fp32_impl` in
 //! `alibi.cu`. Not `standard_attention_fwd`-based: that helper has no bias
 //! input, so this composes the same matmul/softmax/logsumexp primitives by

@@ -155,10 +155,11 @@ fn nonzero_bias_changes_result() -> TestResult {
 
 /// ALiBi bias from the existing kernel, against a hand-computed case.
 ///
-/// H=1, S=2, D=1, q=k=1 so scores are all 1 and scale is 1. Slope for the only
-/// head is 2^0 = 1, so bias[i][j] = -|i - j| and the biased scores are
-/// [[1, 0], [0, 1]]. softmax gives [e/(e+1), 1/(e+1)] per row, and with
-/// v = [3, 5] the outputs are 3*0.73106 + 5*0.26894 and its mirror.
+/// H=1, S=2, D=1, q=k=1 so scores are all 1 and scale is 1. The only head
+/// has slope m = 2^-8, as transformers builds it, so bias[i][j] = -m|i - j|
+/// and the biased scores are [[1, 1-m], [1-m, 1]]. softmax gives
+/// [1/(1+e^-m), e^-m/(1+e^-m)] per row, and with v = [3, 5] the outputs
+/// are their weighted sums.
 #[test]
 fn alibi_bias_matches_hand_computed() -> TestResult {
     let (client, device) = setup();
@@ -191,8 +192,9 @@ fn alibi_bias_matches_hand_computed() -> TestResult {
     )?;
     let got = out.tensor().to_vec::<f32>();
 
-    let w_near = 1.0f32.exp() / (1.0f32.exp() + 1.0);
-    let w_far = 1.0 / (1.0f32.exp() + 1.0);
+    let m = 2.0f32.powi(-8);
+    let w_near = 1.0 / (1.0 + (-m).exp());
+    let w_far = (-m).exp() / (1.0 + (-m).exp());
     let expected = [3.0 * w_near + 5.0 * w_far, 3.0 * w_far + 5.0 * w_near];
     for (i, (x, y)) in got.iter().zip(expected.iter()).enumerate() {
         assert!((x - y).abs() < 1e-5, "idx {i}: {x} vs {y}");

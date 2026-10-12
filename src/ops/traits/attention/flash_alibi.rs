@@ -12,7 +12,7 @@ use numr::tensor::Tensor;
 /// `head_dim` 64 or 128 only — matches `flash_attention_alibi_64_fp32` /
 /// `_128_fp32` in `alibi.cu`.
 ///
-/// ALiBi slopes (`m_h = 2^(-8h/H)`, `h` = head index, `H` = `num_heads`) are
+/// ALiBi slopes (`alibi_slope(h, H)`, `h` = head index, `H` = `num_heads`) are
 /// computed inside the kernel from the head index — callers pass no
 /// slope/bias tensor.
 ///

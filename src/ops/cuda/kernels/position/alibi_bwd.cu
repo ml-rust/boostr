@@ -35,7 +35,13 @@
 // ============================================================================
 
 __device__ __forceinline__ float get_alibi_slope(int head_idx, int num_heads) {
-    return powf(2.0f, -8.0f * head_idx / (float)num_heads);
+    // transformers / ALiBi paper: P = 2^floor(log2 H).
+    int p = 1;
+    while (p * 2 <= num_heads) p *= 2;
+    if (head_idx < p) {
+        return powf(2.0f, -8.0f * (float)(head_idx + 1) / (float)p);
+    }
+    return powf(2.0f, -4.0f * (float)(2 * (head_idx - p) + 1) / (float)p);
 }
 
 // ============================================================================

@@ -14,14 +14,14 @@
 //! | DBRX | `w1`, `v1`, `w2` fused over experts, `[experts * ffn, hidden]` | |
 //!
 //! [`restructure_hf_checkpoint`] renames with
-//! [`normalize_hf_name`](super::safetensors_name_map::normalize_hf_name), then
+//! [`normalize_hf_name`], then
 //! splits and stacks. It also makes the weight edits `config.block` asks for:
 //!
 //! - Gemma stores each norm weight as `w - 1`. The offset is added back.
 //! - A query scale other than `1/sqrt(head_dim)` folds into `q_proj`.
 //! - Partial (GPT-NeoX) and interleaved (Cohere) RoPE reorder each head's Q
-//!   and K rows, so the split-half kernel rotates the right pairs. See
-//!   [`rotary_row_order`].
+//!   and K rows, so the split-half kernel rotates the right pairs. The row
+//!   order comes from `rotary_row_order`.
 //!
 //! A Llama-layout checkpoint passes through unchanged.
 

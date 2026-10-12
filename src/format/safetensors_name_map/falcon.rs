@@ -55,9 +55,12 @@ pub(super) fn normalize_falcon(name: &str) -> String {
         if let Some(s) = layer_rest.strip_prefix("ln_mlp.") {
             return format!("model.layers.{layer_num}.post_attention_layernorm.{s}");
         }
-        // Falcon v2 uses input_layernorm directly
+        // Falcon-RW and Falcon v2 use the Llama norm names directly
         if let Some(s) = layer_rest.strip_prefix("input_layernorm.") {
             return format!("model.layers.{layer_num}.input_layernorm.{s}");
+        }
+        if let Some(s) = layer_rest.strip_prefix("post_attention_layernorm.") {
+            return format!("model.layers.{layer_num}.post_attention_layernorm.{s}");
         }
     }
     name.to_string()

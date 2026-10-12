@@ -18,5 +18,6 @@ mod dbrx;
 mod dispatch;
 mod falcon;
 mod gpt_neox;
+mod moe_and_mlp;
 
 pub use dispatch::{normalize_hf_name, uses_fused_qkv};

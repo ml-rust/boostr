@@ -132,6 +132,11 @@ impl<'a, R: Runtime> VarBuilder<'a, R> {
         self.varmap.contains(&full)
     }
 
+    /// Whether `restructure_hf_checkpoint` ran on the underlying map.
+    pub fn is_hf_restructured(&self) -> bool {
+        self.varmap.is_hf_restructured()
+    }
+
     /// Distinct quantized formats among the weights this builder's
     /// underlying `VarMap` holds. Empty for a SafeTensors-backed map.
     pub fn quant_formats(&self) -> &[crate::quant::QuantFormat] {

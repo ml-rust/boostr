@@ -15,6 +15,9 @@ pub struct VarMap<R: Runtime> {
     /// Distinct quantized formats among `data`'s tensors. Empty except after
     /// `from_gguf`, which fills it from the file's tensor infos.
     quant_formats: Vec<QuantFormat>,
+    /// Set by `restructure_hf_checkpoint` once the tensors are in the Llama
+    /// layout with every load-time weight edit applied.
+    hf_restructured: bool,
 }
 
 impl<R: Runtime> VarMap<R> {
@@ -22,7 +25,18 @@ impl<R: Runtime> VarMap<R> {
         Self {
             data: HashMap::new(),
             quant_formats: Vec::new(),
+            hf_restructured: false,
         }
+    }
+
+    /// Whether `restructure_hf_checkpoint` ran on this map.
+    pub fn is_hf_restructured(&self) -> bool {
+        self.hf_restructured
+    }
+
+    /// Record that `restructure_hf_checkpoint` ran on this map.
+    pub(crate) fn mark_hf_restructured(&mut self) {
+        self.hf_restructured = true;
     }
 
     /// Distinct quantized formats this map's tensors use, in no particular

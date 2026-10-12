@@ -1,6 +1,7 @@
 pub mod device_map;
 pub mod gguf;
 pub mod gguf_vocab;
+pub mod hf_restructure;
 pub mod safetensors;
 pub mod safetensors_loader;
 pub mod safetensors_name_map;
@@ -14,6 +15,7 @@ pub use gguf::{
     SignMode,
 };
 pub use gguf_vocab::extract_gguf_vocab;
+pub use hf_restructure::restructure_hf_checkpoint;
 pub use safetensors::{SafeTensors, TensorInfo};
 pub use safetensors_loader::SafeTensorsLoader;
 pub use tcf::{TcfHeaderInfo, TcfLoader, TcfModuleInfo, TcfSession, TcfTensorInfo};

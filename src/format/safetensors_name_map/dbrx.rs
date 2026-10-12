@@ -9,9 +9,9 @@ use super::dispatch::split_layer_num;
 /// - `transformer.blocks.{N}.norm_attn_norm.norm_1.weight` → input_layernorm
 /// - `transformer.blocks.{N}.norm_attn_norm.norm_2.weight` → post_attention_layernorm
 /// - `transformer.blocks.{N}.ffn.router.layer.weight` → MoE gate
-/// - `transformer.blocks.{N}.ffn.experts.mlp.{E}.v1.weight` → expert gate_proj
-/// - `transformer.blocks.{N}.ffn.experts.mlp.{E}.w1.weight` → expert up_proj
-/// - `transformer.blocks.{N}.ffn.experts.mlp.{E}.w2.weight` → expert down_proj
+/// - `transformer.blocks.{N}.ffn.experts.mlp.{w1,v1,w2}` → `block_sparse_moe.experts.
+///   dbrx_{w1,v1,w2}`, each `[experts * ffn, hidden]`. `w1` is the gate and
+///   `v1` the up projection. `restructure_hf_checkpoint` splits them per expert.
 /// - `transformer.norm_f.weight` → `model.norm.weight`
 pub(super) fn normalize_dbrx(name: &str) -> String {
     // Embeddings
@@ -50,14 +50,11 @@ pub(super) fn normalize_dbrx(name: &str) -> String {
         if let Some(s) = layer_rest.strip_prefix("ffn.router.layer.") {
             return format!("model.layers.{layer_num}.block_sparse_moe.gate.{s}");
         }
-        // Expert weights: ffn.experts.mlp.{E}.{v1,w1,w2}.weight
-        if let Some(suffix) = layer_rest.strip_prefix("ffn.experts.mlp.") {
-            // We keep expert-level naming for now; the MoE loader handles stacking
-            let mapped = suffix
-                .replace(".v1.", ".gate_proj.")
-                .replace(".w1.", ".up_proj.")
-                .replace(".w2.", ".down_proj.");
-            return format!("model.layers.{layer_num}.block_sparse_moe.experts.{mapped}");
+        // Fused expert weights: ffn.experts.mlp.{w1,v1,w2}, no `.weight`.
+        if let Some(part) = layer_rest.strip_prefix("ffn.experts.mlp.")
+            && matches!(part, "w1" | "v1" | "w2")
+        {
+            return format!("model.layers.{layer_num}.block_sparse_moe.experts.dbrx_{part}");
         }
     }
     name.to_string()
@@ -125,19 +122,18 @@ mod tests {
         );
     }
 
+    /// HF stores each DBRX expert projection fused over experts, with no
+    /// `.weight` suffix.
     #[test]
     fn dbrx_expert_weights() {
-        assert_eq!(
-            normalize_hf_name("dbrx", "transformer.blocks.0.ffn.experts.mlp.0.v1.weight"),
-            "model.layers.0.block_sparse_moe.experts.0.gate_proj.weight"
-        );
-        assert_eq!(
-            normalize_hf_name("dbrx", "transformer.blocks.0.ffn.experts.mlp.0.w1.weight"),
-            "model.layers.0.block_sparse_moe.experts.0.up_proj.weight"
-        );
-        assert_eq!(
-            normalize_hf_name("dbrx", "transformer.blocks.0.ffn.experts.mlp.0.w2.weight"),
-            "model.layers.0.block_sparse_moe.experts.0.down_proj.weight"
-        );
+        for part in ["w1", "v1", "w2"] {
+            assert_eq!(
+                normalize_hf_name(
+                    "dbrx",
+                    &format!("transformer.blocks.0.ffn.experts.mlp.{part}")
+                ),
+                format!("model.layers.0.block_sparse_moe.experts.dbrx_{part}")
+            );
+        }
     }
 }

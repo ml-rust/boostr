@@ -4,6 +4,7 @@
 use super::dbrx::normalize_dbrx;
 use super::falcon::normalize_falcon;
 use super::gpt_neox::normalize_gpt_neox;
+use super::moe_and_mlp::{normalize_mixtral, normalize_qwen2_moe, normalize_starcoder2};
 
 /// Normalize a HuggingFace SafeTensors tensor name to canonical Llama-style naming.
 ///
@@ -18,6 +19,9 @@ pub fn normalize_hf_name(model_type: &str, name: &str) -> String {
         "falcon" => normalize_falcon(&name),
         "gpt_neox" => normalize_gpt_neox(&name),
         "dbrx" => normalize_dbrx(&name),
+        "starcoder2" => normalize_starcoder2(&name),
+        "mixtral" => normalize_mixtral(&name),
+        "qwen2_moe" => normalize_qwen2_moe(&name),
         _ => name,
     }
 }
@@ -59,7 +63,7 @@ pub(super) fn split_layer_num(s: &str) -> Option<(usize, &str)> {
 
 /// Check if a model type uses fused QKV tensors that need splitting.
 pub fn uses_fused_qkv(model_type: &str) -> bool {
-    matches!(model_type, "falcon" | "gpt_neox" | "dbrx")
+    matches!(model_type, "falcon" | "gpt_neox" | "dbrx" | "phi3")
 }
 
 #[cfg(test)]

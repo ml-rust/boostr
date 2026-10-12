@@ -2,16 +2,20 @@
 //!
 //! - `config_from_gguf`: [`UniversalConfig`](crate::model::config::UniversalConfig)
 //!   from the `qwen35.*` GGUF namespace
+//! - `config_from_hf`: the same config from a Hugging Face Qwen3.5
+//!   `config.json`
 //! - `model`: the [`Qwen35Model`] type, its blocks, the state-carrying
-//!   forward, and the GGUF loader
+//!   forward, and the loader
 //! - `multimodal`: image placeholders expanded to vision-tower rows with
 //!   IMROPE positions, the input of `forward_qwen35_embeds`
 
 pub mod config_from_gguf;
+pub mod config_from_hf;
 pub mod model;
 pub mod multimodal;
 
 pub use config_from_gguf::qwen35_config_from_gguf;
+pub use config_from_hf::{QWEN35_HF_MODEL_TYPES, is_qwen35_hf_config, qwen35_config_from_hf};
 pub use model::{Qwen35AttentionLayer, Qwen35Block, Qwen35GdnLayer, Qwen35Model};
 pub use multimodal::{
     ImageEmbeds, ImageGrid, PromptLayout, Qwen35PromptPlan, Segment, VisionMarkers,

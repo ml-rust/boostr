@@ -5,25 +5,25 @@
 <h3>ML framework in Rust. Write once. Run on any backend.</h3>
 
 <p>
-Production-grade LLM primitives — flash attention, quantization, MoE, state-space
-models, KV caching, and distributed training — built on
-<a href="https://github.com/ml-rust/numr">numr</a> so the same code runs on CPU, CUDA, and WebGPU.
+Attention, quantization, model architectures, training, and inference built on <a href="https://github.com/ml-rust/numr">numr</a>. It ships 27 quantization formats, and the same code runs on CPU, CUDA, and WebGPU.
 </p>
 
 <p>
   <a href="https://docs.rs/boostr"><strong>Docs</strong></a>
-  · 
+  ·
   <a href="https://crates.io/crates/boostr"><strong>Crate</strong></a>
   ·
-  <a href="#module-overview"><strong>Modules</strong></a>
+  <a href="#feature-flags"><strong>Feature Flags</strong></a>
   ·
-  <a href="#basic-usage"><strong>Example</strong></a>
+  <a href="#testing"><strong>Testing</strong></a>
+  ·
+  <a href="#quick-start"><strong>Example</strong></a>
   ·
   <a href="CONTRIBUTING.md"><strong>Contributing</strong></a>
 </p>
 
 <p>
-  <a href="https://discord.gg/fFPHyVChpZ">
+  <a href="https://discord.gg/jBhFk9kHPg">
     <img src="https://img.shields.io/discord/1453357769720594543?label=Discord&logo=discord&logoColor=white&color=5865F2" alt="Join the Discord">
   </a>
 </p>
@@ -48,201 +48,102 @@ models, KV caching, and distributed training — built on
 
 </div>
 
-boostr extends [numr](https://github.com/ml-rust/numr) with production-grade ML primitives. It provides attention mechanisms, quantization support, model architectures, and inference infrastructure — all built on numr's foundational tensors, runtimes, and ops. No reimplementation. No wrappers. Pure extension traits.
+boostr extends [numr](https://github.com/ml-rust/numr) with ML operations and adds no tensor type or runtime wrapper.
+Its `Tensor`, `Runtime`, and client types come from numr.
+ML operations attach to numr's clients as extension traits.
 
-## Why boostr
-
-- **One codebase, every backend.** Write once against numr's `Runtime`; run on CPU (SIMD), CUDA (PTX), or WebGPU (WGSL) by switching a feature flag — no per-device dispatch, no rewrite.
-- **No vendor lock-in.** Every kernel is native — no cuBLAS, cuDNN, or MKL. Flash attention, quantized matmul, and fused optimizers are all hand-written per backend.
-- **Backends are a foundation concern.** Hardware support lives in numr, so new backends added there flow up to boostr automatically — the abstraction is built in, not bolted on per device.
-- **Train and serve from one stack.** The same primitives power [oxidizr](https://github.com/ml-rust/oxidizr) training and [blazr](https://github.com/ml-rust/blazr) inference — no Python runtime, single-binary deployment.
-
-## Who it's for
-
-- **LLM trainers** — distributed training with ZeRO (stages 1/2/3), tensor and pipeline parallelism (1F1B, GPipe, ZeroBubble), mixed precision, and fused optimizers.
-- **Inference engineers** — flash attention v2/v3, paged KV cache, continuous batching, speculative decoding, and prefix caching for high-throughput serving.
-- **Quantization & compression researchers** — 26 GGUF-compatible formats with a dedicated `QuantTensor` type and per-backend dequant / quantized-matmul kernels.
-- **Architecture researchers** — LLaMA, Mamba2 (SSD kernels), and hybrid transformer/SSM models, with an extensible system for custom architectures.
-- **WebAssembly & edge developers** — the WebGPU backend targets consumer GPUs (Vulkan/Metal/DX12) with no CUDA dependency.
-
-## Key Capabilities
-
-### Quantization
-
-- **26 formats** (GGUF-compatible): Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1, Q2K–Q8K, IQ1S–IQ4XS, TQ1_0, TQ2_0
-- **QuantTensor type** for block-quantized data
-- **Per-backend kernels**: Native SIMD (CPU), PTX (CUDA), WGSL (WebGPU)
-- Zero-copy GGUF loading with memory mapping
-
-### Attention
-
-- **Flash Attention v2/v3** with fused QKV projection
-- **Multi-Head Latent Attention (MLA)** — compressed KV cache
-- **Grouped Query Attention (GQA)** and multi-head variants
-- **Paged attention** for memory-efficient inference
-- **Variable-length attention** with ragged tensors
-- **Prefix caching** for context reuse
-
-### Position Encodings
-
-- **RoPE**: Split-half, interleaved, ALiBi variants
-- **YaRN** for length extrapolation
-- Efficient fused implementations on all backends
-
-### Model Architectures
-
-- **LLaMA** — standard and tensor-parallelized
-- **Mamba2** — state space models with SSD kernels
-- **Hybrid** — mixed transformer/SSM models
-- **Qwen3.5** — Gated DeltaNet + attention hybrid, with the **Qwen3-VL** vision encoder for image input
-- **Encoder** — BERT-family text embedding models (BERT, Nomic BERT, Jina v2/v3, Qwen3-Embedding, EmbeddingGemma) with varlen batching and an embedding pipeline
-- **Audio** (one feature gate each) — Whisper ASR, Kokoro and VITS (MMS-TTS) speech synthesis, NeuCodec, VoxCPM2, Silero VAD, and CLAP
-- **spaCy tagger** — the `en_core_web_sm` CNN part-of-speech tagger
-- Extensible architecture system for custom models
-
-### Neural Network Modules
-
-- **Linear** — standard and quantized variants
-- **Embedding** for token embeddings
-- **LayerNorm**, **RMSNorm** with fused implementations
-- **MoE layers** with expert routing and load balancing
-
-### Inference Infrastructure
-
-- **Paged KV cache** with block allocator for memory efficiency
-- **Request scheduler** with continuous batching
-- **Prefix caching** for prompt reuse
-- **Speculative decoding** with adaptive draft depth and verification kernels
-- **Flash decoding** for single-token decode (CUDA, auto-selected when S_q=1)
-
-### Training
-
-- **Optimizers**: AdamW, Lamb, SGD with gradient clipping
-- **Mixed precision** (AMP) with automatic loss scaling
-- **Gradient accumulation** and checkpointing
-- **Learning rate scheduling** (warmup, cosine, linear decay)
-- **Distributed training**:
-  - ZeRO stage 1/2/3 (parameter/gradient/optimizer sharding)
-  - Tensor parallelism with communicators
-  - Pipeline parallelism (1F1B, Gpipe, ZeroBubble schedules)
-
-### Model Loading
-
-- **SafeTensors**: Zero-copy memory-mapped loading
-- **GGUF**: Full format support with block-quantized tensors
-- Format auto-detection
-
-### Multi-Backend
-
-- **CPU**: SIMD kernels (AVX2, NEON), native ops
-- **CUDA**: PTX kernels, Flash Attention v2/v3, fused ops (CUDA 12.8+ or 13.x)
-- **WebGPU**: WGSL shaders, cross-platform GPU support
-
-## Architecture
-
-```
-┌───────────────────────────────────────────────────────┐
-│                    boostr                             │
-│   (attention, RoPE, MoE, quantization, model loaders) │
-└──────────────────────────┬────────────────────────────┘
-                           │
-                        (uses)
-                           │
-┌──────────────────────────▼───────────────────────────┐
-│                      numr                            │
-│   (tensors, ops, runtime, autograd, linalg, FFT)     │
-└──────────────────────────────────────────────────────┘
-```
-
-**Design principles:**
-
-- **Extension traits**: ML ops (AttentionOps, RoPEOps) implemented on numr's clients — not new types
-- **QuantTensor**: Separate type for quantized data with custom kernels
-- **impl_generic**: Composite ops composed from numr primitives, same logic on all backends
-- **Custom kernels**: Dequant, quantized matmul, fused attention use per-backend optimizations (SIMD/PTX/WGSL)
-- **Vendor-agnostic**: No cuBLAS, cuDNN, or MKL; all native kernels
+Capabilities are in [docs/capabilities.md](docs/capabilities.md). The layout and design rules are in [docs/architecture.md](docs/architecture.md).
 
 ## Quick Start
 
-### Installation
+### Install
 
-Add to `Cargo.toml`:
+Add boostr to `Cargo.toml`:
 
 ```toml
 [dependencies]
 boostr = "0.8"
-
-# With CUDA support (requires CUDA 12.8+ or 13.x)
-# boostr = { version = "0.8", features = ["cuda"] }
-
-# With WebGPU support
-# boostr = { version = "0.8", features = ["wgpu"] }
 ```
 
-### Build
+Enable a backend with a feature:
+
+```toml
+# CUDA: requires CUDA 12.8+ or 13.x
+boostr = { version = "0.8", features = ["cuda"] }
+
+# WebGPU: requires Vulkan, Metal, or DX12 GPU drivers
+boostr = { version = "0.8", features = ["wgpu"] }
+```
+
+### Build from Source
+
+Requirements:
+
+- Rust 1.95 or newer.
+- For `cuda`: CUDA 12.8+ or 13.x with `nvcc` on `PATH`. The GPU needs compute capability 7.5 (Turing) or newer.
+- For `wgpu`: platform GPU drivers.
+
+Run these commands in a checkout of the repository:
 
 ```bash
-# CPU build
-cargo build --release
+cargo build --release                  # CPU
+cargo build --release --features cuda  # CUDA
+cargo build --release --features wgpu  # WebGPU
+```
 
-# CUDA support (requires CUDA 12.8+ or 13.x)
-cargo build --release --features cuda
+By default, `build.rs` compiles CUDA kernels for the GPUs on the build host. Set `NUMR_CUDA_ARCH=all` for any binary that runs on another machine.
+`BOOSTR_CUDA_ARCH` overrides `NUMR_CUDA_ARCH` for boostr's kernels.
 
-# CUDA build to run on other machines: native code for every supported GPU
+```bash
 NUMR_CUDA_ARCH=all cargo build --release --features cuda
-
-# WebGPU support
-cargo build --release --features wgpu
-
-# Run tests
-cargo test
-cargo test --features cuda
 ```
 
 ### Basic Usage
 
+Run flash attention on the CPU backend:
+
 ```rust
-use boostr::*;
-use boostr::ops::traits::attention::flash::FlashAttentionOps;
+use boostr::ops::traits::attention::{AttnOutLayout, FlashAttentionOps};
+use boostr::{CpuClient, CpuDevice, DType};
 use numr::ops::RandomOps;
-use numr::runtime::cpu::{CpuClient, CpuDevice};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = CpuClient::new(CpuDevice::new());
 
-    // Create random tensors via numr's RandomOps
-    let q = client.randn(&[1, 8, 32, 64], DType::F32)?; // [batch, heads, seq, dim]
+    // Random tensors via numr's RandomOps: [batch, heads, seq, dim]
+    let q = client.randn(&[1, 8, 32, 64], DType::F32)?;
     let k = client.randn(&[1, 8, 32, 64], DType::F32)?;
     let v = client.randn(&[1, 8, 32, 64], DType::F32)?;
 
-    // Flash Attention forward pass
     let (output, _lse) = client.flash_attention_fwd(
-        &q, &k, &v,
-        8,    // num_heads
-        8,    // num_kv_heads
-        64,   // head_dim
-        true, // causal
-        0,    // window_size (0 = no sliding window)
-        None, // kv_seq_len override
+        &q,
+        &k,
+        &v,
+        8,                         // num_heads
+        8,                         // num_kv_heads
+        64,                        // head_dim
+        true,                      // causal
+        0,                         // window_size (0 = no sliding window)
+        None,                      // kv_seq_len
+        None,                      // kv_start
+        AttnOutLayout::HeadMajor,  // output layout: [B, H, S_q, D]
     )?;
 
     Ok(())
 }
 ```
 
-### Loading a Model
+### Load a GGUF Model
 
 ```rust
 use boostr::format::Gguf;
-use boostr::{CpuRuntime, DType};
-use numr::runtime::Runtime;
+use boostr::{CpuDevice, CpuRuntime};
 
-// Open a GGUF model file (with optional memory mapping)
+// Open a GGUF file with buffered reads
 let mut gguf = Gguf::open("model.gguf")?;
-let metadata = gguf.metadata();
-let device = <CpuRuntime as Runtime>::Device::default();
+let device = CpuDevice::new();
 
-// Load tensors — quantized as QuantTensor, others as f32
+// Load quantized tensors as QuantTensor and the others as f32
 for name in gguf.tensor_names().map(|s| s.to_string()).collect::<Vec<_>>() {
     let info = gguf.tensor_info(&name)?;
     if info.ggml_type.is_quantized() {
@@ -253,25 +154,30 @@ for name in gguf.tensor_names().map(|s| s.to_string()).collect::<Vec<_>>() {
 }
 ```
 
-### Inference with KV Cache
+Use `Gguf::open_with_mmap(path, true)` to memory-map the file. Each loader call releases mapped pages after it copies a tensor.
+
+### Paged KV Cache
 
 ```rust
 use boostr::inference::PagedKvCache;
+use boostr::{CpuClient, CpuDevice, CpuRuntime, DType, Tensor};
+use numr::ops::RandomOps;
 
-// Create a paged KV cache for efficient inference
-let mut kv_cache = PagedKvCache::new(
-    &client,
-    num_layers,
-    batch_size,
-    max_seq_len,
-    head_dim,
+let device = CpuDevice::new();
+let client = CpuClient::new(device.clone());
+let (num_blocks, block_size, num_heads, head_dim) = (16, 16, 8, 64);
+
+let cache = PagedKvCache::<CpuRuntime>::new(
+    num_blocks, block_size, num_heads, head_dim, DType::F32, &device,
 )?;
 
-// Process tokens with cache
-for token_idx in 0..seq_len {
-    // ... forward pass using kv_cache ...
-    kv_cache.update(layer_idx, &k, &v)?;
-}
+// key and value: [num_tokens, num_heads, head_dim]
+let k = client.randn(&[4, num_heads, head_dim], DType::F32)?;
+let v = client.randn(&[4, num_heads, head_dim], DType::F32)?;
+
+// slot_mapping: [num_tokens], I64. Slot s maps to block s / block_size, offset s % block_size.
+let slots = Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 2, 3], &[4], &device)?;
+cache.update(&k, &v, &slots, &client)?;
 ```
 
 ## Feature Flags
@@ -294,91 +200,8 @@ for token_idx in 0..seq_len {
 | `silero-vad`   | Silero voice activity detection (implies `audio`)         | —                       |
 | `clap`         | CLAP audio and text towers (implies `audio`)              | —                       |
 | `spacy-tagger` | spaCy CNN part-of-speech tagger                           | —                       |
-| `vocab-*`      | One bundled splintr vocabulary each (see below)           | splintr                 |
+| `vocab-*`      | One bundled splintr vocabulary each (see [docs/capabilities.md](docs/capabilities.md#bundled-tokenizer-vocabularies)) | splintr |
 | `vocabs`       | Every bundled splintr vocabulary                          | splintr                 |
-
-The `vocab-*` features are `vocab-cl100k`, `vocab-o200k`, `vocab-gpt-oss`,
-`vocab-phi4`, `vocab-olmo2`, `vocab-llama3`, `vocab-llama2`, `vocab-deepseek`,
-`vocab-qwen`, `vocab-glm`, `vocab-gemma2`, `vocab-gemma3`, `vocab-gemma4`,
-`vocab-kimi`, `vocab-mistral` and `vocab-modernbert`. None is on by default.
-
-### CUDA builds
-
-The `cuda` feature needs CUDA 12.8 or newer; 13.x also works. The GPU needs
-compute capability 7.5 (Turing) or newer. By default `build.rs` builds native
-code only for the GPUs on the build host. Set `NUMR_CUDA_ARCH=all` for any
-binary that runs on another machine: release builds, containers, and CI
-artifacts. `BOOSTR_CUDA_ARCH` overrides `NUMR_CUDA_ARCH` for boostr's kernels.
-
-boostr holds tensor code only. Audio decoding, resampling, grapheme-to-phoneme,
-voices, and the TTS, ASR and VAD pipelines live in the [`voxr`](https://github.com/ml-rust/voxr) crate, on top
-of boostr's models.
-
-## Module Overview
-
-- **`ops/`** — ML-specific operations (attention, RoPE, MoE, etc.)
-- **`quant/`** — Quantized tensors and kernels (26 formats)
-- **`nn/`** — Neural network modules (Linear, Embedding, LayerNorm, RMSNorm, MoE)
-- **`model/`** — Model architectures (LLaMA, Mamba2, Hybrid, Qwen3.5, Qwen3-VL, encoders, audio models, spaCy tagger)
-- **`format/`** — Model loaders (SafeTensors, GGUF)
-- **`inference/`** — Inference infrastructure (KV cache, scheduling, batching)
-- **`optimizer/`** — Training optimizers (AdamW, Lamb, SGD)
-- **`trainer/`** — Training utilities and distributed training (ZeRO, tensor/pipeline parallelism)
-- **`distributed/`** — Multi-GPU coordination
-
-## Performance
-
-boostr provides production-grade performance through:
-
-- **Fused kernels** — Attention, layer norm, optimizer steps compiled to single kernels
-- **Custom quantization** — Per-format SIMD/PTX/WGSL kernels for dequant and quantized matmul
-- **Memory efficiency** — Paged KV cache, prefix caching, gradient checkpointing
-- **Distributed training** — ZeRO stages, tensor/pipeline parallelism with minimal communication overhead
-- **Zero-copy loading** — Memory-mapped GGUF with quantized weights
-
-## Ecosystem
-
-boostr is part of the [ml-rust](https://github.com/ml-rust) organization:
-
-- **[numr](https://github.com/ml-rust/numr)** — Foundational numerical computing (tensors, ops, linalg, FFT)
-- **[boostr](https://github.com/ml-rust/boostr)** — ML framework (this project)
-- **[oxidizr](https://github.com/ml-rust/oxidizr)** — Training framework for Mamba2, MLA, MoE (uses boostr)
-- **[blazr](https://github.com/ml-rust/blazr)** — Inference server with OpenAI-compatible API (uses boostr)
-- **[compressr](https://github.com/ml-rust/compressr)** — Model quantization and compression (uses boostr)
-- **[splintr](https://github.com/ml-rust/splintr)** — High-performance BPE tokenizer
-
-## Building from Source
-
-### Requirements
-
-- Rust 1.95+
-- For CUDA: CUDA 12.8+ or 13.x, with `nvcc` on `PATH`
-- For WebGPU: wgpu and platform GPU drivers
-
-### Clone and Build
-
-```bash
-git clone https://github.com/ml-rust/boostr.git
-cd boostr
-
-# CPU
-cargo build --release
-
-# CUDA
-cargo build --release --features cuda
-
-# Run tests (every CPU-buildable gate)
-cargo test --features whisper,kokoro,neucodec,voxcpm,silero-vad,vits,clap,spacy-tagger,f16
-
-# Format and lint
-cargo fmt --all
-cargo clippy --all-targets
-```
-
-## Documentation
-
-- [API Documentation](https://docs.rs/boostr) — Full reference for public API
-- [numr Documentation](https://docs.rs/numr) — Tensor and runtime types
 
 ## Testing
 
@@ -392,21 +215,33 @@ cargo test --features whisper,kokoro,neucodec,voxcpm,silero-vad,vits,clap,spacy-
 # CUDA tests
 cargo test --features cuda,f16
 
-# Verbose output
+# Show test output
 cargo test -- --nocapture
 ```
 
+Run the format and lint checks in [CONTRIBUTING.md](CONTRIBUTING.md#local-quality-checks) before you open a pull request.
+
+## Ecosystem
+
+boostr is part of the [ml-rust](https://github.com/ml-rust) organization:
+
+- **[numr](https://github.com/ml-rust/numr)**: Foundational numerical computing (tensors, ops, linalg, FFT)
+- **[boostr](https://github.com/ml-rust/boostr)**: ML framework (this project)
+- **[oxidizr](https://github.com/ml-rust/oxidizr)**: Training framework for Mamba2, MLA, and MoE (uses boostr)
+- **[blazr](https://github.com/ml-rust/blazr)**: Inference server with an OpenAI-compatible API (uses boostr)
+- **[compressr](https://github.com/ml-rust/compressr)**: Model quantization and compression (uses boostr)
+- **[voxr](https://github.com/ml-rust/voxr)**: Audio and speech on top of boostr's models
+- **[splintr](https://github.com/ml-rust/splintr)**: BPE tokenizer
+
 ## Contributing
 
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture conventions, the `impl_generic` pattern, and pull request guidance.
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for conventions and checks.
+
+Questions and design discussion happen on [Discord](https://discord.gg/jBhFk9kHPg).
 
 ## License
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
 
 Parts of boostr port code from other open-source projects. Their copyright
 lines and licenses are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-## Acknowledgments
-
-boostr builds on the numerical foundation provided by [numr](https://github.com/ml-rust/numr) and is designed to power production ML infrastructure across training (oxidizr) and inference (blazr).

@@ -1,62 +1,48 @@
 # Contributing
 
-Thanks for contributing to [boostr](https://crates.io/crates/boostr). This guide
-covers the architecture conventions and quality gates the project expects.
+Thanks for contributing to [boostr](https://crates.io/crates/boostr). This guide covers the architecture conventions and quality gates.
 
-## Prerequisites
+## Before you start
 
-- Rust 1.88+ (edition 2024).
-- For CUDA work: a CUDA 12.x toolchain (cudarc does not support CUDA 13.x yet).
-- For WebGPU work: platform GPU drivers (Vulkan/Metal/DX12).
-- A clean working tree before opening a pull request.
+- Rust 1.95 or newer (edition 2024).
+- For CUDA work: CUDA 12.8+ or 13.x with `nvcc` on `PATH`.
+- For WebGPU work: platform GPU drivers (Vulkan, Metal, or DX12).
+- A clean working tree before you open a pull request.
 
-## What to contribute
+Useful contributions:
 
-The most valuable contributions are usually **new ML primitives** — attention
-variants, position encodings, quantization formats, model architectures, or
-inference/training machinery — and bug fixes, numerical-accuracy improvements,
-and additional backend coverage (CPU SIMD, CUDA PTX, WebGPU WGSL) for ops that
-only run on some backends today.
+- **New ML primitives**: attention variants, position encodings, quantization formats, model architectures, or inference and training machinery.
+- Bug fixes and numerical-accuracy improvements.
+- Backend coverage (CPU SIMD, CUDA PTX, WebGPU WGSL) for ops that run on some backends only.
 
-Before writing a non-trivial op or architecture, **open an issue first**
-describing what you want to add, the reference/paper, and which crate it belongs
-in (see below). This avoids duplicated effort and lets us agree on placement and
-API up front. Small, self-contained fixes can go straight to a pull request.
+Open an issue before you write a non-trivial op or architecture. Describe the addition, the reference paper, and the crate it belongs in. Small, self-contained fixes can go straight to a pull request.
 
-## Which crate: numr, solvr, or boostr
+### Which crate
 
-boostr is one layer of a stack, and a contribution only belongs here if it fits
-this layer. Place new work by what it _is_, not where it's convenient:
+Place work by what it is:
 
-- **[numr](https://github.com/ml-rust/numr)** — foundational primitives that
-  everything else builds on: tensor ops, dtypes, the `Runtime`/backend
-  abstraction (and **new backends** themselves), autograd, FFT, and core linear
-  algebra (matmul, LU/QR/SVD/eigen, `solve`). If it's a building block reused
-  across domains, or it adds/touches a hardware backend, it goes in numr.
-- **[solvr](https://github.com/ml-rust/solvr)** — scientific/solving algorithms
-  composed from numr primitives: optimization, ODE/DAE/PDE, interpolation,
-  statistics, signal, and spatial.
-- **boostr** (this crate) — AI/ML-specific building blocks: attention,
-  positional encodings, mixture-of-experts, state-space kernels, quantization,
-  neural-network layers, model architectures, and training/inference machinery.
+| Crate | Scope |
+| --- | --- |
+| [numr](https://github.com/ml-rust/numr) | Foundational primitives: tensor ops, dtypes, the `Runtime`/backend abstraction and new backends, autograd, FFT, core linear algebra (matmul, LU/QR/SVD/eigen, `solve`). |
+| [solvr](https://github.com/ml-rust/solvr) | Scientific and solving algorithms built from numr primitives: optimization, ODE/DAE/PDE, interpolation, statistics, signal, spatial. |
+| **boostr** (this crate) | AI/ML building blocks: attention, positional encodings, mixture-of-experts, state-space kernels, quantization, neural-network layers, model architectures, training and inference machinery. |
 
 Quick test:
 
-- Is it a low-level primitive (a tensor op, an FFT, a linear-algebra
-  factorization) or a new backend? → **numr**.
-- Is it a domain solver a scientist/engineer would reach for? → **solvr**.
-- Does it only make sense for neural networks / LLMs? → **boostr**.
+- A low-level primitive (tensor op, FFT, linear-algebra factorization) or a new backend: **numr**.
+- A domain solver a scientist or engineer reaches for: **solvr**.
+- Makes sense only for neural networks or LLMs: **boostr**.
 
-When in doubt, propose it in an issue and we'll help place it. **If a primitive
-you need is missing in numr, add it to numr** — don't reimplement it here or work
-around it with a host-side loop. boostr is built _on_ numr, never alongside it.
+When in doubt, propose the work in an issue.
+
+If numr lacks a primitive you need, add it to numr. Do not reimplement it here or work around it with a host-side loop. boostr is built on numr, never alongside it.
 
 ## Architecture
 
-boostr extends numr rather than reimplementing it. It uses numr's `Tensor<R>`,
-`Runtime`/client, autograd, and ops directly, and adds ML capabilities through
-**extension traits** (a local trait implemented on numr's foreign client type)
-plus a separate `QuantTensor` type for block-quantized data.
+boostr extends numr. It uses numr's `Tensor<R>`, `Runtime`/client, autograd, and ops directly. It adds ML capabilities through two mechanisms:
+
+- **Extension traits**: a local trait implemented on numr's client type.
+- **`QuantTensor`**: a separate type for block-quantized data.
 
 ```rust
 // boostr defines the trait (local)
@@ -72,25 +58,16 @@ impl AttentionOps<CpuRuntime> for numr::runtime::cpu::CpuClient {
 }
 ```
 
-boostr **never** reimplements tensors, storage, or runtime; never wraps numr
-runtimes (no `BoostrCpuRuntime`); and never defines its own `DType` for standard
-types. Run `rg "fn softmax" ../numr/src/` before writing your own — if numr has
-it, use it.
+boostr never reimplements tensors, storage, or the runtime. It never wraps numr runtimes, such as a `BoostrCpuRuntime`. It never defines its own `DType` for standard types. Run `rg "fn softmax" ../numr/src/` before you write an op. If numr has it, use it.
 
 ### Two kinds of ops
 
-- **Composite ops** (attention, RoPE, MoE) are an algorithm composed of numr
-  primitives. They live once in `impl_generic/`, and every backend delegates to
-  it. A fused kernel (e.g. CUDA FlashAttention) may replace the delegation, but
-  it **must produce identical results** to `impl_generic`.
-- **Primitive ops** (dequant, quantized matmul) _are_ the kernel — the code
-  differs fundamentally per backend, so there is **no** `impl_generic`. Each
-  backend has its own SIMD/PTX/WGSL kernel.
+- **Composite ops** (attention, RoPE, MoE) are algorithms built from numr primitives. Each lives once in `impl_generic/`, and every backend delegates to it. A fused kernel, such as CUDA FlashAttention, can replace the delegation. It must produce results identical to `impl_generic`.
+- **Primitive ops** (dequant, quantized matmul) are the kernel. The code differs fundamentally per backend, so these have no `impl_generic`. Each backend has its own SIMD, PTX, or WGSL kernel.
 
-### The `impl_generic` pattern and module layout
+### Module layout
 
-Each op exists in exactly one place, with the **same file name** mirrored across
-trait, generic algorithm, and each backend:
+Each op lives in exactly one place. The same file name mirrors across the trait, the generic algorithm, and each backend:
 
 ```
 src/ops/
@@ -101,65 +78,54 @@ src/ops/
 └── wgpu/<domain>/<op>.rs          # impl Trait for WgpuClient — delegates to *_impl
 ```
 
-Ops are grouped into **domain subdirectories** — `attention/`, `position/`,
-`cache/`, `training/`, `quantization/`, `architecture/`, `inference/`. Never add
-flat files directly to `ops/traits/`, `ops/cpu/`, etc. New ops go into one of
-these groups; if a genuinely new domain emerges, add a new subdirectory.
-
-- `mod.rs` contains **only** `pub mod` / `pub use` — no logic, traits, or types.
-- One op = one file. Adding an op means adding files, not expanding existing ones.
-- Backend dirs are required (`cpu/`, `cuda/`, `wgpu/` — not `cpu.rs`). Kernels go
-  in dedicated subdirs (`cuda/kernels/<domain>/`, `wgpu/shaders/`).
+- Group ops into domain subdirectories: `attention/`, `position/`, `cache/`, `training/`, `quantization/`, `architecture/`, `inference/`. Never add flat files directly to `ops/traits/`, `ops/cpu/`, or similar directories.
+- Create a new subdirectory only for a genuinely new domain.
+- `mod.rs` contains only `pub mod` and `pub use`. It holds no logic, traits, or types.
+- One op is one file. Add files for a new op. Do not expand existing files.
+- Backend directories are required: `cpu/`, `cuda/`, `wgpu/`, not `cpu.rs`. Kernels go in `cuda/kernels/<domain>/` and `wgpu/shaders/`.
 
 ### Runtime-generic algorithms
 
-- Be generic over `R: Runtime`; operate on `Tensor<R>`, never on `&[f32]` /
-  `Vec<f32>` parameters or struct fields.
-- Build computation out of numr ops, not scalar `for` loops — numr uses SIMD on
-  CPU and kernels on GPU, so scalar loops are both slower and not portable.
-- Respect backend dtype limits (e.g. the WebGPU backend is F32-only) and surface
-  a clear error rather than silently degrading.
+- Be generic over `R: Runtime`. Operate on `Tensor<R>`, never on `&[f32]`, `Vec<f32>`, or struct fields of those types.
+- Build computation from numr ops, not scalar `for` loops. numr uses SIMD on CPU and kernels on GPU. Scalar loops are slower and not portable.
+- Respect backend dtype limits, such as WebGPU being F32-only. Return a clear error instead of degrading silently.
 
 ### No GPU↔CPU transfers in hot paths
 
-Host/device transfers cost far more than the computation itself. Inside ops, do
-**not** call `tensor.to_vec()` or `Tensor::from_slice(...)`. The only acceptable
-transfers are at the public API boundary (user input / returned output) and a
-single scalar pulled to the host for a convergence/control-flow check. Keep state
-in `Tensor<R>` and keep loops on-device.
+Host/device transfers cost far more than the computation. Inside ops, never call `tensor.to_vec()` or `Tensor::from_slice(...)`. Two transfers are allowed:
+
+- At the public API boundary, for user input and returned output.
+- A single scalar pulled to the host for a convergence or control-flow check.
+
+Keep state in `Tensor<R>`. Keep loops on the device.
 
 ## File size limits
 
-| File type               | Soft | Hard |
-| ----------------------- | ---- | ---- |
-| `traits/*.rs`           | 100  | 200  |
-| `impl_generic/*.rs`     | 300  | 500  |
-| `cpu/*.rs`, `cuda/*.rs` | 200  | 400  |
-| kernel files            | 300  | 500  |
-| `mod.rs`                | 10   | 30   |
-| `nn/*.rs`               | 200  | 400  |
-| model architectures     | 300  | 500  |
+| File type | Soft limit | Hard limit |
+| --- | --- | --- |
+| `traits/*.rs` | 100 | 200 |
+| `impl_generic/*.rs` | 300 | 500 |
+| `cpu/*.rs`, `cuda/*.rs` | 200 | 400 |
+| Kernel files | 300 | 500 |
+| `mod.rs` | 10 | 30 |
+| `nn/*.rs` | 200 | 400 |
+| Model architectures | 300 | 500 |
 
 Prefer many small, focused files over few large ones.
 
-## Building with backends
+## Build
 
 ```bash
 cargo build --release                  # CPU (default)
-cargo build --release --features cuda  # CUDA (requires a CUDA 12.x toolchain)
+cargo build --release --features cuda  # CUDA (requires CUDA 12.8+ or 13.x)
 cargo build --release --features wgpu  # WebGPU
 ```
 
 ## Testing
 
-- Put unit tests in the same file as the code under test
-  (`#[cfg(test)] mod tests`). Use integration tests under `tests/` for public-API
-  behavior.
-- For composite ops, assert numerical correctness against a reference result —
-  and verify a fused kernel matches its `impl_generic` output, not just that it
-  returns `Ok`.
-- A backend-specific test should skip gracefully when no device is available
-  rather than fail.
+- Put unit tests in the same file as the code, in `#[cfg(test)] mod tests`. Put public-API behavior tests under `tests/`.
+- For composite ops, assert numerical correctness against a reference result. Check that a fused kernel matches its `impl_generic` output, not only that it returns `Ok`.
+- A backend-specific test skips gracefully when no device is available.
 
 ```bash
 cargo test                             # CPU
@@ -168,10 +134,9 @@ cargo test --features wgpu             # WebGPU
 cargo test --all-features
 ```
 
-## Local quality checks
+## Quality checks
 
-Run these before submitting. Clippy is run with `-D warnings` to match CI, so a
-warning is a failure — treat it as one locally too.
+Run these before you submit. CI runs clippy with `-D warnings`, so treat a warning as an error.
 
 ```bash
 cargo fmt --all -- --check
@@ -179,25 +144,20 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-If you touch GPU backends, also run clippy with `--features cuda` and
-`--features wgpu`.
+If you touch GPU backends, also run clippy with `--features cuda` and `--features wgpu`.
 
-## Pull request guidelines
+## Pull requests
 
-- Keep PRs focused and scoped.
-- Preserve the module structure, domain subdirectories, and `impl_generic`
-  pattern described above.
-- Include tests for behavioral changes; verify parity across backends and
-  against `impl_generic` for fused kernels.
+- Keep each pull request focused and scoped.
+- Keep the module structure, domain subdirectories, and `impl_generic` pattern.
+- Include tests for behavioral changes. Check parity across backends, and check fused kernels against `impl_generic`.
 - Update docs when public APIs or features change.
-- **No `.unwrap()` / `.expect()` in library code** — return a typed error with
-  context.
-- No reimplemented numr ops, no runtime wrappers, no GPU↔CPU transfers in hot
-  paths, no vendor libraries (cuBLAS/cuDNN/MKL).
+- **No `.unwrap()` or `.expect()` in library code.** Return a typed error with context.
+- Do not add reimplemented numr ops, runtime wrappers, GPU↔CPU transfers in hot paths, or vendor libraries (cuBLAS, cuDNN, MKL).
 
 ## Commit messages
 
-Use Conventional Commits with a clear, imperative summary, for example:
+Use Conventional Commits with a clear, imperative summary:
 
 ```
 feat(attention): add sliding-window support to flash_attention_fwd

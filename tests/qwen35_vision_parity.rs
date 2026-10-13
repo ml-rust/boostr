@@ -131,8 +131,8 @@ fn load_model(
 ) {
     let gguf =
         Gguf::open(model_path).unwrap_or_else(|e| panic!("open {}: {e}", model_path.display()));
-    let config = qwen35_config_from_gguf(gguf.metadata())
-        .unwrap_or_else(|e| panic!("qwen35_config_from_gguf: {e}"));
+    let config =
+        qwen35_config_from_gguf(&gguf).unwrap_or_else(|e| panic!("qwen35_config_from_gguf: {e}"));
     drop(gguf);
 
     let mut varmap = VarMap::<CpuRuntime>::from_gguf(model_path, device)

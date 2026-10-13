@@ -23,14 +23,19 @@
 //! | `qwen35.full_attention_interval`          | `hybrid_layers`                |
 //! | `tokenizer.ggml.tokens` (length)          | `vocab_size`                   |
 //! | `prism.hadamard.*`                        | `hadamard`, `gdn.v_grouped`    |
+//! | `output.weight` tensor (absence)          | `tie_word_embeddings`          |
 
 use crate::error::{Error, Result};
-use crate::format::gguf::{GgufMetadata, HadamardContract};
+use crate::format::gguf::{Gguf, GgufMetadata, HadamardContract};
 use crate::model::config::{
     GdnConfig, HybridConfig, Qwen35AttentionConfig, UniversalConfig, default_gdn_chunk_size,
 };
 
 const ARCH: &str = "qwen35";
+
+/// The GGUF name of the output projection. A file without it ties the head
+/// to `token_embd.weight`, as llama.cpp's `qwen35` loader does.
+const HEAD_TENSOR: &str = "output.weight";
 
 fn missing(key: &str) -> Error {
     Error::ModelError {
@@ -73,7 +78,10 @@ fn rope_sections(meta: &GgufMetadata) -> Result<[usize; 4]> {
     ])
 }
 
-/// Build the `qwen35` [`UniversalConfig`] from GGUF metadata.
+/// Build the `qwen35` [`UniversalConfig`] from a GGUF header.
+///
+/// The header keys hold no tie flag. `tie_word_embeddings` is set when the
+/// tensor table has no `output.weight`.
 ///
 /// # Errors
 ///
@@ -81,7 +89,14 @@ fn rope_sections(meta: &GgufMetadata) -> Result<[usize; 4]> {
 /// key in the module table is missing, `attention.value_length` differs
 /// from `attention.key_length`, the `prism.hadamard.*` block is malformed,
 /// or the assembled config fails [`UniversalConfig::validate`].
-pub fn qwen35_config_from_gguf(meta: &GgufMetadata) -> Result<UniversalConfig> {
+pub fn qwen35_config_from_gguf(gguf: &Gguf) -> Result<UniversalConfig> {
+    let tied = gguf.tensor_info(HEAD_TENSOR).is_err();
+    config_from_metadata(gguf.metadata(), tied)
+}
+
+/// [`qwen35_config_from_gguf`] over the metadata alone, with the tie flag
+/// the tensor table gave.
+fn config_from_metadata(meta: &GgufMetadata, tie_word_embeddings: bool) -> Result<UniversalConfig> {
     let arch = meta
         .architecture()
         .ok_or_else(|| missing("general.architecture"))?;
@@ -148,9 +163,7 @@ pub fn qwen35_config_from_gguf(meta: &GgufMetadata) -> Result<UniversalConfig> {
         hybrid_layers: Some(HybridConfig::from_full_attention_interval(
             num_layers, interval,
         )),
-        // The Bonsai file ships a separate `output.weight`. The loader
-        // errors when this is set and the head is absent.
-        tie_word_embeddings: false,
+        tie_word_embeddings,
         grow_vocab: false,
         vision: None,
         audio: None,
@@ -221,7 +234,7 @@ mod tests {
 
     #[test]
     fn bonsai_header_derives_full_config() {
-        let cfg = qwen35_config_from_gguf(&meta(bonsai_pairs())).unwrap();
+        let cfg = config_from_metadata(&meta(bonsai_pairs()), false).unwrap();
         assert_eq!(cfg.model_type, "qwen35");
         assert_eq!(cfg.vocab_size, 248_320);
         assert_eq!(cfg.hidden_size, 5120);
@@ -264,7 +277,7 @@ mod tests {
             "tokenizer.ggml.tokens",
             GgufValue::Array(vec![GgufValue::String("a".into()); 7]),
         ));
-        let cfg = qwen35_config_from_gguf(&meta(pairs)).unwrap();
+        let cfg = config_from_metadata(&meta(pairs), false).unwrap();
         assert_eq!(cfg.vocab_size, 7);
     }
 
@@ -274,7 +287,7 @@ mod tests {
             .into_iter()
             .filter(|(k, _)| *k != "qwen35.ssm.group_count")
             .collect();
-        let err = qwen35_config_from_gguf(&meta(pairs))
+        let err = config_from_metadata(&meta(pairs), false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("qwen35.ssm.group_count"), "{err}");
@@ -285,7 +298,7 @@ mod tests {
         let mut pairs = bonsai_pairs();
         pairs.retain(|(k, _)| *k != "general.architecture");
         pairs.push(("general.architecture", GgufValue::String("llama".into())));
-        let err = qwen35_config_from_gguf(&meta(pairs))
+        let err = config_from_metadata(&meta(pairs), false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("llama"), "{err}");
@@ -296,6 +309,82 @@ mod tests {
         let mut pairs = bonsai_pairs();
         pairs.retain(|(k, _)| *k != "qwen35.attention.value_length");
         pairs.push(("qwen35.attention.value_length", u32v(128)));
-        assert!(qwen35_config_from_gguf(&meta(pairs)).is_err());
+        assert!(config_from_metadata(&meta(pairs), false).is_err());
+    }
+
+    fn put_str(buf: &mut Vec<u8>, s: &str) {
+        buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    }
+
+    /// One metadata value: the `u32`, `f32`, string and `i32`-array
+    /// values `bonsai_pairs` uses.
+    fn put_value(buf: &mut Vec<u8>, value: &GgufValue) {
+        use crate::format::gguf::GgufValueType as T;
+        match value {
+            GgufValue::Uint32(v) => {
+                buf.extend_from_slice(&(T::Uint32 as u32).to_le_bytes());
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            GgufValue::Float32(v) => {
+                buf.extend_from_slice(&(T::Float32 as u32).to_le_bytes());
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            GgufValue::String(s) => {
+                buf.extend_from_slice(&(T::String as u32).to_le_bytes());
+                put_str(buf, s);
+            }
+            GgufValue::Array(items) => {
+                buf.extend_from_slice(&(T::Array as u32).to_le_bytes());
+                buf.extend_from_slice(&(T::Int32 as u32).to_le_bytes());
+                buf.extend_from_slice(&(items.len() as u64).to_le_bytes());
+                for item in items {
+                    let GgufValue::Int32(v) = item else {
+                        panic!("only i32 arrays are written, got {item:?}");
+                    };
+                    buf.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+            other => panic!("value not written by this helper: {other:?}"),
+        }
+    }
+
+    /// A GGUF v3 file of `pairs` and one F32 `[32]` tensor per name in
+    /// `tensors`.
+    fn gguf(pairs: &[(&str, GgufValue)], tensors: &[&str]) -> Gguf {
+        use crate::format::gguf::GgmlType;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0x4655_4747u32.to_le_bytes());
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&(tensors.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&(pairs.len() as u64).to_le_bytes());
+        for (key, value) in pairs {
+            put_str(&mut buf, key);
+            put_value(&mut buf, value);
+        }
+        for (i, name) in tensors.iter().enumerate() {
+            put_str(&mut buf, name);
+            buf.extend_from_slice(&1u32.to_le_bytes());
+            buf.extend_from_slice(&32u64.to_le_bytes());
+            buf.extend_from_slice(&(GgmlType::F32 as u32).to_le_bytes());
+            buf.extend_from_slice(&(i as u64 * 128).to_le_bytes());
+        }
+        buf.resize(buf.len().div_ceil(32) * 32, 0);
+        buf.resize(buf.len() + tensors.len() * 128, 0);
+        Gguf::from_bytes(buf).unwrap()
+    }
+
+    /// No `output.weight`: the head is the embedding, as llama.cpp reads
+    /// such a file.
+    #[test]
+    fn file_without_output_weight_ties_the_head() {
+        let file = gguf(&bonsai_pairs(), &["token_embd.weight"]);
+        assert!(qwen35_config_from_gguf(&file).unwrap().tie_word_embeddings);
+    }
+
+    #[test]
+    fn file_with_output_weight_keeps_its_own_head() {
+        let file = gguf(&bonsai_pairs(), &["token_embd.weight", HEAD_TENSOR]);
+        assert!(!qwen35_config_from_gguf(&file).unwrap().tie_word_embeddings);
     }
 }

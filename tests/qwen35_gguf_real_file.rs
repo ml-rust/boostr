@@ -87,7 +87,7 @@ fn header_derives_bonsai_config() {
         return;
     };
     let gguf = Gguf::open(&path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
-    let config = qwen35_config_from_gguf(gguf.metadata())
+    let config = qwen35_config_from_gguf(&gguf)
         .unwrap_or_else(|e| panic!("qwen35_config_from_gguf on {}: {e}", path.display()));
 
     assert_eq!(config.model_type, "qwen35");
@@ -135,7 +135,7 @@ fn loads_and_runs_prefill_then_decode() {
 
     let start = Instant::now();
     let gguf = Gguf::open(&path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
-    let config = qwen35_config_from_gguf(gguf.metadata())
+    let config = qwen35_config_from_gguf(&gguf)
         .unwrap_or_else(|e| panic!("qwen35_config_from_gguf on {}: {e}", path.display()));
     drop(gguf);
 

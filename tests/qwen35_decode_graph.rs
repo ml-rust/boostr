@@ -189,7 +189,7 @@ fn real_file_graph_matches_eager() {
     let (client, device) = cuda_setup();
 
     let gguf = boostr::format::gguf::Gguf::open(&model_path).unwrap();
-    let config = boostr::model::qwen35_config_from_gguf(gguf.metadata()).unwrap();
+    let config = boostr::model::qwen35_config_from_gguf(&gguf).unwrap();
     drop(gguf);
     let mut varmap = boostr::nn::VarMap::<CudaRuntime>::from_gguf(&model_path, &device).unwrap();
     let mut vb = boostr::nn::VarBuilder::new(&mut varmap, &device);

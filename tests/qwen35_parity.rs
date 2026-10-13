@@ -203,7 +203,7 @@ fn load_model(
 
     let gguf =
         Gguf::open(model_path).unwrap_or_else(|e| panic!("open {}: {e}", model_path.display()));
-    let config = qwen35_config_from_gguf(gguf.metadata())
+    let config = qwen35_config_from_gguf(&gguf)
         .unwrap_or_else(|e| panic!("qwen35_config_from_gguf on {}: {e}", model_path.display()));
     drop(gguf);
 

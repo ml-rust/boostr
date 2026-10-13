@@ -17,6 +17,24 @@ pub(super) fn read_exact(cur: &mut Cursor<&[u8]>, buf: &mut [u8]) -> Result<()> 
     })
 }
 
+/// Read exactly `len` bytes. `len` is checked against what the input still
+/// holds before anything is allocated, so a corrupt length cannot request an
+/// oversized buffer.
+pub(super) fn read_bytes(cur: &mut Cursor<&[u8]>, len: usize) -> Result<Vec<u8>> {
+    let remaining = cur
+        .get_ref()
+        .len()
+        .saturating_sub(usize::try_from(cur.position()).unwrap_or(usize::MAX));
+    if len > remaining {
+        return Err(Error::ModelError {
+            reason: format!("truncated pickle: {len} bytes declared, {remaining} left"),
+        });
+    }
+    let mut buf = vec![0u8; len];
+    read_exact(cur, &mut buf)?;
+    Ok(buf)
+}
+
 pub(super) fn read_u16(cur: &mut Cursor<&[u8]>) -> Result<u16> {
     let mut b = [0u8; 2];
     read_exact(cur, &mut b)?;

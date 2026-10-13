@@ -6,7 +6,7 @@
 //! opaque placeholder or a parse error.
 
 use super::pickle::PValue;
-use super::types::{PtContents, PtTensorMeta};
+use super::types::{PtContents, PtScalar, PtTensorMeta};
 use crate::error::{Error, Result};
 use numr::dtype::DType;
 use std::collections::HashMap;
@@ -157,6 +157,7 @@ pub(super) fn as_usize_tuple(v: &PValue) -> Result<Vec<usize>> {
 
 pub(super) fn finalize_root(root: PValue) -> Result<PtContents> {
     let mut raw = HashMap::new();
+    let mut raw_scalars = HashMap::new();
     match root {
         PValue::Tensor(meta) => {
             raw.insert(String::new(), meta);
@@ -164,10 +165,10 @@ pub(super) fn finalize_root(root: PValue) -> Result<PtContents> {
         PValue::Dict(_) => {
             // Recursively flatten nested dicts. Kokoro's
             // `kokoro-v1_0.pth` is `{top: {module: {sub: tensor, …}}, …}`.
-            flatten_into("", &root, &mut raw);
-            if raw.is_empty() {
+            flatten_into("", &root, &mut raw, &mut raw_scalars);
+            if raw.is_empty() && raw_scalars.is_empty() {
                 return Err(Error::ModelError {
-                    reason: "dict contained no recognizable tensors".into(),
+                    reason: "dict contained no recognizable tensors or scalars".into(),
                 });
             }
         }
@@ -185,7 +186,11 @@ pub(super) fn finalize_root(root: PValue) -> Result<PtContents> {
         .into_iter()
         .map(|(k, v)| (strip_module_segments(&k), v))
         .collect();
-    Ok(PtContents { tensors })
+    let scalars: HashMap<String, PtScalar> = raw_scalars
+        .into_iter()
+        .map(|(k, v)| (strip_module_segments(&k), v))
+        .collect();
+    Ok(PtContents { tensors, scalars })
 }
 
 fn strip_module_segments(key: &str) -> String {
@@ -196,12 +201,19 @@ fn strip_module_segments(key: &str) -> String {
 }
 
 /// Walk the pickle dict tree, appending `.`-separated key segments and
-/// inserting tensor leaves into `out`. `module.` stripping happens in
-/// [`finalize_root`] as a post-pass.
-fn flatten_into(prefix: &str, value: &PValue, out: &mut HashMap<String, PtTensorMeta>) {
-    match value {
+/// inserting tensor leaves into `out` and `bool`/`int`/`float`/`str` leaves
+/// into `scalars`. `module.` stripping happens in [`finalize_root`] as a
+/// post-pass.
+fn flatten_into(
+    prefix: &str,
+    value: &PValue,
+    out: &mut HashMap<String, PtTensorMeta>,
+    scalars: &mut HashMap<String, PtScalar>,
+) {
+    let scalar = match value {
         PValue::Tensor(meta) => {
             out.insert(prefix.to_string(), meta.clone());
+            return;
         }
         PValue::Dict(entries) => {
             for (k, v) in entries {
@@ -213,12 +225,18 @@ fn flatten_into(prefix: &str, value: &PValue, out: &mut HashMap<String, PtTensor
                     "" => key.to_string(),
                     p => format!("{p}.{key}"),
                 };
-                flatten_into(&next_prefix, v, out);
+                flatten_into(&next_prefix, v, out, scalars);
             }
+            return;
         }
-        _ => {
-            // List/tuple/opaque values are ignored — Kokoro
-            // state_dicts only nest dicts and leaf tensors.
-        }
+        PValue::Bool(b) => PtScalar::Bool(*b),
+        PValue::Int(i) => PtScalar::Int(*i),
+        PValue::Float(f) => PtScalar::Float(*f),
+        PValue::Str(s) => PtScalar::Str(s.clone()),
+        // List/tuple/opaque values are ignored.
+        _ => return,
+    };
+    if !prefix.is_empty() {
+        scalars.insert(prefix.to_string(), scalar);
     }
 }

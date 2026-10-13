@@ -22,5 +22,5 @@ pub use peft::{LoraPair, PeftAdapter, PeftConfig};
 pub use safetensors::{SafeTensors, TensorInfo};
 pub use safetensors_loader::SafeTensorsLoader;
 pub use tcf::{TcfHeaderInfo, TcfLoader, TcfModuleInfo, TcfSession, TcfTensorInfo};
-pub use torch_pt::{TorchStateDict, load_tensor_pt, load_voice_pt};
+pub use torch_pt::{PtScalar, TorchStateDict, load_tensor_pt, load_voice_pt};
 pub use weight_source::{DenseWeightSource, TcfSource, WeightSource};

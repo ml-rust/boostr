@@ -2,7 +2,7 @@
 
 use super::io::{build_tensor_from_bytes, find_archive_layout, read_zip_entry};
 use super::pickle::parse_pickle;
-use super::types::PtTensorMeta;
+use super::types::{PtScalar, PtTensorMeta};
 use crate::error::{Error, Result};
 use numr::dtype::DType;
 use numr::runtime::Runtime;
@@ -115,6 +115,8 @@ pub struct TorchStateDict {
     /// Flattened `{dotted.name → tensor metadata}`, plus the data-prefix
     /// string from the archive layout (e.g. `"model/data"`).
     tensors: HashMap<String, PtTensorMeta>,
+    /// Flattened `{dotted.name → scalar}` for non-tensor leaves.
+    scalars: HashMap<String, PtScalar>,
     data_prefix: String,
 }
 
@@ -137,6 +139,7 @@ impl TorchStateDict {
         Ok(Self {
             path: path.to_path_buf(),
             tensors: contents.tensors,
+            scalars: contents.scalars,
             data_prefix,
         })
     }
@@ -149,6 +152,18 @@ impl TorchStateDict {
     /// Whether a given flattened key is in the state dict.
     pub fn has(&self, name: &str) -> bool {
         self.tensors.contains_key(name)
+    }
+
+    /// The `bool`, `int`, `float` or `str` leaf at a flattened key, such as
+    /// `"temperature"` or `"args.lr"`. `None` when the key is absent or holds
+    /// something else.
+    pub fn scalar(&self, name: &str) -> Option<&PtScalar> {
+        self.scalars.get(name)
+    }
+
+    /// The shape of the tensor at a flattened key, without reading its data.
+    pub fn shape(&self, name: &str) -> Option<&[usize]> {
+        self.tensors.get(name).map(|m| m.shape.as_slice())
     }
 
     /// Materialize a tensor by flattened name. Opens the archive fresh each

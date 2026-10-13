@@ -18,10 +18,37 @@ pub(super) struct PtTensorMeta {
     pub storage_elem_size: usize,
 }
 
+/// A non-tensor leaf of a saved dict: a Python `bool`, `int`, `float` or
+/// `str`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PtScalar {
+    /// A Python `bool`.
+    Bool(bool),
+    /// A Python `int` that fits in 64 bits.
+    Int(i64),
+    /// A Python `float`.
+    Float(f64),
+    /// A Python `str`.
+    Str(String),
+}
+
+impl PtScalar {
+    /// The value as a number: a `float`, or an `int` widened to `f64`.
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Self::Float(v) => Some(*v),
+            Self::Int(v) => Some(*v as f64),
+            _ => None,
+        }
+    }
+}
+
 /// Result of parsing a `.pt` file.
 #[derive(Debug, Clone)]
 pub(super) struct PtContents {
     /// Either the bare tensor ("" key) or a flat map of `name -> meta` if the
     /// top-level was a dict.
     pub tensors: HashMap<String, PtTensorMeta>,
+    /// The scalar leaves of a top-level dict, by the same dotted names.
+    pub scalars: HashMap<String, PtScalar>,
 }

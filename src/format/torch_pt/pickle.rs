@@ -1,8 +1,8 @@
 //! Minimal pickle virtual machine covering the opcodes `torch.save` emits.
 
 use super::reader::{
-    from_utf8, memo_get, pop, read_exact, read_i32, read_line, read_signed_long, read_u16,
-    read_u32, read_u64,
+    from_utf8, memo_get, pop, read_bytes, read_exact, read_i32, read_line, read_signed_long,
+    read_u16, read_u32, read_u64,
 };
 use super::reduce::{apply_reduce, finalize_root, resolve_persistent_id};
 use super::types::{PtContents, PtTensorMeta};
@@ -16,6 +16,7 @@ pub(super) enum PValue {
     None,
     Bool(bool),
     Int(i64),
+    Float(f64),
     Str(String),
     Tuple(Vec<PValue>),
     List(Vec<PValue>),
@@ -80,8 +81,7 @@ pub(super) fn parse_pickle(bytes: &[u8]) -> Result<PtContents> {
                 } else {
                     read_u32(&mut cur)? as usize
                 };
-                let mut buf = vec![0u8; len];
-                read_exact(&mut cur, &mut buf)?;
+                let buf = read_bytes(&mut cur, len)?;
                 stack.push(PValue::Str(from_utf8(buf)?));
             }
             b'K' => {
@@ -96,6 +96,12 @@ pub(super) fn parse_pickle(bytes: &[u8]) -> Result<PtContents> {
             b'J' => {
                 let v = read_i32(&mut cur)?;
                 stack.push(PValue::Int(v as i64));
+            }
+            b'G' => {
+                // BINFLOAT: 8-byte big-endian IEEE 754 double
+                let mut v = [0u8; 8];
+                read_exact(&mut cur, &mut v)?;
+                stack.push(PValue::Float(f64::from_be_bytes(v)));
             }
             0x8a => {
                 // LONG1: one-byte length, little-endian signed
@@ -292,6 +298,7 @@ pub(super) fn parse_pickle(bytes: &[u8]) -> Result<PtContents> {
 mod tests {
     use super::super::api::load_tensor_pt;
     use super::super::reduce::{as_usize_tuple, dtype_from_global};
+    use super::super::types::PtScalar;
     use super::*;
 
     #[test]
@@ -326,6 +333,51 @@ mod tests {
     #[test]
     fn as_usize_tuple_rejects_non_tuple() {
         assert!(as_usize_tuple(&PValue::Int(3)).is_err());
+    }
+
+    /// `{"t": 2.5, "n": 7, "on": True, "s": "fp32", "d": {"x": -0.125}}`
+    /// at protocol 2: BINFLOAT values and nested scalars land in `scalars`.
+    #[test]
+    fn binfloat_and_nested_scalars_are_kept() {
+        let mut p = vec![0x80, 2, b'}', b'(', 0x8c, 1, b't', b'G'];
+        p.extend_from_slice(&2.5f64.to_be_bytes());
+        p.extend_from_slice(&[0x8c, 1, b'n', b'K', 7, 0x8c, 2, b'o', b'n', 0x88]);
+        p.extend_from_slice(&[0x8c, 1, b's', 0x8c, 4, b'f', b'p', b'3', b'2']);
+        p.extend_from_slice(&[0x8c, 1, b'd', b'}', 0x8c, 1, b'x', b'G']);
+        p.extend_from_slice(&(-0.125f64).to_be_bytes());
+        p.extend_from_slice(b"su.");
+        let contents = parse_pickle(&p).unwrap();
+        assert!(contents.tensors.is_empty());
+        let s = &contents.scalars;
+        assert_eq!(s.get("t"), Some(&PtScalar::Float(2.5)));
+        assert_eq!(s.get("n"), Some(&PtScalar::Int(7)));
+        assert_eq!(s.get("on"), Some(&PtScalar::Bool(true)));
+        assert_eq!(s.get("s"), Some(&PtScalar::Str("fp32".into())));
+        assert_eq!(s.get("d.x"), Some(&PtScalar::Float(-0.125)));
+    }
+
+    /// A BINFLOAT with fewer than 8 payload bytes is an error, not a panic.
+    #[test]
+    fn truncated_binfloat_is_an_error() {
+        let mut p = vec![0x80, 2, b'G'];
+        p.extend_from_slice(&2.5f64.to_be_bytes()[..7]);
+        let e = parse_pickle(&p).unwrap_err().to_string();
+        assert!(e.contains("truncated pickle"), "{e}");
+    }
+
+    /// A string whose declared length exceeds what the input holds is
+    /// refused before any buffer of that size is allocated.
+    #[test]
+    fn oversized_declared_string_is_an_error() {
+        let mut p = vec![0x80, 2, b'X'];
+        p.extend_from_slice(&u32::MAX.to_le_bytes());
+        p.extend_from_slice(b"ab");
+        let e = parse_pickle(&p).unwrap_err().to_string();
+        assert!(e.contains("truncated pickle"), "{e}");
+        let mut q = vec![0x80, 4, 0x8d];
+        q.extend_from_slice(&u64::MAX.to_le_bytes());
+        let e = parse_pickle(&q).unwrap_err().to_string();
+        assert!(e.contains("truncated pickle"), "{e}");
     }
 
     #[test]

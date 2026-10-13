@@ -1,4 +1,5 @@
-//! Fitting one temperature to isolated Score samples.
+//! Fitting one temperature to isolated Score samples, and the bracketed
+//! search it runs, which the mixed Score fit shares.
 //!
 //! The NLL of the combined level distribution is not convex in `beta = 1
 //! / T` (see [`super::objective`]), so a Newton search from one start can
@@ -21,6 +22,7 @@ use crate::error::Result;
 use crate::inference::decision::calibrate::{
     FitOutcome, MAX_ITERATIONS, TemperatureBounds, TemperatureFit, backtrack, check_bounds, finish,
 };
+use crate::inference::decision::objective::ObjectivePoint;
 
 /// The temperatures the bracketing scan evaluates, bounds included.
 pub const SCAN_POINTS: usize = 129;
@@ -82,13 +84,27 @@ pub fn fit_temperature_isolated(
 ) -> Result<TemperatureFit> {
     validate_isolated(samples)?;
     check_bounds(bounds)?;
-    let eval = |beta: f64| evaluate_isolated(samples, beta);
+    Ok(fit_bracketed(
+        |beta| evaluate_isolated(samples, beta),
+        is_flat_isolated(samples),
+        bounds,
+    ))
+}
+
+/// The scan, golden-section and Newton fit of an objective `eval` in
+/// `beta` that need not be convex. `flat` says the objective does not
+/// depend on `beta`. The samples and `bounds` must be checked already.
+pub(crate) fn fit_bracketed(
+    eval: impl Fn(f64) -> ObjectivePoint + Copy,
+    flat: bool,
+    bounds: TemperatureBounds,
+) -> TemperatureFit {
     let (lo, hi) = (1.0 / bounds.max, 1.0 / bounds.min);
     let nll_before = eval(1.0).nll;
-    if is_flat_isolated(samples) {
+    if flat {
         let beta = 1.0_f64.clamp(lo, hi);
         let nll = eval(beta).nll;
-        return Ok(finish(beta, nll, nll_before, 0, bounds, FitOutcome::Flat));
+        return finish(beta, nll, nll_before, 0, bounds, FitOutcome::Flat);
     }
 
     let (mut best, mut best_nll) = (0, f64::INFINITY);
@@ -114,14 +130,14 @@ pub fn fit_temperature_isolated(
     }
     let outward = (beta == lo && point.grad >= 0.0) || (beta == hi && point.grad <= 0.0);
     if outward {
-        return Ok(finish(
+        return finish(
             beta,
             point.nll,
             nll_before,
             iterations,
             bounds,
             FitOutcome::Bound,
-        ));
+        );
     }
 
     let mut polish = 0;
@@ -148,9 +164,7 @@ pub fn fit_temperature_isolated(
     } else {
         FitOutcome::Converged
     };
-    Ok(finish(
-        beta, point.nll, nll_before, iterations, bounds, outcome,
-    ))
+    finish(beta, point.nll, nll_before, iterations, bounds, outcome)
 }
 
 #[cfg(test)]

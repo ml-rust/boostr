@@ -1,6 +1,7 @@
 //! [`GenerateState::admit`] and [`GenerateState::release`]: seating one
 //! request into a free slot, and giving the slot back.
 
+use super::super::prelude::*;
 use super::super::*;
 use crate::model::audio::voxcpm::model::prefill::PrefillState;
 

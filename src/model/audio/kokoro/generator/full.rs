@@ -1,5 +1,23 @@
 //! The generator's forward passes on any runtime: the source excitation,
 //! its spectrum, and the noise-conditioned upsampling stages.
+//!
+//! Full path:
+//!
+//! ```text
+//! har = harmonic_excitation_spec(f0, seed)      # [B, n_fft+2, T] via STFT
+//! for each upsample stage i:
+//!     x = leaky_relu(x)
+//!     x_source = noise_res[i](noise_convs[i](har), style)
+//!     x = ups[i](x)                             # last stage: reflect-pad 1 left
+//!     x = x + x_source
+//!     x = mean(resblocks[i*K .. (i+1)*K](x, style))
+//! x = leaky_relu(x, 0.01)
+//! (mag, phase) = conv_post(x)
+//! ```
+//!
+//! The last stage pads the trunk with one reflected frame on the left
+//! before the excitation add, as upstream's `ReflectionPad1d((1, 0))` does,
+//! so the trunk meets the excitation's `center=True` frame count.
 
 use super::core::{IStftNetGenerator, POST_LEAKY_SLOPE};
 use crate::error::{Error, Result};

@@ -1,5 +1,29 @@
 //! `cfm_loss_from_conditioning`: the differentiable diffusion term — CFM
 //! interpolation, the DiT estimator pass, and the flow-matching loss.
+//!
+//! # One layout end to end
+//!
+//! [`LocalDit::forward`](crate::model::audio::voxcpm::local_dit::LocalDit::forward)
+//! takes and returns `[batch, patch_size, feat_dim]` — the same layout as
+//! [`TeacherForcedConditioning::cond`](crate::model::audio::voxcpm::model::TeacherForcedConditioning::cond),
+//! `target_patches`, `noise`, and therefore `flow_matching_interpolate`'s
+//! output `x_t`. The reference's `[batch, feat_dim, patch_size]` estimator
+//! I/O is a convention it transposes away internally (see
+//! `local_dit/dit/estimator.rs`); this port drops both transposes, so `x_t` and
+//! `cond.cond` go straight in and `v_pred` compares against
+//! `noise`/`target_patches` as returned.
+//!
+//! # Why `dt` is zero
+//!
+//! [`LocalDit::forward`](crate::model::audio::voxcpm::local_dit::LocalDit::forward)'s
+//! `dt` argument is the MEAN-VELOCITY delta, live only when
+//! `LocalDitConfig::mean_mode` is set — false on this checkpoint,
+//! per that field's own doc comment. The inference sampler
+//! (`local_dit/sampler`'s `dt_in`) always feeds zeros for the identical
+//! reason, and this training step matches it: `dt` is NOT the flow
+//! timestep `t` (that is a live, per-sample input) and is not free to drop,
+//! since `SinusoidalPosEmb(0)` is not the zero vector and `delta_time_mlp`
+//! still contributes a real bias.
 
 use crate::error::Result;
 use crate::model::audio::voxcpm::model::generate::{PatchGenerator, TeacherForcedConditioning};

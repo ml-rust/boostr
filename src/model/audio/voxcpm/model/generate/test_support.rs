@@ -10,6 +10,7 @@
 //! assertion in this module's sibling test modules has to know the answer
 //! without depending on the tiny weights' arithmetic.
 
+use super::prelude::*;
 use super::*;
 use crate::model::audio::voxcpm::local_dit::tests::{
     FEAT_DIM, HEAD_DIM, HIDDEN_DIM, PATCH_SIZE, layer, linear, model as dit_model, norm, t,

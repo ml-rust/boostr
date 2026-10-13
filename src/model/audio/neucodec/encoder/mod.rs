@@ -13,11 +13,6 @@
 //!   -> ResidualFsq::encode -> indices [1, T, 1] -> permute  [1, 1, T]
 //! ```
 //!
-//! Two steps below look like bugs and are not; both are documented at their
-//! call sites and verified against the reference implementation: the padding ALWAYS fires (even
-//! when the length is already a multiple of 320), and the two branches produce
-//! different frame counts that are TRUNCATED, never interpolated or aligned.
-//!
 //! - `limits`: the input-length guard and the always-fires padding arithmetic
 //! - `model`: [`NeuCodecEncoder`], its weights bundle, construction and loading
 //! - `encode`: the encode pipeline and its per-branch intermediates

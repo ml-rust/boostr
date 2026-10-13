@@ -1,4 +1,15 @@
 //! `prefill` and `decode_step`, over the cached layer stack in `super::stack`.
+//!
+//! # Bounds
+//!
+//! The reference's `step()` raises when `current_length >= max_length`, and
+//! nothing deeper in `forward_step` re-checks — an out-of-range position
+//! silently corrupts the cache write. Here [`MiniCpm4Model::decode_step`]
+//! rejects `position >= max_length` with an
+//! [`Error::InvalidArgument`](crate::error::Error::InvalidArgument) before
+//! any tensor is touched; there is no panicking index on this path.
+//!
+//! [`MiniCpm4Model::decode_step`]: crate::model::audio::voxcpm::minicpm4::MiniCpm4Model::decode_step
 
 use crate::error::{Error, Result};
 use crate::inference::LayeredKvCache;

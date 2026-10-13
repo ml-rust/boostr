@@ -1,6 +1,7 @@
 //! [`GenerateState::open`]: an empty state at a slot CEILING, allocated for
 //! one row.
 
+use super::super::prelude::*;
 use super::super::*;
 use crate::model::audio::voxcpm::minicpm4::LanePositions;
 use crate::model::audio::voxcpm::model::prefill::PrefillState;

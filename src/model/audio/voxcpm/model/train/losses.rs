@@ -9,6 +9,17 @@
 //! `fsq/layer`'s straight-through-estimator doc comment for the measured
 //! "zero gradient" finding), so a model fine-tuned that way keeps whatever
 //! stop behavior it started with.
+//!
+//! The `stop`/`losses` modules add the SECOND term the reference VoxCPM
+//! fine-tuning guide trains, `loss/stop`, and [`PatchGenerator::train_losses_with_noise`]/
+//! [`PatchGenerator::train_losses`] combine it with the `loss/diff` term
+//! from ONE shared [`PatchGenerator::teacher_forced_conditioning`] call.
+//!
+//! The optimizer step itself (building a `HashMap<TensorId, Tensor<R>>` from
+//! [`crate::nn::Module::trainable_parameters`] and calling
+//! [`crate::trainer::simple::SimpleTrainer::step`]) is the CALLER's job, the
+//! same way `crate::trainer` already works for every other model in this
+//! crate — nothing here is VoxCPM2-specific about running an optimizer.
 
 use super::dropout::{apply_cond_dropout, check_training_cfg_rate, draw_drop_cond};
 use crate::error::{Error, Result};

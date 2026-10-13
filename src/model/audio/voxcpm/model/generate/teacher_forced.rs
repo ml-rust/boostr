@@ -53,6 +53,7 @@
 //! Getting this shift wrong trains the model to predict the wrong patch,
 //! and nothing downstream catches it.
 
+use super::prelude::*;
 use super::*;
 use crate::nn::var_contiguous;
 use crate::ops::FlashAttentionOps;

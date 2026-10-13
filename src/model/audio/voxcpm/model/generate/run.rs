@@ -1,6 +1,7 @@
 //! [`PatchGenerator::generate`]: drive the loop until every row of the
 //! batch has finished.
 
+use super::prelude::*;
 use super::*;
 use crate::ops::FlashAttentionOps;
 

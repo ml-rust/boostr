@@ -1,5 +1,18 @@
 //! KV cache sizing for [`MiniCpm4Model`] and the validation both cached entry
 //! points share.
+//!
+//! # Cache-shape equivalence with the reference
+//!
+//! The reference (`voxcpm/modules/minicpm4/cache.py`) preallocates the cache to
+//! `max_length` and masks with `arange(max_length) <= position_id`;
+//! [`KvCache`](crate::inference::KvCache) exposes only the slots actually
+//! written, and the shared causal-mask builder admits `0..=position`. Both
+//! select the SAME keys, and only while positions are written in order from 0.
+//! [`MiniCpm4Attention::forward_cached`] carries the full argument at the
+//! masking site; [`MiniCpm4Model::decode_step`] enforces the ordering premise.
+//!
+//! [`MiniCpm4Model::decode_step`]: crate::model::audio::voxcpm::minicpm4::MiniCpm4Model::decode_step
+//! [`MiniCpm4Attention::forward_cached`]: crate::model::audio::voxcpm::minicpm4::MiniCpm4Attention::forward_cached
 
 use crate::error::{Error, Result};
 use crate::inference::{LayeredKvCache, LayeredKvCacheConfig};

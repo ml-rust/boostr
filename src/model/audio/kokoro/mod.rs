@@ -1,7 +1,5 @@
-//! Kokoro TTS model components (StyleTTS2-lite derivative).
-//!
-//! Inference-only. Training path is not planned — Kokoro weights ship
-//! pre-trained, published by the reference Kokoro project.
+//! Kokoro TTS model components (StyleTTS2-lite derivative). Inference-only. Training path is
+//! not planned — Kokoro weights ship pre-trained, published by the reference Kokoro project.
 
 pub mod ada_layer_norm;
 pub mod adain_resblk1d;
@@ -19,6 +17,7 @@ pub mod loader_v2;
 pub mod mag_phase_head;
 pub mod phoneme_vocab;
 pub mod prosody_predictor;
+mod reexports;
 pub mod snake;
 pub mod source_filter;
 pub mod style_projector;
@@ -27,44 +26,4 @@ pub mod text_encoder;
 pub mod voice_style;
 pub mod weight_source;
 
-// `KokoroConfig` lives with the other model configs under
-// `boostr::model::config::tts`; we re-export it here for convenience so the
-// kokoro module is a one-stop import for callers.
-pub use crate::model::config::KokoroConfig;
-// Kokoro's AdaIN1d (holds fc + norm weights, uses (1+γ)·norm+β formula).
-// Shadows `boostr::nn::AdaIn1d`, which is the generic utility variant with
-// external gamma/beta.
-pub use ada_layer_norm::AdaLayerNorm;
-pub use adain_resblk1d::{AdainResBlk1d, PoolParams};
-pub use adain_resblock::{AdaINResBlock1, AdaIn1d as KokoroAdaIn1d};
-pub use bert::{AlbertConfig, AlbertEmbeddings, AlbertLayer, AlbertModel, BertEncoder};
-pub use client::KokoroClient;
-pub use decoder::Decoder;
-pub use decoder_block::{DecoderBlock, UpsampleBlock};
-pub use duration_predictor::{DurationPredictor, decode_durations, length_regulator};
-pub use frame_predictor::{EnergyPredictor, FramePredictor, PitchPredictor};
-pub use generator::{GeneratorStftParams, IStftNetGenerator, IStftNetGeneratorOpts};
-pub use kokoro_v2::{KokoroModelV2, alignment_matrix_from_durations};
-#[allow(deprecated)]
-pub use loader::load_voice_style;
-pub use loader::{
-    load_bilstm, load_linear_tensors, load_lstm_direction, load_plain_conv1d, load_voice_pack,
-    load_weight_norm_pair, load_weight_normed_conv1d,
-};
-pub use loader_v2::{
-    AdainResBlk1dLoadOpts, AdainResBlock1LoadOpts, load_ada_layer_norm, load_adain_resblk1d,
-    load_adain_resblock1, load_albert_embeddings, load_albert_layer, load_kokoro_adain,
-    load_kokoro_full, load_kokoro_v2,
-};
-pub use mag_phase_head::MagPhaseHead;
-pub use phoneme_vocab::KokoroPhonemeVocab;
-pub use prosody_predictor::{
-    DurationEncoder, ProsodyBranch, ProsodyPredictor, decode_prosody_durations,
-};
-pub use snake::snake;
-pub use source_filter::{SineGen, SourceModuleHnNSF};
-pub use style_projector::StyleProjector;
-pub use synth_options::KokoroSynthOptions;
-pub use text_encoder::{ConvBlock, TextEncoder, TextEncoderConfig};
-pub use voice_style::{select_voice_style, split_voice_style};
-pub use weight_source::KokoroWeightSource;
+pub use reexports::*;

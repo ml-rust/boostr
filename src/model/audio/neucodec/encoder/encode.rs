@@ -1,5 +1,10 @@
 //! The encode pipeline: pad, run both branches, truncate, join, project,
 //! quantize.
+//!
+//! Two steps below look like bugs and are not; both are documented at their
+//! call sites and verified against the reference implementation: the padding ALWAYS fires (even
+//! when the length is already a multiple of 320), and the two branches produce
+//! different frame counts that are TRUNCATED, never interpolated or aligned.
 
 use super::axes::{min_time, narrow_time, to_time_last};
 use super::limits::{MAX_ENCODE_SAMPLES, check_encode_len, encode_alignment, encode_padding};

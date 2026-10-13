@@ -1,4 +1,8 @@
 //! Sampling knobs and the sway-corrected time schedule.
+//!
+//! The schedule is computed ONCE on the host as a `Vec<f32>`
+//! ([`cfm_time_span`]) and indexed per step, so the loop never reads a scalar
+//! back off a device tensor.
 
 use crate::error::{Error, Result};
 

@@ -1,7 +1,15 @@
 //! Shape validation and the stop-token decision, shared by every entry point
 //! into the per-patch loop (`step`, `step_with_noise`, the capturing variant,
 //! and `teacher_forced_conditioning`).
+//!
+//! # The one device read
+//!
+//! Step 5 of the loop in `step` turns two logits per row into control flow,
+//! so it cannot stay on device. The read is `argmax` ON DEVICE plus ONE
+//! `to_vec` of the resulting `[batch]` index, never the logits themselves.
+//! See [`stop_predicted`].
 
+use super::prelude::*;
 use super::*;
 
 /// Which rows' stop classifier picked class 1. `logits` is `[batch, 2]`.

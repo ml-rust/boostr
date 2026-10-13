@@ -13,11 +13,6 @@
 //! - `filterbank`: the triangular filterbank and its normalization ([`MelNorm`])
 //! - `options`: [`MelOptions`] and the log compression choice ([`LogSpec`])
 //! - `spectrogram`: framing, batched FFT, mel projection, log compression
-//!
-//! Numerical parity against HuggingFace's `WhisperFeatureExtractor` lives in
-//! `tests/whisper_mel_parity.rs`, which needs an out-of-repo fixture. The
-//! inline tests pin the parts that can be checked in isolation: the two mel
-//! scales, the filterbank shape, and the framing arithmetic.
 
 mod filterbank;
 mod options;

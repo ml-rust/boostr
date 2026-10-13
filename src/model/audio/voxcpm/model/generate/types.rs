@@ -3,7 +3,7 @@
 //! [`PatchGenerator`] — construction and row bookkeeping only. The loop
 //! itself lives in `super::step`.
 
-use super::*;
+use super::prelude::*;
 
 /// Stop-token class index in `stop_head`'s 2-wide output. Class 0 is
 /// "continue", class 1 is "stop". `pub(crate)` so

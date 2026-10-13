@@ -7,29 +7,8 @@
 //!   -> final RmsNorm                                   [B, S, hidden]
 //! ```
 //!
-//! Two things this model deliberately does NOT do:
-//!
-//! - **No `lm_head`.** The checkpoint has none. [`MiniCpm4Model::forward`]
-//!   returns hidden states, never logits.
-//! - **No KV cache on this path.** [`forward`](MiniCpm4Model::forward)
-//!   recomputes every position on every call. The incremental (KV-cached)
-//!   decode path — `new_kv_cache` / `prefill` / `decode_step` — lives in the
-//!   sibling [`decode`](crate::model::audio::voxcpm::minicpm4::decode) module
-//!   and leaves this one untouched.
-//!
-//! - **RoPE is OPTIONAL.** `residual_lm` runs NoPE (`no_rope`), so `rope` is
-//!   `None` there and every attention block skips the rotation on both the
-//!   full-sequence and the KV-cached path. Nothing takes its place.
-//!
-//! [`forward`](MiniCpm4Model::forward) takes pre-computed `inputs_embeds`
-//! rather than token ids, matching the real pipeline (which feeds a combined
-//! text+audio embedding). The `embed_tokens` table is exposed separately as
-//! [`MiniCpm4Model::embed`] and is OPTIONAL: VoxCPM2's `residual_lm` is this
-//! same architecture with `vocab_size` 0 and no table at all.
-//!
-//! Built from plain [`Var<R>`](numr::autograd::Var)-wrapped weights
-//! (`requires_grad = false`) rather than autograd-tracked training params —
-//! same inference-only posture as the `local_encoder` and AudioVAE siblings.
+//! `stack` documents what the model deliberately does not do, its inputs,
+//! and its weights.
 //!
 //! - `stack`: [`MiniCpm4Model`], accessors, `embed`, and the causal `forward`
 //! - `module`: the `Module` impl (parameter enumeration)

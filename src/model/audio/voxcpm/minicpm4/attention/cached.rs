@@ -1,4 +1,7 @@
 //! [`MiniCpm4Attention::forward_cached`]: the KV-cached causal path.
+//!
+//! Unlike the full-sequence forward, it calls the flash kernel directly, as
+//! `LlamaAttention::forward_with_kv_cache` does.
 
 use super::block::MiniCpm4Attention;
 use super::guards::{missing_rope, require_preallocated_cache};

@@ -10,40 +10,7 @@
 //! loss      = flow_matching_loss(v_pred, noise, target_patches)      scalar
 //! ```
 //!
-//! The optimizer step itself (building a `HashMap<TensorId, Tensor<R>>` from
-//! [`crate::nn::Module::trainable_parameters`] and calling
-//! [`crate::trainer::simple::SimpleTrainer::step`]) is the CALLER's job, the
-//! same way `crate::trainer` already works for every other model in this
-//! crate — nothing here is VoxCPM2-specific about running an optimizer.
-//!
-//! The `stop`/`losses` modules add the SECOND term the reference VoxCPM
-//! fine-tuning guide trains, `loss/stop`, and [`PatchGenerator::train_losses_with_noise`]/
-//! [`PatchGenerator::train_losses`] combine it with the `loss/diff` term
-//! from ONE shared [`PatchGenerator::teacher_forced_conditioning`] call.
-//!
-//! # One layout end to end
-//!
-//! [`LocalDit::forward`](crate::model::audio::voxcpm::local_dit::LocalDit::forward)
-//! takes and returns `[batch, patch_size, feat_dim]` — the same layout as
-//! [`TeacherForcedConditioning::cond`](super::TeacherForcedConditioning::cond),
-//! `target_patches`, `noise`, and therefore `flow_matching_interpolate`'s
-//! output `x_t`. The reference's `[batch, feat_dim, patch_size]` estimator
-//! I/O is a convention it transposes away internally (see
-//! `local_dit/dit/mod.rs`); this port drops both transposes, so `x_t` and
-//! `cond.cond` go straight in and `v_pred` compares against
-//! `noise`/`target_patches` as returned.
-//!
-//! # Why `dt` is zero
-//!
-//! [`LocalDit::forward`](crate::model::audio::voxcpm::local_dit::LocalDit::forward)'s
-//! `dt` argument is the MEAN-VELOCITY delta, live only when
-//! `LocalDitConfig::mean_mode` is set — false on this checkpoint,
-//! per that field's own doc comment. The inference sampler
-//! (`local_dit/sampler`'s `dt_in`) always feeds zeros for the identical
-//! reason, and this training step matches it: `dt` is NOT the flow
-//! timestep `t` (that is a live, per-sample input) and is not free to drop,
-//! since `SinusoidalPosEmb(0)` is not the zero vector and `delta_time_mlp`
-//! still contributes a real bias.
+//! `losses`: optimizer split, the stop term. `diff_loss`: shared layout, why `dt` is zero.
 //!
 //! - `dropout`: conditioning dropout (`training_cfg_rate`) and its draw
 //! - `cfm`: `cfm_loss_with_noise` and the seeded `cfm_loss` wrapper
@@ -52,8 +19,6 @@
 //! - `losses`: [`TrainLosses`] and the combined `train_losses*` entry points
 //!
 //! [`PatchGenerator::teacher_forced_conditioning`]: super::PatchGenerator::teacher_forced_conditioning
-//! [`PatchGenerator::train_losses_with_noise`]: super::PatchGenerator::train_losses_with_noise
-//! [`PatchGenerator::train_losses`]: super::PatchGenerator::train_losses
 
 mod cfm;
 mod diff_loss;

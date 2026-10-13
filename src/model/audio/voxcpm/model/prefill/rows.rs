@@ -1,6 +1,17 @@
 //! Host-side left-padded layout of a prefill batch: every row's
 //! [`SequenceLayout`] shifted right to a common `S_max`, plus the per-row
 //! start the attention kernels mask below.
+//!
+//! # Left padding
+//!
+//! Rows of different length share one `[B, S_max, ...]` tensor set. Each
+//! row's pad sits in FRONT, so row `S_max - 1` is the last real position of
+//! every row and one scalar `position` counter drives every row's cache.
+//! `base_lm`'s RoPE is shift-invariant (attention reads only position
+//! differences) and `residual_lm` is NoPE, so a row's values do not depend
+//! on how far right it was shifted. Pad positions carry zero embeddings,
+//! zero masks and the filler token id, and `kv_start[b]` keeps every real
+//! query from attending them.
 
 use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::model::config::REF_AUDIO_FILLER_ID;

@@ -4,6 +4,7 @@
 //! `step_with_noise_inner` is `generate`-module-private (default visibility),
 //! reachable here because this file is a descendant module of `generate`.
 
+use super::prelude::*;
 use super::*;
 use crate::model::audio::voxcpm::local_dit::cfm_time_span;
 use crate::ops::FlashAttentionOps;

@@ -1,3 +1,9 @@
+//! The `ProsodyPredictor` assembly and its F0/energy branches.
+//!
+//! Inference-only (no padding masks, no dropout). The generic
+//! `DurationPredictor` / `FramePredictor` structs from earlier turns still
+//! exist but are not used on the Kokoro path.
+
 use super::duration_encoder::DurationEncoder;
 use crate::error::{Error, Result};
 use crate::model::audio::kokoro::AdainResBlk1d;

@@ -1,5 +1,9 @@
 //! Image geometry and normalization for the Qwen3-VL tower.
 //!
+//! [`preprocess()`] picks a size on the 32-pixel grid between 8 and 4096
+//! output tokens, scales the image with a fixed-point bicubic filter,
+//! centers it on black, and normalizes bytes to `(v/255 - 0.5) / 0.5`.
+//!
 //! Pipeline: decode -> [`smart_resize`] picks a target size on a
 //! `patch * merge` grid -> [`resize_pad_ceil`] scales the image to fit and
 //! centers it on black -> [`normalize_chw`] maps bytes to planar floats.

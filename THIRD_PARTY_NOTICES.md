@@ -18,7 +18,7 @@ full MIT license text, as that license requires.
   - `src/model/audio/vits/` (the VITS / MMS-TTS model)
   - `src/model/audio/clap/` (the CLAP audio tower, including `swin_block.rs`,
     `window_attention.rs`, `stage.rs`, `audio_encoder.rs`, `projection.rs`)
-  - `src/model/audio/whisper_model/alignment.rs` (Whisper word-timestamp alignment)
+  - `src/model/audio/whisper_stack/whisper_model/alignment.rs` (Whisper word-timestamp alignment)
   - `src/model/audio/mel/` (log-mel feature extraction conventions)
 
 ### hexgrad Kokoro
@@ -220,8 +220,8 @@ SOFTWARE.
 
 - Upstream: https://github.com/openai/whisper
 - License: MIT
-- boostr paths: `src/model/audio/whisper.rs`, `src/model/audio/whisper_model/`,
-  `src/model/audio/whisper_decoder/`
+- boostr paths: `src/model/audio/whisper_stack/whisper.rs`,
+  `src/model/audio/whisper_stack/whisper_model/`, `src/model/audio/whisper_stack/whisper_decoder/`
 
 ```text
 MIT License

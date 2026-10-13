@@ -28,6 +28,7 @@
 //! cache and no lane table. Nothing else here holds a device address across a
 //! call.
 
+use super::super::prelude::*;
 use super::super::*;
 use crate::model::audio::voxcpm::model::widths::batch_width;
 

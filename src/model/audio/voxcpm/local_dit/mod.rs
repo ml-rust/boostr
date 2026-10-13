@@ -1,8 +1,7 @@
-//! VoxCPM2 `feat_decoder` local DiT ("locdit"): the CFM estimator backbone,
-//! reusing the shared bidirectional MiniCPM4 stack in
-//! `crate::model::audio::voxcpm::bidirectional`. This module loads weights.
-//! Four units live here: weight loading (`loader`), the estimator forward
-//! pass (`dit`), the `Module` impl (`module`), and the CFM sampler
+//! VoxCPM2 `feat_decoder` local DiT ("locdit"): the CFM estimator backbone, reusing the
+//! shared bidirectional MiniCPM4 stack in `crate::model::audio::voxcpm::bidirectional`.
+//! This module loads weights. Four units live here: weight loading (`loader`), the
+//! estimator forward pass (`dit`), the `Module` impl (`module`), and the CFM sampler
 //! (`sampler`) that integrates it.
 
 pub mod config;

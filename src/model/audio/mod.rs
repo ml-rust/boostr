@@ -12,6 +12,7 @@ pub mod mel;
 #[cfg(feature = "neucodec")]
 pub mod neucodec;
 pub mod phoneme_vocab;
+mod reexports;
 pub mod stft;
 #[cfg(feature = "silero-vad")]
 pub mod vad;
@@ -20,32 +21,6 @@ pub mod vits;
 #[cfg(feature = "voxcpm")]
 pub mod voxcpm;
 #[cfg(feature = "whisper")]
-pub mod whisper;
-#[cfg(feature = "whisper")]
-pub mod whisper_decoder;
-#[cfg(feature = "whisper")]
-pub mod whisper_loader;
-#[cfg(feature = "whisper")]
-pub mod whisper_model;
+mod whisper_stack;
 
-pub use mel::{
-    LogSpec, MelNorm, MelOptions, MelScale, compute_mel_spectrogram, compute_mel_spectrogram_with,
-    mel_filterbank,
-};
-pub use phoneme_vocab::{PhonemeVocab, phonemes_to_ids};
-pub use stft::{
-    IStftClient, IStftOptions, IStftPadding, StftClient, StftOptions, hann_window, istft, stft,
-    stft_complex,
-};
-#[cfg(feature = "silero-vad")]
-pub use vad::{SileroVad, SileroVadWeights, VadConfig, VadState};
-#[cfg(feature = "whisper")]
-pub use whisper::WhisperEncoder;
-#[cfg(feature = "whisper")]
-pub use whisper_decoder::{
-    CrossAttentionCapture, DecoderCache, DecoderLayerCache, WhisperDecoder, WhisperDecoderLayer,
-};
-#[cfg(feature = "whisper")]
-pub use whisper_loader::WhisperCheckpoint;
-#[cfg(feature = "whisper")]
-pub use whisper_model::{CrossAttentionWeights, GenerateOptions, WhisperModel, alignment_matrix};
+pub use reexports::*;

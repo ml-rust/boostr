@@ -1,3 +1,13 @@
+//! [`NeuCodecDecoder`] and its weights bundle.
+//!
+//! `samples == T * hop_length` under Vocos `padding="same"` framing — one hop
+//! per latent frame (see [`NeuCodecDecoder::forward`] tests for the exact
+//! derivation).
+//!
+//! This module is architecture-only: no weight loading. Construct with
+//! synthetic weights via [`NeuCodecDecoderWeights`]; a loader is a separate
+//! unit.
+
 use crate::model::audio::neucodec::config::NeuCodecDecoderConfig;
 use crate::model::audio::neucodec::istft_head::IstftHead;
 use crate::model::audio::neucodec::resnet_block::ResnetBlock;

@@ -1,4 +1,5 @@
-//! `NeuCodecDecoder` — the NeuCodec acoustic decoder top-level assembly.
+//! `NeuCodecDecoder` — the NeuCodec acoustic decoder top-level assembly. `model` documents
+//! the output length and how to construct the decoder.
 //!
 //! Architecture (VERIFIED from `acoustic_decoder.*` in the real
 //! `neuphonic/neucodec` `model.safetensors` — NOT `config.json` or the
@@ -19,14 +20,6 @@
 //!   -> split/activate -> (mag [B, 961, T], phase [B, 961, T])
 //!   -> istft (n_fft=1920, hop=480)                     -> waveform [B, samples]
 //! ```
-//!
-//! `samples == T * hop_length` under Vocos `padding="same"` framing — one hop
-//! per latent frame (see [`NeuCodecDecoder::forward`] tests for the exact
-//! derivation).
-//!
-//! This module is architecture-only: no weight loading. Construct with
-//! synthetic weights via [`NeuCodecDecoderWeights`]; a loader is a separate
-//! unit.
 
 mod core;
 mod forward;

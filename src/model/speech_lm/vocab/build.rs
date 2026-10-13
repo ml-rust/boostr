@@ -1,5 +1,30 @@
 //! The [`SpeechVocab`] type and its constructors: explicit ids, sequential
 //! ids over a reserved region, and the default layout.
+//!
+//! # Extension path: how each future addition lands
+//!
+//! The region order below is chosen so growth does not move existing ids. State
+//! plainly what each kind of extension costs.
+//!
+//! - **A new control token.** Takes the next FREE reserved slot inside the control
+//!   region. `audio_base` is unchanged, every audio id keeps its embedding row,
+//!   and checkpoints trained before the addition stay valid. This is free.
+//! - **A richer codec** (more codebooks, or a bigger codebook). NOT free. It is a
+//!   new [`SpeechVocab`] over a different
+//!   [`CodecVocab`](crate::model::speech_lm::codec::CodecVocab): every id at or after
+//!   `audio_base` changes meaning, so it is a new layout and a NEW CHECKPOINT.
+//!   There is no in-place upgrade — do not pretend otherwise.
+//! - **A second modality** (say a video codec block). Appends AFTER the audio
+//!   block. Text, control and audio ids are all untouched, so an audio-only
+//!   checkpoint's rows stay valid and the new rows are appended to the embedding
+//!   matrix.
+//!
+//! That last case is why control ids are reserved BEFORE audio rather than
+//! appended after it. Appending a MODALITY after audio is fine — it is one more
+//! contiguous block. Appending CONTROL tokens after audio, which Scicom's
+//! checkpoint does, permanently fragments the layout: control ids end up split
+//! across two disjoint ranges, and every mask, resize and range check has to carry
+//! both forever.
 
 use std::collections::BTreeMap;
 

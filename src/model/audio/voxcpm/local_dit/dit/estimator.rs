@@ -1,6 +1,57 @@
 //! The estimator core: [`LocalDit::forward_prepared`], the pass every
 //! `forward*` wrapper in `forward.rs` prepares inputs for, and the timestep
 //! embedding it uses.
+//!
+//! Reference (`voxcpm/modules/locdit/local_dit_v2.py:98-115`):
+//!
+//! ```text
+//! x    = in_proj(x.transpose(1, 2).contiguous())      [b, P, H]
+//! cond = cond_proj(cond.transpose(1, 2).contiguous()) [b, P, H]
+//! prefix = cond.size(1)
+//! t  = time_mlp(time_embeddings(t))                   [b, H]
+//! dt = delta_time_mlp(time_embeddings(dt))            [b, H]
+//! t  = t + dt
+//! mu = mu.view(b, -1, H)                              [b, 2, H]
+//! seq = cat([mu, t.unsqueeze(1), cond, x], dim=1)     [b, 2+1+P+P, H]
+//! hidden = decoder(seq, is_causal=False)              layers -> final norm
+//! hidden = hidden[:, prefix + mu.size(1) + 1:, :]     [b, P, H]
+//! return out_proj(hidden).transpose(1, 2).contiguous()
+//! ```
+//!
+//! Traps this implementation is pinned against:
+//!
+//! - The reference's `[b, feat_dim, patch_size]` I/O is a convention, not a
+//!   kernel requirement: it transposes to `[b, patch_size, feat_dim]` before
+//!   its projections and back after `out_proj`. This port takes and returns
+//!   `[b, patch_size, feat_dim]` directly — the layout every caller (the
+//!   Euler loop, the per-patch generator, the CFM loss) already holds — so
+//!   neither transpose exists here. A caller holding the reference layout
+//!   (the fixture gates) transposes at its own boundary.
+//! - `mu` is `[b, 2 * hidden_dim]` and reshapes to **two** tokens of
+//!   `hidden_dim`, not one. The token count is derived
+//!   (`mu_dim / hidden_dim`), never hardcoded.
+//! - Sequence order is `[mu, t, cond, x]`. Its length is
+//!   `mu_tokens + 1 + patch_size + patch_size`, matching
+//!   [`crate::model::audio::voxcpm::local_dit::LocalDitConfig::sequence_len`]
+//!   (11 at `patch_size = 4`) — which is exactly the length the RoPE cache
+//!   was narrowed to at load time.
+//! - The output slice keeps ONLY the trailing `x` positions, starting at
+//!   `prefix + mu_tokens + 1` where `prefix` is `cond`'s length. Slicing any
+//!   other window returns a wrong answer with a correct shape.
+//! - `t` and `dt` share ONE [`crate::nn::SinusoidalPosEmb`] but go through SEPARATE
+//!   MLPs (`time_mlp`, `delta_time_mlp`) and are then SUMMED.
+//! - `dt` is 0 at inference, yet `SinusoidalPosEmb(0)` is `[0..0, 1..1]`, NOT
+//!   zero — so `delta_time_mlp` contributes a real constant bias. The `dt`
+//!   branch must NOT be optimized away.
+//! - The backbone is BIDIRECTIONAL: no causal mask, no mask at all. That is
+//!   what [`crate::model::audio::voxcpm::bidirectional::BidirectionalLayer`] provides.
+//! - The final `norm` (RMSNorm) runs after the layer stack and BEFORE the
+//!   slice and `out_proj` — it is `MiniCPMModel.norm`, applied inside
+//!   `self.decoder` (`voxcpm/modules/minicpm4/model.py:385`).
+//!
+//! [`crate::nn::SinusoidalPosEmb`] carries no learned weights and is therefore not
+//! loaded with the checkpoint; it is built once from `hidden_dim` at load
+//! time in `local_dit/loader.rs` and reused here on every call.
 
 use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::local_dit::loader::LocalDit;

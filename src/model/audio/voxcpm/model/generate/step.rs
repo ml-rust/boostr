@@ -2,7 +2,77 @@
 //! and the drawing [`PatchGenerator::step`]. The whole-run driver is
 //! `super::run`, the capturing variant and the shared inner body
 //! `super::capture`.
+//!
+//! ```text
+//! per iteration i, over every STEPPED row of the batch at once:
+//!   1. mu         = cat(lm_to_dit_proj(lm_hidden), res_to_dit_proj(residual_hidden))
+//!   2. pred_feat  = feat_decoder(mu, cond = prefix_feat_cond^T)
+//!   3. curr_embed = enc_to_lm_proj(feat_encoder(pred_feat.unsqueeze(1)))
+//!   4. patches[b].push(pred_feat[b]); prefix_feat_cond = pred_feat
+//!   5. stop?      = argmax(stop(lm_hidden)) == 1   <- the CURRENT lm_hidden
+//!   6. lm_hidden  = fsq(base_lm.decode_step(curr_embed, base_cache, position))
+//!   7. residual_hidden = residual_lm.decode_step(
+//!          fusion_concat_proj(cat(lm_hidden, curr_embed)), residual_cache, position)
+//!   8. position  += 1
+//! ```
+//!
+//! # Traps this module exists to get right
+//!
+//! - **`prefix_feat_cond` starts as each row's last raw prefill patch.**
+//!   Without a continuation tail that is the ZERO text-pad patch — NOT the
+//!   last patch of the reference audio. With a tail it is the prompt's last
+//!   patch. [`PrefillState::prefix_feat_cond`] carries it and
+//!   [`GenerateState::start`] takes it.
+//! - **A continuation row's decode context is not generated output.**
+//!   [`GenerateState::context`] holds it apart from `patches`, so
+//!   `patch_len`, the stop guard, the noise index and `max_len` all count
+//!   generated patches only. The decode prepends the context and trims it.
+//! - **The initial `lm_hidden` is the prefill's blended last row.** At a
+//!   TEXT position the blend left it UN-fsq'd, at a continuation tail's
+//!   AUDIO position it fsq'd it. From step 6 onward every `lm_hidden` IS
+//!   fsq'd. Do not normalise them. Re-fsq'ing the prefill's row, and
+//!   dropping the fsq in step 6, both stay shape-valid.
+//! - **Step 7 consumes the POST-fsq `lm_hidden`**, and the concat order is
+//!   `(lm_hidden, curr_embed)`. That concat is `2 * lm_hidden` wide, so
+//!   swapping the halves is shape-valid and computes a different model.
+//! - **A state carries THREE widths, none interchangeable.**
+//!
+//!   | Width | Meaning |
+//!   | --- | --- |
+//!   | [`GenerateState::batch`] | CEILING: slots the state can ever hold. A slot index, a per-row HOST vector and [`GenerateOptions::rows`] are checked against it. |
+//!   | `GenerateState::alloc_width` | ALLOCATION: rows every DEVICE tensor and both caches hold. Opens at ONE row whatever the ceiling, widens before a slot above it is seated, never shrinks. A shape check on a stored tensor reads this. |
+//!   | `GenerateState::active_width` | STEPPED: the slot prefix one iteration runs. Rows at or above it hold no request and no step touches them. |
+//!
+//!   The stepped width is the occupied prefix rounded UP to an entry of
+//!   [`widths::BATCH_WIDTHS`](crate::model::audio::voxcpm::model::widths::BATCH_WIDTHS).
+//!   The DiT's Euler solver keys captured graphs by batch size, and the
+//!   allocation rounds to the same list.
+//! - **ONE [`LanePositions`](crate::model::audio::voxcpm::minicpm4::LanePositions)
+//!   table drives BOTH caches and EVERY STEPPED row.** The prefill primes
+//!   every row to `S_max` and the table advances every row by one per
+//!   iteration, so the rows hold one shared position throughout this loop. A
+//!   finished row keeps stepping — its patches are computed and discarded —
+//!   because the caches have no per-row compaction. Only its `patch_len` and
+//!   `outcomes` entries stand still.
+//!   [`MiniCpm4Model::decode_step`] rejects a write position the cache will
+//!   not fill, so a drift errors rather than corrupts. That check is why the
+//!   table is not duplicated per cache.
+//! - **The stop guard is STRICTLY greater**: `i > min_len`, so a stop token
+//!   at `i <= min_len` is ignored and at least `min_len + 2` patches are
+//!   always emitted (`i = 0..=min_len` push unconditionally, and `i = min_len
+//!   + 1` pushes before its check can fire).
+//! - **The `max_len` exit is silent in the reference.** Here it is
+//!   [`GenerateOutcome::MaxLen`], distinct from
+//!   [`GenerateOutcome::StopToken`], so a caller tells a finished utterance
+//!   from a truncated one per row, in [`GenerateState::outcomes`].
+//! - **A stop that finishes the LAST open row skips steps 6-8**, exactly as
+//!   the reference's `break` does for one row. A stop that leaves other
+//!   rows open does not: the step runs through for everyone.
+//! - **`step_with_noise` ignores `temperature`.** Scaling the noise draw is
+//!   the drawing wrapper's job, the same split `solve_euler`/`sample` uses.
+//!   A caller injecting `z` owns its scale.
 
+use super::prelude::*;
 use super::*;
 use crate::nn::var_contiguous;
 use crate::ops::FlashAttentionOps;

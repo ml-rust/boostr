@@ -1,4 +1,12 @@
 //! The cached layer stack shared by `prefill` and `decode_step`.
+//!
+//! # Numerical agreement
+//!
+//! The step-wise and full-sequence paths run the same weights, the same
+//! precomputed RoPE tables at the same absolute positions, and select the same
+//! keys — but reduce over the key axis in a different order (one row at a time
+//! versus a full matrix). They agree to roughly `1e-4` absolute, not bitwise.
+//! The reference's own two paths differ by `9.9e-5` for the same reason.
 
 use crate::error::{Error, Result};
 use crate::inference::LayeredKvCache;

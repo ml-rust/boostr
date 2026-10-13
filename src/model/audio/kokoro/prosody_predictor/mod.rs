@@ -15,10 +15,6 @@
 //! ├── F0_proj: Conv1d(d_hid/2, 1, 1)
 //! └── N_proj:  Conv1d(d_hid/2, 1, 1)
 //! ```
-//!
-//! Inference-only (no padding masks, no dropout). The generic
-//! `DurationPredictor` / `FramePredictor` structs from earlier turns still
-//! exist but are not used on the Kokoro path.
 
 mod decode;
 mod duration_encoder;

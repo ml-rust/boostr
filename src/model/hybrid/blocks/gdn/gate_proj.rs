@@ -139,6 +139,39 @@ impl<R: Runtime<DType = DType>> GateProjections<R> {
             }
         }
     }
+
+    /// Cheap duplicate over the same storage. Every `Var` keeps its
+    /// `TensorId`, and the importance-matrix ids are copied.
+    pub(super) fn alias(&self) -> Self {
+        match self {
+            Self::Fused {
+                linear,
+                heads,
+                alpha_id,
+                beta_id,
+            } => Self::Fused {
+                linear: Box::new(linear.alias()),
+                heads: *heads,
+                alpha_id: *alpha_id,
+                beta_id: *beta_id,
+            },
+            Self::FusedAdapted {
+                lora,
+                heads,
+                alpha_id,
+                beta_id,
+            } => Self::FusedAdapted {
+                lora: Box::new(lora.alias()),
+                heads: *heads,
+                alpha_id: *alpha_id,
+                beta_id: *beta_id,
+            },
+            Self::Separate(gates) => Self::Separate(Box::new(SeparateGates {
+                alpha: gates.alpha.alias(),
+                beta: gates.beta.alias(),
+            })),
+        }
+    }
 }
 
 /// Record `x` for both gate weights when an importance collection is armed.

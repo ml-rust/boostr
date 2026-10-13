@@ -64,6 +64,14 @@ impl<R: Runtime> QuantEmbedding<R> {
     pub fn weight(&self) -> &QuantTensor<R> {
         &self.weight
     }
+
+    /// Cheap duplicate over the same packed storage: `QuantTensor::clone`
+    /// shares it.
+    pub fn alias(&self) -> Self {
+        Self {
+            weight: self.weight.clone(),
+        }
+    }
 }
 
 /// An embedding layer that works with either a standard or a block-quantized
@@ -139,6 +147,15 @@ impl<R: Runtime> MaybeQuantEmbedding<R> {
         match self {
             Self::Standard(emb) => emb.named_parameters(),
             Self::Quantized(_) => Vec::new(),
+        }
+    }
+
+    /// Cheap duplicate over the same weight storage, through each
+    /// variant's own `alias`.
+    pub fn alias(&self) -> Self {
+        match self {
+            Self::Standard(emb) => Self::Standard(emb.alias()),
+            Self::Quantized(qemb) => Self::Quantized(qemb.alias()),
         }
     }
 }

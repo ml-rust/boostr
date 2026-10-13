@@ -156,6 +156,16 @@ impl<R: Runtime> QkNorm<R> {
         params.extend(self.k_norm.parameters());
         params
     }
+
+    /// Cheap duplicate over the same weight storage, keeping both
+    /// `TensorId`s.
+    pub fn alias(&self) -> Self {
+        Self {
+            q_norm: self.q_norm.alias(),
+            k_norm: self.k_norm.alias(),
+            head_dim: self.head_dim,
+        }
+    }
 }
 
 impl<R: Runtime> Module<R> for QkNorm<R> {

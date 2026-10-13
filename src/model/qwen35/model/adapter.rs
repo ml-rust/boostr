@@ -43,7 +43,8 @@ impl<R: Runtime<DType = DType>> Qwen35Model<R> {
     {
         let mut model = Self::from_varbuilder(vb, config)?;
         if let Some(adapter) = adapter {
-            model.attach_peft_adapter(adapter)?;
+            let client = R::default_client(model.norm.weight().tensor().device());
+            model.attach_peft_adapter(&client, adapter)?;
         }
         Ok(model)
     }
@@ -186,7 +187,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn logits(
+    pub(crate) fn logits(
         client: &CpuClient,
         device: &CpuDevice,
         model: &Qwen35Model<CpuRuntime>,
@@ -232,7 +233,7 @@ pub(crate) mod tests {
         Qwen35Model::<CpuRuntime>::from_varbuilder_with_adapter(&mut vb, config, adapter)
     }
 
-    fn max_diff(a: &[f32], b: &[f32]) -> f32 {
+    pub(crate) fn max_diff(a: &[f32], b: &[f32]) -> f32 {
         assert_eq!(a.len(), b.len());
         a.iter()
             .zip(b)

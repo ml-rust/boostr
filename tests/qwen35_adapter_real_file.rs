@@ -2,7 +2,10 @@
 //! the base through `SafeTensorsLoader`, `restructure_hf_checkpoint` and
 //! `LoadedModel::load_with_adapter`, the adapter through
 //! `PeftAdapter::load`, attached unmerged, then a 5-token prefill checked
-//! against reference logits.
+//! against reference logits. A second test loads the base without the
+//! adapter, derives the adapted model with
+//! `LoadedModel::derive_with_adapter`, and checks it against the same
+//! reference.
 //!
 //! # Fixtures
 //!
@@ -141,25 +144,29 @@ fn finite(logits: &Tensor<CpuRuntime>, label: &str) -> Vec<f32> {
     data
 }
 
+/// The `qwen35` model inside `loaded`.
+fn qwen35(loaded: LoadedModel<CpuRuntime>, call: &str) -> Box<Qwen35Model<CpuRuntime>> {
+    match loaded {
+        LoadedModel::Qwen35(model) => model,
+        other => panic!("{call} returned {other:?}, expected Qwen35"),
+    }
+}
+
 /// The base built from `dir` through the full Hugging Face load path, with
-/// `adapter` attached unmerged.
+/// `adapter` attached unmerged when given.
 fn build_model(
     dir: &Path,
     config: &UniversalConfig,
-    adapter: &PeftAdapter<CpuRuntime>,
+    adapter: Option<&PeftAdapter<CpuRuntime>>,
     client: &CpuClient,
     device: &CpuDevice,
-) -> Box<Qwen35Model<CpuRuntime>> {
+) -> LoadedModel<CpuRuntime> {
     let mut map = load_text_tensors(dir, client, device);
     restructure_hf_checkpoint(&mut map, config, device)
         .unwrap_or_else(|e| panic!("restructure_hf_checkpoint: {e}"));
     let mut vb = VarBuilder::new(&mut map, device);
-    let loaded = LoadedModel::<CpuRuntime>::load_with_adapter(config, &mut vb, Some(adapter))
+    let loaded = LoadedModel::<CpuRuntime>::load_with_adapter(config, &mut vb, adapter)
         .unwrap_or_else(|e| panic!("LoadedModel::load_with_adapter: {e}"));
-    let model = match loaded {
-        LoadedModel::Qwen35(model) => model,
-        other => panic!("LoadedModel::load_with_adapter returned {other:?}, expected Qwen35"),
-    };
     assert_eq!(
         map.len(),
         0,
@@ -167,43 +174,83 @@ fn build_model(
         map.len(),
         map.names().take(8).collect::<Vec<_>>()
     );
-    model
+    loaded
+}
+
+/// The base directory, the adapter loaded, and the reference path, or
+/// `None` after one `skip:` line.
+fn fixtures(device: &CpuDevice) -> Option<(PathBuf, PeftAdapter<CpuRuntime>, PathBuf)> {
+    let dir = require_dir()?;
+    let adapter_dir = require_adapter()?;
+    let reference = env_path(ENV_REF)?;
+    let adapter = PeftAdapter::<CpuRuntime>::load(&adapter_dir, device)
+        .unwrap_or_else(|e| panic!("PeftAdapter::load {}: {e}", adapter_dir.display()));
+    Some((dir, adapter, reference))
 }
 
 /// Every module of the adapter attaches, and prefill logits match a
 /// reference dump of the same base with the same adapter.
 #[test]
 fn adapted_prefill_matches_reference_logits() {
-    let Some(dir) = require_dir() else {
-        return;
-    };
-    let Some(adapter_dir) = require_adapter() else {
-        return;
-    };
-    let Some(reference) = env_path(ENV_REF) else {
-        return;
-    };
     let device = CpuDevice::new();
+    let Some((dir, adapter, reference)) = fixtures(&device) else {
+        return;
+    };
     let client = CpuClient::new(device.clone());
     let config = config(&dir);
-    let adapter = PeftAdapter::<CpuRuntime>::load(&adapter_dir, &device)
-        .unwrap_or_else(|e| panic!("PeftAdapter::load {}: {e}", adapter_dir.display()));
-    let modules = adapter.layers.len();
-    let model = build_model(&dir, &config, &adapter, &client, &device);
+    let loaded = build_model(&dir, &config, Some(&adapter), &client, &device);
+    let model = qwen35(loaded, "LoadedModel::load_with_adapter");
     println!("adapted {} modules", model.adapted_modules().len());
-    assert_eq!(model.adapted_modules().len(), modules);
+    assert_eq!(model.adapted_modules().len(), adapter.layers.len());
+    check_reference(&model, &config, &client, &device, &reference);
+}
 
+/// The base loads without the adapter, the adapted model derives from it
+/// over the same weights, and its prefill logits match the same reference.
+#[test]
+fn derived_adapted_prefill_matches_reference_logits() {
+    let device = CpuDevice::new();
+    let Some((dir, adapter, reference)) = fixtures(&device) else {
+        return;
+    };
+    let client = CpuClient::new(device.clone());
+    let config = config(&dir);
+    let base = build_model(&dir, &config, None, &client, &device);
+    let derived = base
+        .derive_with_adapter(&client, &adapter)
+        .unwrap_or_else(|e| panic!("LoadedModel::derive_with_adapter: {e}"));
+    let model = qwen35(derived, "LoadedModel::derive_with_adapter");
+    println!("derived {} modules", model.adapted_modules().len());
+    assert_eq!(model.adapted_modules().len(), adapter.layers.len());
+    assert!(
+        qwen35(base, "LoadedModel::load_with_adapter")
+            .adapted_modules()
+            .is_empty()
+    );
+    check_reference(&model, &config, &client, &device, &reference);
+}
+
+/// A 5-token prefill of `model` against the reference logits at
+/// `reference`: the argmax matches and every logit is within tolerance at
+/// each position.
+fn check_reference(
+    model: &Qwen35Model<CpuRuntime>,
+    config: &UniversalConfig,
+    client: &CpuClient,
+    device: &CpuDevice,
+    reference: &Path,
+) {
     let vocab = config.vocab_size;
-    let (mut kv, mut gdn) = caches(&model, &config, &device);
-    let ids = Tensor::<CpuRuntime>::from_slice(&PROMPT, &[1, PROMPT.len()], &device)
+    let (mut kv, mut gdn) = caches(model, config, device);
+    let ids = Tensor::<CpuRuntime>::from_slice(&PROMPT, &[1, PROMPT.len()], device)
         .unwrap_or_else(|e| panic!("prompt tensor: {e}"));
     let logits = model
-        .forward_qwen35(&client, &ids, &mut kv, &mut gdn, 0)
+        .forward_qwen35(client, &ids, &mut kv, &mut gdn, 0)
         .unwrap_or_else(|e| panic!("prefill forward: {e}"));
     let got = finite(&logits, "prefill");
 
     let bytes =
-        std::fs::read(&reference).unwrap_or_else(|e| panic!("read {}: {e}", reference.display()));
+        std::fs::read(reference).unwrap_or_else(|e| panic!("read {}: {e}", reference.display()));
     let (words, tail) = bytes.as_chunks::<4>();
     assert!(
         tail.is_empty(),

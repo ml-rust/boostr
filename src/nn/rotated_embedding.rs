@@ -99,6 +99,15 @@ impl<R: Runtime<DType = DType>> RotatedEmbedding<R> {
     pub fn trainable_parameters(&self) -> Vec<(TensorId, &Var<R>)> {
         self.inner.trainable_parameters()
     }
+
+    /// Cheap duplicate over the same table and sign storage, keeping the
+    /// table's `TensorId`.
+    pub fn alias(&self) -> Self {
+        Self {
+            inner: self.inner.alias(),
+            rotation: self.rotation.clone(),
+        }
+    }
 }
 
 /// Logical `[num_embeddings, embed_dim]` of either table variant.
@@ -181,6 +190,14 @@ impl<R: Runtime<DType = DType>> MaybeRotatedEmbedding<R> {
 
     pub fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
         self.base().named_parameters()
+    }
+
+    /// Cheap duplicate over the same storage, keeping every `TensorId`.
+    pub fn alias(&self) -> Self {
+        match self {
+            Self::Plain(base) => Self::Plain(base.alias()),
+            Self::Rotated(rotated) => Self::Rotated(rotated.alias()),
+        }
     }
 }
 

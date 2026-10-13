@@ -143,6 +143,23 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
     pub fn config(&self) -> &GdnConfig {
         &self.cfg
     }
+
+    /// A block over the same weight storage, with its own projection
+    /// objects, so an adapter attaches to it and not to `self`. Every `Var`
+    /// keeps its `TensorId`.
+    pub fn alias(&self) -> Self {
+        Self {
+            cfg: self.cfg.clone(),
+            attn_qkv: self.attn_qkv.alias(),
+            attn_gate: self.attn_gate.alias(),
+            gates: self.gates.alias(),
+            ssm_out: self.ssm_out.alias(),
+            conv_weight: self.conv_weight.clone(),
+            ssm_a: self.ssm_a.clone(),
+            ssm_dt_bias: self.ssm_dt_bias.clone(),
+            norm: self.norm.alias(),
+        }
+    }
 }
 
 /// `qkv[.., start .. start + len]` reshaped to `shape`.

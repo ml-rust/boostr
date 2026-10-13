@@ -142,6 +142,21 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
     pub fn qk_norm(&self) -> &QkNorm<R> {
         &self.qk_norm
     }
+
+    /// A block over the same weight storage, with its own projection
+    /// objects, so an adapter attaches to it and not to `self`. Every `Var`
+    /// keeps its `TensorId`.
+    pub fn alias(&self) -> Self {
+        Self {
+            cfg: self.cfg.clone(),
+            attn_q: self.attn_q.alias(),
+            attn_k: self.attn_k.alias(),
+            attn_v: self.attn_v.alias(),
+            attn_output: self.attn_output.alias(),
+            qk_norm: self.qk_norm.alias(),
+            mrope_selector: self.mrope_selector.clone(),
+        }
+    }
 }
 
 fn check_linear<R: Runtime<DType = DType>>(

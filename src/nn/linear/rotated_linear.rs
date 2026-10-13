@@ -138,6 +138,16 @@ impl<R: Runtime<DType = DType>> RotatedLinear<R> {
     pub fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
         self.inner.named_parameters()
     }
+
+    /// Cheap duplicate over the same weight and sign storage, keeping the
+    /// base's `TensorId`s. Layers that shared one sign tensor still share
+    /// it, as `forward_batch` requires.
+    pub fn alias(&self) -> Self {
+        Self {
+            inner: self.inner.alias(),
+            rotation: self.rotation.clone(),
+        }
+    }
 }
 
 #[cfg(test)]

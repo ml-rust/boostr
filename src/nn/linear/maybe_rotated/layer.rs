@@ -126,6 +126,16 @@ impl<R: Runtime<DType = DType>> MaybeRotatedLinear<R> {
             Self::Lora(lora) => lora.named_parameters(),
         }
     }
+
+    /// Cheap duplicate over the same storage, keeping every `TensorId`:
+    /// base weight, rotation signs, and adapter factors when adapted.
+    pub fn alias(&self) -> Self {
+        match self {
+            Self::Plain(base) => Self::Plain(base.alias()),
+            Self::Rotated(rotated) => Self::Rotated(Box::new(rotated.alias())),
+            Self::Lora(lora) => Self::Lora(Box::new(lora.alias())),
+        }
+    }
 }
 
 impl<R: Runtime<DType = DType>> From<MaybeQuantLinear<R>> for MaybeRotatedLinear<R> {
@@ -287,5 +297,34 @@ mod tests {
         assert!(layer.weight().is_none());
         let got = layer.forward(&client, &Var::new(x, false)).unwrap();
         assert_close(&got.tensor().to_vec::<f32>(), &want);
+    }
+
+    /// An alias holds the same storage and ids; an adapter attached to it
+    /// leaves the original plain.
+    #[test]
+    fn alias_shares_storage_and_adapts_alone() {
+        let (_, device) = cpu_setup();
+        let w = tensor(&device, &[OUT, IN], 0.19);
+        let plain: MaybeRotatedLinear<CpuRuntime> = dense(&w).into();
+        let mut alias = plain.alias();
+        let (base, copy) = (plain.weight().unwrap(), alias.weight().unwrap());
+        assert_eq!(copy.tensor().storage().ptr(), base.tensor().storage().ptr());
+        assert_eq!(copy.id(), base.id());
+
+        let a = tensor(&device, &[RANK, IN], 0.23);
+        alias
+            .attach_adapter(a, tensor(&device, &[OUT, RANK], 0.37), SCALING)
+            .unwrap();
+        assert!(alias.is_adapted() && !plain.is_adapted());
+        let again = alias.alias();
+        let factors = |l: &MaybeRotatedLinear<CpuRuntime>| {
+            let lora = l.adapter().unwrap();
+            (lora.lora_a().tensor().storage().ptr(), lora.lora_a().id())
+        };
+        assert_eq!(factors(&again), factors(&alias));
+        assert_eq!(
+            again.weight().unwrap().tensor().storage().ptr(),
+            plain.weight().unwrap().tensor().storage().ptr()
+        );
     }
 }

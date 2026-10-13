@@ -17,7 +17,7 @@ use crate::format::peft::PeftAdapter;
 use crate::nn::LoraFactors;
 use numr::dtype::DType;
 use numr::ops::{ScalarOps, ShapeOps, TypeConversionOps};
-use numr::runtime::Runtime;
+use numr::runtime::{Runtime, RuntimeClient};
 use std::collections::BTreeMap;
 
 /// The `ssm_alpha` and `ssm_beta` adapters of one layer.
@@ -30,11 +30,17 @@ fn in_module(module: &str, e: Error) -> Error {
 }
 
 impl<R: Runtime<DType = DType>> Qwen35Model<R> {
-    /// Attach every module of `adapter`. Resolution and shape checks run
-    /// for all modules before the first attach. A failed attach leaves
-    /// the model partly adapted, so the only caller drops it on error.
-    pub(super) fn attach_peft_adapter(&mut self, adapter: &PeftAdapter<R>) -> Result<()>
+    /// Attach every module of `adapter`, casting and fusing the factors
+    /// on `client`. Resolution and shape checks run for all modules before
+    /// the first attach. A failed attach leaves the model partly adapted,
+    /// so every caller drops it on error.
+    pub(super) fn attach_peft_adapter<C>(
+        &mut self,
+        client: &C,
+        adapter: &PeftAdapter<R>,
+    ) -> Result<()>
     where
+        C: RuntimeClient<R> + ScalarOps<R> + ShapeOps<R> + TypeConversionOps<R>,
         R::Client: ShapeOps<R> + ScalarOps<R> + TypeConversionOps<R>,
     {
         if !self.adapted_modules.is_empty() {
@@ -60,7 +66,6 @@ impl<R: Runtime<DType = DType>> Qwen35Model<R> {
             plan.push((module, pair, target));
         }
 
-        let client = R::default_client(&device);
         let activation = self.dtype();
         let mut gates: BTreeMap<usize, GateFactors<R>> = BTreeMap::new();
         for (module, pair, target) in plan {
@@ -70,7 +75,7 @@ impl<R: Runtime<DType = DType>> Qwen35Model<R> {
                 Projection::GdnAlpha => gates.entry(target.layer).or_default().0 = Some(factors),
                 Projection::GdnBeta => gates.entry(target.layer).or_default().1 = Some(factors),
                 _ => self
-                    .attach_one(&client, target, factors, activation)
+                    .attach_one(client, target, factors, activation)
                     .map_err(|e| in_module(module, e))?,
             }
         }
@@ -79,7 +84,7 @@ impl<R: Runtime<DType = DType>> Qwen35Model<R> {
             match self.blocks.get_mut(layer) {
                 Some(Qwen35Block::Gdn(block)) => block
                     .mixer
-                    .attach_gate_adapters(&client, alpha, beta, activation)
+                    .attach_gate_adapters(client, alpha, beta, activation)
                     .map_err(|e| in_module(&gate_modules, e))?,
                 _ => {
                     return Err(Error::ModelError {
@@ -93,16 +98,13 @@ impl<R: Runtime<DType = DType>> Qwen35Model<R> {
     }
 
     /// Attach `factors` to the non-gate projection `target` names.
-    fn attach_one(
+    fn attach_one<C: TypeConversionOps<R>>(
         &mut self,
-        client: &R::Client,
+        client: &C,
         target: Target,
         factors: LoraFactors<R>,
         activation: DType,
-    ) -> Result<()>
-    where
-        R::Client: TypeConversionOps<R>,
-    {
+    ) -> Result<()> {
         let layer = target.layer;
         match (self.blocks.get_mut(layer), target.projection) {
             (Some(Qwen35Block::Attention(block)), Projection::Attention(p)) => {
@@ -191,7 +193,7 @@ mod tests {
 
     #[test]
     fn rotated_projection_is_an_error() {
-        let device = CpuDevice::new();
+        let (client, device) = cpu_setup();
         let mut model = rotated_model(&device, 0x3535_a001);
         let h = model.config().hidden_size;
         let inter = model.config().intermediate_size();
@@ -205,7 +207,10 @@ mod tests {
             )],
             &device,
         );
-        let text = model.attach_peft_adapter(&adapter).unwrap_err().to_string();
+        let text = model
+            .attach_peft_adapter(&client, &adapter)
+            .unwrap_err()
+            .to_string();
         assert!(text.contains("model.layers.0.mlp.gate_proj"), "{text}");
         assert!(text.contains("Hadamard-rotated"), "{text}");
     }
@@ -220,7 +225,10 @@ mod tests {
         let adapter = write_adapter(dir.path(), &entries, &device);
         let mut model = build(&mut gguf, &config, &device, Some(&adapter)).unwrap();
         assert_eq!(model.adapted_modules(), ["model.layers.0.mlp.up_proj"]);
-        let text = model.attach_peft_adapter(&adapter).unwrap_err().to_string();
+        let text = model
+            .attach_peft_adapter(&client, &adapter)
+            .unwrap_err()
+            .to_string();
         assert!(text.contains("already carries"), "{text}");
     }
 }

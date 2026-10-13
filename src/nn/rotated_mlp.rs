@@ -177,6 +177,15 @@ impl<R: Runtime<DType = DType>> RotatedMlp<R> {
         }
         params
     }
+
+    /// Cheap duplicate over the same storage, keeping every `TensorId`.
+    pub fn alias(&self) -> Self {
+        Self {
+            gate: self.gate.alias(),
+            up: self.up.alias(),
+            down: self.down.alias(),
+        }
+    }
 }
 
 impl<R: Runtime<DType = DType>> Module<R> for RotatedMlp<R> {

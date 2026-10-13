@@ -73,6 +73,15 @@ impl<R: Runtime> Embedding<R> {
             .filter(|param| param.1.requires_grad())
             .collect()
     }
+
+    /// Cheap duplicate over the same weight storage that keeps the
+    /// weight's `TensorId`. Uses [`Var::alias`], not [`Clone`], which mints
+    /// a fresh id.
+    pub fn alias(&self) -> Self {
+        Self {
+            weight: self.weight.alias(),
+        }
+    }
 }
 
 impl<R: Runtime> Module<R> for Embedding<R> {

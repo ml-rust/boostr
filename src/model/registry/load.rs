@@ -7,8 +7,8 @@ use crate::model::config::UniversalConfig;
 use crate::model::traits::Model;
 use crate::nn::VarBuilder;
 use numr::dtype::DType;
-use numr::ops::{IndexingOps, ReduceOps, ScalarOps, ShapeOps};
-use numr::runtime::Runtime;
+use numr::ops::{IndexingOps, ReduceOps, ScalarOps, ShapeOps, TypeConversionOps};
+use numr::runtime::{Runtime, RuntimeClient};
 use std::borrow::Cow;
 
 /// `config` with the distinct quantization formats of `vb`'s tensors
@@ -164,6 +164,32 @@ where
         )?;
         Ok(LoadedModel::Qwen35(Box::new(model)))
     }
+
+    /// A model over this model's weight storage with `adapter` attached
+    /// unmerged, through
+    /// [`Qwen35Model::derive_with_adapter`](crate::model::qwen35::Qwen35Model::derive_with_adapter).
+    /// No weight is read or copied, and `self` stays usable.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ModelError`] for any model but `qwen35`. Otherwise as
+    /// `derive_with_adapter`.
+    pub fn derive_with_adapter<C>(&self, client: &C, adapter: &PeftAdapter<R>) -> Result<Self>
+    where
+        C: RuntimeClient<R> + ScalarOps<R> + ShapeOps<R> + TypeConversionOps<R>,
+    {
+        match self {
+            LoadedModel::Qwen35(model) => Ok(LoadedModel::Qwen35(Box::new(
+                model.derive_with_adapter(client, adapter)?,
+            ))),
+            _ => Err(Error::ModelError {
+                reason: format!(
+                    "a PEFT adapter attaches to qwen35 models only; this model is '{}'",
+                    self.model_type()
+                ),
+            }),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -202,6 +228,33 @@ mod tests {
         let model =
             qwen35(LoadedModel::<CpuRuntime>::load_with_adapter(&config, &mut vb, None).unwrap());
         assert!(model.adapted_modules().is_empty());
+    }
+
+    #[test]
+    fn derive_takes_qwen35_and_refuses_other_models() {
+        let (client, device) = cpu_setup();
+        let config = tiny_config();
+        let dir = tempfile::tempdir().unwrap();
+        let (hf, mut map) = maps(&client, &device, &config);
+        let entries = adapter_entries(&hf, &ALL_MODULES, &device);
+        let adapter = write_adapter(dir.path(), &entries, &device);
+        let mut vb = VarBuilder::new(&mut map, &device);
+        let base = LoadedModel::<CpuRuntime>::load(&config, &mut vb).unwrap();
+        let derived = qwen35(base.derive_with_adapter(&client, &adapter).unwrap());
+        assert_eq!(derived.adapted_modules().len(), ALL_MODULES.len());
+        assert!(qwen35(base).adapted_modules().is_empty());
+
+        let yaml = "model_type: llama\nvocab_size: 32\nhidden_size: 16\nnum_layers: 1\n\
+                    max_seq_len: 16\nintermediate_size: 32\nattention:\n  num_heads: 2\n";
+        let llama_config: UniversalConfig = serde_saphyr::from_str(yaml).unwrap();
+        let llama =
+            crate::model::llama::Llama::<CpuRuntime>::from_config(&llama_config, &device).unwrap();
+        let err = LoadedModel::Llama(Box::new(llama))
+            .derive_with_adapter(&client, &adapter)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("qwen35 models only"), "{err}");
+        assert!(err.contains("'llama'"), "{err}");
     }
 
     #[test]

@@ -7,6 +7,7 @@
 
 mod adapter;
 mod adapter_attach;
+mod adapter_derive;
 mod adapter_targets;
 mod attach;
 mod build;

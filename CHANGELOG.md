@@ -27,6 +27,8 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`fit_temperature_isolated`** — fits one temperature to isolated Score questions. Each `IsolatedSample` holds the `[no, yes]` logits of every level and the gold level or a target distribution. The fit minimises the likelihood loss of the combined level distribution the answer stage forms. That loss can have more than one local minimum, so the fit scans the temperature range, refines the best bracket by golden-section search, and polishes with Newton steps.
 - **`TemperaturePolicy::PerQuestion`** — one temperature per question, in question order. `TemperaturePolicy::for_question` resolves the temperature of any policy for one question, including the level rows of an isolated Score question.
 - **`QuestionMeta::scoring_rows`** — the scoring rows a question takes.
+- **`Qwen35Model::derive_with_adapter`** — a second model over a loaded base's weights, with a PEFT LoRA adapter attached unmerged. No weight is read again or copied: dense, block-quantized and Hadamard sign tensors are shared with the base. The base is not modified and stays usable, so one base serves several adapters at once. A base that already carries an adapter is refused, since adapters do not stack. The attach errors are those of `from_varbuilder_with_adapter`. `LoadedModel::derive_with_adapter` does the same for a loaded model and refuses every model type but `qwen35`.
+- **`alias` on the `qwen35` modules** — `Embedding`, `QuantEmbedding`, `MaybeQuantEmbedding`, `RotatedEmbedding`, `MaybeRotatedEmbedding`, `RotatedLinear`, `MaybeRotatedLinear`, `RotatedMlp`, `QkNorm`, `GdnBlock` and `Qwen35AttentionBlock` gain `alias`: a duplicate over the same storage that keeps each weight's `TensorId`.
 
 ### Changed
 

@@ -150,10 +150,7 @@ where
         };
         if config.model_type != "qwen35" {
             return Err(Error::ModelError {
-                reason: format!(
-                    "a PEFT adapter attaches to qwen35 models only; this model is '{}'",
-                    config.model_type
-                ),
+                reason: adapter_refusal_reason(&config.model_type),
             });
         }
         let folded = with_quant_formats(config, vb);
@@ -178,16 +175,43 @@ where
     where
         C: RuntimeClient<R> + ScalarOps<R> + ShapeOps<R> + TypeConversionOps<R>,
     {
+        let LoadedModel::Qwen35(model) = self else {
+            return Err(Error::ModelError {
+                reason: adapter_refusal_reason(self.model_type()),
+            });
+        };
+        Ok(LoadedModel::Qwen35(Box::new(
+            model.derive_with_adapter(client, adapter)?,
+        )))
+    }
+}
+
+/// Why a model of `model_type` takes no PEFT adapter.
+fn adapter_refusal_reason(model_type: &str) -> String {
+    format!("a PEFT adapter attaches to qwen35 models only; this model is '{model_type}'")
+}
+
+impl<R: Runtime<DType = DType>> LoadedModel<R>
+where
+    R::Client: IndexingOps<R>,
+{
+    /// Why this model takes no PEFT adapter, or `None` for a model that
+    /// takes one. Only `qwen35` models take an adapter. The reason is the
+    /// error [`Self::derive_with_adapter`] returns.
+    pub fn adapter_refusal(&self) -> Option<String> {
         match self {
-            LoadedModel::Qwen35(model) => Ok(LoadedModel::Qwen35(Box::new(
-                model.derive_with_adapter(client, adapter)?,
-            ))),
-            _ => Err(Error::ModelError {
-                reason: format!(
-                    "a PEFT adapter attaches to qwen35 models only; this model is '{}'",
-                    self.model_type()
-                ),
-            }),
+            LoadedModel::Qwen35(_) => None,
+            _ => Some(adapter_refusal_reason(self.model_type())),
+        }
+    }
+
+    /// Base-checkpoint names of the modules the attached PEFT adapter
+    /// targets, sorted. Empty without an adapter and for every model type
+    /// but `qwen35`.
+    pub fn adapted_modules(&self) -> &[String] {
+        match self {
+            LoadedModel::Qwen35(model) => model.adapted_modules(),
+            _ => &[],
         }
     }
 }
@@ -240,8 +264,12 @@ mod tests {
         let adapter = write_adapter(dir.path(), &entries, &device);
         let mut vb = VarBuilder::new(&mut map, &device);
         let base = LoadedModel::<CpuRuntime>::load(&config, &mut vb).unwrap();
-        let derived = qwen35(base.derive_with_adapter(&client, &adapter).unwrap());
-        assert_eq!(derived.adapted_modules().len(), ALL_MODULES.len());
+        assert!(base.adapter_refusal().is_none());
+        let derived = base.derive_with_adapter(&client, &adapter).unwrap();
+        let modules = derived.adapted_modules().to_vec();
+        assert_eq!(modules.len(), ALL_MODULES.len());
+        assert_eq!(modules, qwen35(derived).adapted_modules());
+        assert!(base.adapted_modules().is_empty());
         assert!(qwen35(base).adapted_modules().is_empty());
 
         let yaml = "model_type: llama\nvocab_size: 32\nhidden_size: 16\nnum_layers: 1\n\
@@ -249,10 +277,14 @@ mod tests {
         let llama_config: UniversalConfig = serde_saphyr::from_str(yaml).unwrap();
         let llama =
             crate::model::llama::Llama::<CpuRuntime>::from_config(&llama_config, &device).unwrap();
-        let err = LoadedModel::Llama(Box::new(llama))
+        let llama = LoadedModel::Llama(Box::new(llama));
+        assert!(llama.adapted_modules().is_empty());
+        let refusal = llama.adapter_refusal().unwrap();
+        let err = llama
             .derive_with_adapter(&client, &adapter)
             .unwrap_err()
             .to_string();
+        assert!(err.contains(&refusal), "{err}");
         assert!(err.contains("qwen35 models only"), "{err}");
         assert!(err.contains("'llama'"), "{err}");
     }

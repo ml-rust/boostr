@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod decision_fixture;
+pub mod decision_gguf;
 pub mod kv_start;
 #[cfg(feature = "cuda")]
 pub mod llama_graph;

@@ -11,6 +11,7 @@ use boostr::model::decision::LabelTokenItem;
 use serde::Deserialize;
 
 pub const ENV_MODEL: &str = "BOOSTR_DECISION_MODEL_DIR";
+pub const ENV_GGUF: &str = "BOOSTR_DECISION_GGUF";
 pub const ENV_FIXTURES: &str = "BOOSTR_DECISION_FIXTURE_DIR";
 pub const SCHEMA: &str = "boostr.decision.label_token.v1";
 
@@ -78,14 +79,44 @@ fn env_path(var: &str) -> Option<PathBuf> {
     path
 }
 
+/// Panics when both [`ENV_MODEL`] and [`ENV_GGUF`] are set: the fixtures
+/// belong to one model, so the run takes one source.
+fn one_model_source() {
+    let set = |var: &str| std::env::var(var).is_ok_and(|v| !v.is_empty());
+    assert!(
+        !(set(ENV_MODEL) && set(ENV_GGUF)),
+        "{ENV_MODEL} and {ENV_GGUF} are both set; unset one: {ENV_MODEL} names a Hugging \
+         Face directory, {ENV_GGUF} a .gguf file"
+    );
+}
+
 /// The model directory of [`ENV_MODEL`] and every fixture of
 /// [`ENV_FIXTURES`], or `None` after one `skip:` line.
 pub fn inputs() -> Option<(PathBuf, Vec<Fixture>)> {
+    one_model_source();
     let dir = env_path(ENV_MODEL)?;
     if !dir.join("config.json").is_file() {
         println!("skip: {} has no config.json", dir.display());
         return None;
     }
+    Some((dir, fixtures()?))
+}
+
+/// The `.gguf` file of [`ENV_GGUF`] and every fixture of
+/// [`ENV_FIXTURES`], or `None` after one `skip:` line.
+pub fn gguf_inputs() -> Option<(PathBuf, Vec<Fixture>)> {
+    one_model_source();
+    let file = env_path(ENV_GGUF)?;
+    if !file.is_file() {
+        println!("skip: {} is not a file", file.display());
+        return None;
+    }
+    Some((file, fixtures()?))
+}
+
+/// Every fixture of [`ENV_FIXTURES`], sorted by path, or `None` after one
+/// `skip:` line.
+fn fixtures() -> Option<Vec<Fixture>> {
     let fixtures = env_path(ENV_FIXTURES)?;
     let entries = std::fs::read_dir(&fixtures)
         .unwrap_or_else(|e| panic!("read_dir {}: {e}", fixtures.display()));
@@ -112,7 +143,7 @@ pub fn inputs() -> Option<(PathBuf, Vec<Fixture>)> {
             fx
         })
         .collect();
-    Some((dir, parsed))
+    Some(parsed)
 }
 
 /// The question metadata of `fx`, after checking that each question's

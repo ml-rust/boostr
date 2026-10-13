@@ -9,6 +9,7 @@ use boostr::inference::decision::{
 };
 use boostr::model::decision::LabelTokenItem;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 pub const ENV_MODEL: &str = "BOOSTR_DECISION_MODEL_DIR";
 pub const ENV_GGUF: &str = "BOOSTR_DECISION_GGUF";
@@ -71,7 +72,7 @@ impl Fixture {
 }
 
 /// The value of `var` as a path, or `None` after one `skip:` line.
-fn env_path(var: &str) -> Option<PathBuf> {
+pub fn env_path(var: &str) -> Option<PathBuf> {
     let path = std::env::var(var).ok().map(PathBuf::from);
     if path.is_none() {
         println!("skip: {var} not set");
@@ -117,6 +118,16 @@ pub fn gguf_inputs() -> Option<(PathBuf, Vec<Fixture>)> {
 /// Every fixture of [`ENV_FIXTURES`], sorted by path, or `None` after one
 /// `skip:` line.
 fn fixtures() -> Option<Vec<Fixture>> {
+    json_fixtures(SCHEMA, |fx: &Fixture| fx.schema.as_str())
+}
+
+/// Every `*.json` file of the directory [`ENV_FIXTURES`] names, sorted by
+/// path, parsed as `T` and checked to carry `schema`, or `None` after one
+/// `skip:` line.
+pub fn json_fixtures<T: DeserializeOwned>(
+    schema: &str,
+    schema_of: impl Fn(&T) -> &str,
+) -> Option<Vec<T>> {
     let fixtures = env_path(ENV_FIXTURES)?;
     let entries = std::fs::read_dir(&fixtures)
         .unwrap_or_else(|e| panic!("read_dir {}: {e}", fixtures.display()));
@@ -137,9 +148,9 @@ fn fixtures() -> Option<Vec<Fixture>> {
         .map(|p| {
             let text =
                 std::fs::read_to_string(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
-            let fx: Fixture = serde_json::from_str(&text)
+            let fx: T = serde_json::from_str(&text)
                 .unwrap_or_else(|e| panic!("parse {}: {e}", p.display()));
-            assert_eq!(fx.schema, SCHEMA, "{}: schema", p.display());
+            assert_eq!(schema_of(&fx), schema, "{}: schema", p.display());
             fx
         })
         .collect();

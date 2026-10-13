@@ -5,6 +5,8 @@
 
 pub mod decision_fixture;
 pub mod decision_gguf;
+pub mod decision_model;
+pub mod decision_pointer_fixture;
 pub mod kv_start;
 #[cfg(feature = "cuda")]
 pub mod llama_graph;

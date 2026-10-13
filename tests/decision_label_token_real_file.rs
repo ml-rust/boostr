@@ -53,20 +53,15 @@
 
 mod common;
 
-use std::path::Path;
-
-use boostr::format::hf_qwen35::is_dropped;
-use boostr::format::{SafeTensorsLoader, restructure_hf_checkpoint};
 use boostr::inference::decision::{
     Answer, AnswerOptions, DecisionResult, RunnerConfig, run_decision, tempered_softmax,
 };
 use boostr::model::decision::LabelTokenHead;
-use boostr::model::{LoadedModel, ModelClient, Qwen35Model, UniversalConfig, load_config_auto};
-use boostr::nn::{VarBuilder, VarMap};
+use boostr::model::{ModelClient, Qwen35Model};
 use common::decision_fixture::{Fixture, gguf_inputs, inputs, request};
 use common::decision_gguf::{Quant, build_model as build_gguf_model};
+use common::decision_model::{build_model, close_f64, config, top};
 use numr::dtype::DType;
-use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
 use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 
@@ -178,83 +173,6 @@ fn gguf_tolerance(quant: Quant) -> Tolerance {
     }
 }
 
-fn config(dir: &Path) -> UniversalConfig {
-    let path = dir.join("config.json");
-    load_config_auto(&path).unwrap_or_else(|e| panic!("load_config_auto {}: {e}", path.display()))
-}
-
-/// The model of `dir` on `device` through the Hugging Face load path:
-/// tensors loaded to the device, the layout edits made in the file
-/// dtypes, then every float tensor cast to `dtype` on the device.
-fn build_model<R>(
-    dir: &Path,
-    config: &UniversalConfig,
-    device: &R::Device,
-    dtype: DType,
-) -> Box<Qwen35Model<R>>
-where
-    R: Runtime<DType = DType>,
-    R::Client: ModelClient<R>,
-{
-    let client = R::default_client(device);
-    let mut loader = SafeTensorsLoader::open(dir)
-        .unwrap_or_else(|e| panic!("SafeTensorsLoader::open {}: {e}", dir.display()));
-    let mut map = VarMap::<R>::new();
-    for name in loader.tensor_names() {
-        if is_dropped(&name) {
-            continue;
-        }
-        let t = loader
-            .load_tensor::<R>(&name, device)
-            .unwrap_or_else(|e| panic!("load {name}: {e}"));
-        map.insert(name, t);
-    }
-    restructure_hf_checkpoint(&mut map, config, device)
-        .unwrap_or_else(|e| panic!("restructure_hf_checkpoint: {e}"));
-    let names: Vec<String> = map.names().map(str::to_string).collect();
-    for name in names {
-        let t = map
-            .take_tensor(&name)
-            .unwrap_or_else(|e| panic!("take {name}: {e}"));
-        let t = if matches!(t.dtype(), DType::F32 | DType::F16 | DType::BF16) && t.dtype() != dtype
-        {
-            client
-                .cast(&t, dtype)
-                .unwrap_or_else(|e| panic!("cast {name} to {dtype:?}: {e}"))
-        } else {
-            t
-        };
-        map.insert(name, t);
-    }
-    let mut vb = VarBuilder::new(&mut map, device);
-    let loaded = LoadedModel::<R>::load(config, &mut vb)
-        .unwrap_or_else(|e| panic!("LoadedModel::load: {e}"));
-    let model = match loaded {
-        LoadedModel::Qwen35(model) => model,
-        _ => panic!("LoadedModel::load returned a model other than Qwen35"),
-    };
-    assert_eq!(
-        map.len(),
-        0,
-        "loader left {} tensors behind: {:?}",
-        map.len(),
-        map.names().take(8).collect::<Vec<_>>()
-    );
-    model
-}
-
-/// The first index of the largest value, and the gap to the runner-up
-/// (`inf` for one value).
-fn top<T: Copy + Into<f64>>(values: &[T]) -> (usize, f64) {
-    let v: Vec<f64> = values.iter().map(|&x| x.into()).collect();
-    let best = (0..v.len()).fold(0, |b, i| if v[i] > v[b] { i } else { b });
-    let second = (0..v.len())
-        .filter(|&i| i != best)
-        .map(|i| v[i])
-        .fold(f64::NEG_INFINITY, f64::max);
-    (best, v[best] - second)
-}
-
 /// The argmax of `got` equals the reference's where `tol` gates it, given
 /// the values' tolerance `band` and the reference's top-two probability
 /// gap `prob_gap`. Returns whether it was compared.
@@ -276,17 +194,6 @@ fn same_argmax<T: Copy + Into<f64>>(
         );
     }
     gated
-}
-
-fn close_f64(got: &[f64], want: &[f64], tol: f64, what: &str) -> f64 {
-    assert_eq!(got.len(), want.len(), "{what}: length");
-    let mut worst = 0.0f64;
-    for (i, (g, w)) in got.iter().zip(want).enumerate() {
-        let d = (g - w).abs();
-        assert!(d <= tol, "{what} entry {i}: {g} vs reference {w}");
-        worst = worst.max(d);
-    }
-    worst
 }
 
 /// Every raw logit, probability and argmax of `out` against `fx`.
@@ -427,7 +334,7 @@ fn label_token_matches_reference_cpu() {
     let device = CpuDevice::new();
     let client = CpuRuntime::default_client(&device);
     let config = config(&dir);
-    let model = build_model::<CpuRuntime>(&dir, &config, &device, DType::F32);
+    let model = build_model::<CpuRuntime>(&dir, &config, &device, DType::F32, None);
     check_all::<CpuRuntime>(&client, &model, &fixtures, CPU_F32);
 }
 
@@ -446,7 +353,7 @@ fn label_token_matches_reference_cuda() {
     let device = CudaDevice::new(0);
     let client = CudaRuntime::default_client(&device);
     let config = config(&dir);
-    let model = build_model::<CudaRuntime>(&dir, &config, &device, DType::BF16);
+    let model = build_model::<CudaRuntime>(&dir, &config, &device, DType::BF16, None);
     check_all::<CudaRuntime>(&client, &model, &fixtures, CUDA_BF16);
 }
 

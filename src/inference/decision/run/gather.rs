@@ -69,9 +69,11 @@ fn check_supplied<R: Runtime>(
 ///
 /// Plan errors as [`DecisionPlan::validate`]. [`Error::InvalidArgument`]
 /// when a supplied `prefix` has the wrong length or lacks a prefix
-/// gather's row, when the config is invalid, or when the prefix plus the
-/// longest read row passes [`DecisionBackbone::max_positions`], naming
-/// the row. Backbone errors propagate.
+/// gather's row, when the config is invalid, when one lane passes
+/// `cfg.max_lane_bytes`, or when the prefix plus the longest read row
+/// passes [`DecisionBackbone::max_positions`], naming the row.
+/// [`Error::Cancelled`] when `cfg.cancel` is set before the prefix or
+/// before a pass. Backbone errors propagate.
 pub fn gather_plan_hidden<R, C, B>(
     client: &C,
     backbone: &B,
@@ -85,6 +87,8 @@ where
     B: DecisionBackbone<R>,
 {
     plan.validate()?;
+    let passes = pack_passes(plan, cfg, |width| backbone.lane_bytes(width))?;
+    cfg.check_cancel(|| "before the prefix".into())?;
     let owned;
     let supplied = prefix.is_some();
     let prefix = match prefix {
@@ -98,7 +102,6 @@ where
     if supplied {
         check_supplied(prefix, plan, &slots)?;
     }
-    let passes = pack_passes(plan, cfg)?;
     let max_pos = backbone.max_positions();
     if let Some(pass) = passes.first()
         && prefix.rope_end + pass.width > max_pos
@@ -140,7 +143,8 @@ where
         pieces.push(client.index_select(hidden, 0, &index)?);
     }
 
-    for pass in &passes {
+    for (i, pass) in passes.iter().enumerate() {
+        cfg.check_cancel(|| format!("before pass {} of {}", i + 1, passes.len()))?;
         let lanes = pass.rows.len();
         let (mut kv, mut gdn) = backbone.lane_caches(lanes, pass.width, device)?;
         if prefix.len > 0 {

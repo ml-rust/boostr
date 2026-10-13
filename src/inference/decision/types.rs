@@ -30,6 +30,17 @@ pub struct QuestionMeta {
     pub options: usize,
 }
 
+impl QuestionMeta {
+    /// The scoring rows the question takes: one per level for an isolated
+    /// Score question, else one.
+    pub fn scoring_rows(&self) -> usize {
+        match self.kind {
+            QuestionKind::Score { isolated: true, .. } => self.options,
+            _ => 1,
+        }
+    }
+}
+
 /// One answered question.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]

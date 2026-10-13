@@ -49,9 +49,10 @@ where
 ///
 /// # Errors
 ///
-/// As [`gather_plan_hidden`]; head errors propagate; `Error::InvalidArgument`
-/// when the head's rows disagree with `meta`; temperature and answer
-/// errors propagate.
+/// As [`gather_plan_hidden`]; `Error::Cancelled` when `cfg.cancel` is set
+/// before scoring; head errors propagate; `Error::InvalidArgument` when
+/// the head's rows disagree with `meta`; temperature and answer errors
+/// propagate.
 #[allow(clippy::too_many_arguments)]
 pub fn run_decision<R, C, B, H>(
     client: &C,
@@ -72,6 +73,7 @@ where
     H: DecisionHead<R>,
 {
     let hidden = gather_plan_hidden(client, backbone, plan, prefix, cfg)?;
+    cfg.check_cancel(|| "before scoring".into())?;
     let logits = head.option_logits(client, backbone, &hidden, items)?;
     finish(client, &logits, meta, temp, opts)
 }
@@ -223,9 +225,9 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn run(
+    pub(crate) fn run<B: DecisionBackbone<CpuRuntime>>(
         client: &CpuClient,
-        model: &Qwen35Model<CpuRuntime>,
+        model: &B,
         plan: &DecisionPlan,
         prefix: Option<&PrefixState<CpuRuntime>>,
         cfg: &RunnerConfig,
@@ -247,24 +249,29 @@ pub(crate) mod tests {
         )
     }
 
-    /// One lane per pass, every row in one pass, and a tight token budget
-    /// give the same logits and answers.
+    /// One lane per pass, every row in one pass, a tight token budget and
+    /// a byte budget of two of the widest lanes give the same logits and
+    /// answers.
     #[test]
     fn packing_does_not_change_answers() {
         let (client, device) = cpu_setup();
         let model = model(&device);
         let plan = plan(PREFIX);
+        let two_lanes = Some(2 * model.lane_bytes(9));
         let configs = [
-            (1, DEFAULT_PASS_TOKENS),
-            (64, DEFAULT_PASS_TOKENS),
-            (64, 10),
+            (1, DEFAULT_PASS_TOKENS, None),
+            (64, DEFAULT_PASS_TOKENS, None),
+            (64, 10, None),
+            (64, DEFAULT_PASS_TOKENS, two_lanes),
         ];
         let results: Vec<DecisionResult> = configs
             .iter()
-            .map(|&(max_lanes, pass_tokens)| {
+            .map(|&(max_lanes, pass_tokens, max_lane_bytes)| {
                 let cfg = RunnerConfig {
                     max_lanes,
                     pass_tokens,
+                    max_lane_bytes,
+                    cancel: None,
                 };
                 run(&client, &model, &plan, None, &cfg).unwrap()
             })

@@ -39,7 +39,7 @@ pub struct ObjectivePoint {
     pub hess: f64,
 }
 
-fn invalid(reason: String) -> Error {
+pub(crate) fn invalid(reason: String) -> Error {
     Error::InvalidArgument {
         arg: "samples",
         reason,
@@ -62,35 +62,40 @@ pub fn validate_samples(samples: &[CalibrationSample]) -> Result<()> {
         if let Some(i) = sample.logits.iter().position(|v| !v.is_finite()) {
             return Err(invalid(format!("sample {s} logit {i} is not finite")));
         }
-        match &sample.target {
-            Target::Hard(j) if *j >= k => {
-                return Err(invalid(format!(
-                    "sample {s} hard target {j} is out of range for {k} options"
-                )));
-            }
-            Target::Hard(_) => {}
-            Target::Soft(y) => {
-                if y.len() != k {
-                    return Err(invalid(format!(
-                        "sample {s} soft target has {} entries for {k} options",
-                        y.len()
-                    )));
-                }
-                if y.iter().any(|v| !v.is_finite() || *v < 0.0) {
-                    return Err(invalid(format!(
-                        "sample {s} soft target has an entry that is negative or not finite"
-                    )));
-                }
-                let total: f64 = y.iter().sum();
-                if (total - 1.0).abs() > SUM_TOLERANCE {
-                    return Err(invalid(format!(
-                        "sample {s} soft target sums to {total}, not 1"
-                    )));
-                }
-            }
-        }
+        check_target(s, &sample.target, k)?;
     }
     Ok(())
+}
+
+/// Checks sample `s`'s target over `k` options: a Hard index below `k`, or
+/// a Soft distribution of `k` entries.
+pub(crate) fn check_target(s: usize, target: &Target, k: usize) -> Result<()> {
+    match target {
+        Target::Hard(j) if *j >= k => Err(invalid(format!(
+            "sample {s} hard target {j} is out of range for {k} options"
+        ))),
+        Target::Hard(_) => Ok(()),
+        Target::Soft(y) => {
+            if y.len() != k {
+                return Err(invalid(format!(
+                    "sample {s} soft target has {} entries for {k} options",
+                    y.len()
+                )));
+            }
+            if y.iter().any(|v| !v.is_finite() || *v < 0.0) {
+                return Err(invalid(format!(
+                    "sample {s} soft target has an entry that is negative or not finite"
+                )));
+            }
+            let total: f64 = y.iter().sum();
+            if (total - 1.0).abs() > SUM_TOLERANCE {
+                return Err(invalid(format!(
+                    "sample {s} soft target sums to {total}, not 1"
+                )));
+            }
+            Ok(())
+        }
+    }
 }
 
 /// True when every sample's logits are all equal, so the objective does not depend on `beta`.

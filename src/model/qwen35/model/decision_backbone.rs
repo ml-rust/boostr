@@ -148,6 +148,30 @@ where
         self.decision_caches(lanes, width, device)
     }
 
+    /// Per attention layer, keys and values `[num_kv_heads, width,
+    /// head_dim]`. Per GDN layer, the conv window `[qkv_dim, conv_kernel -
+    /// 1]` and the recurrent state `[value_heads, S, S]`. All in the
+    /// model's dtype.
+    fn lane_bytes(&self, width: usize) -> usize {
+        let a = &self.attention_config;
+        let g = &self.gdn_config;
+        let kv = a
+            .num_kv_heads
+            .saturating_mul(a.head_dim)
+            .saturating_mul(width)
+            .saturating_mul(2 * self.num_attention_layers());
+        let conv = g.qkv_dim().saturating_mul(g.conv_kernel.saturating_sub(1));
+        let ssm = g
+            .value_heads
+            .saturating_mul(g.state_size)
+            .saturating_mul(g.state_size);
+        let gdn = conv
+            .saturating_add(ssm)
+            .saturating_mul(self.num_gdn_layers());
+        kv.saturating_add(gdn)
+            .saturating_mul(self.dtype().size_in_bytes())
+    }
+
     /// # Errors
     ///
     /// [`Error::ModelError`] when `ids` is not `[lanes, width]` or `kv`
@@ -314,6 +338,36 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("the lanes hold [6, 4] keys"), "{err}");
+    }
+
+    /// The bytes of every buffer `lane_caches` allocates.
+    fn allocated(kv: &LayeredKvCache<CpuRuntime>, gdn: &LayeredGdnState<CpuRuntime>) -> usize {
+        let bytes = |t: &Tensor<CpuRuntime>| t.numel() * t.dtype().size_in_bytes();
+        let kv: usize = (0..kv.num_layers())
+            .filter_map(|l| kv.layer(l))
+            .map(|c| bytes(c.k_cache_raw()) + bytes(c.v_cache_raw()))
+            .sum();
+        let gdn: usize = (0..gdn.num_layers())
+            .filter_map(|l| gdn.layer(l))
+            .map(|s| bytes(s.conv()) + bytes(s.ssm()))
+            .sum();
+        kv + gdn
+    }
+
+    #[test]
+    fn lane_bytes_match_lane_caches() {
+        let (_, device) = cpu_setup();
+        let model = chunked_model(&device, 0x3535_0063, CHUNK, false, Head::Own);
+        let mut last = 0;
+        for width in [1usize, 2, 5, 9] {
+            let one = model.lane_bytes(width);
+            assert!(one > last, "width {width}: {one} after {last}");
+            last = one;
+            for lanes in [1usize, 3] {
+                let (kv, gdn) = model.lane_caches(lanes, width, &device).unwrap();
+                assert_eq!(allocated(&kv, &gdn), lanes * one, "{lanes} x {width}");
+            }
+        }
     }
 
     #[test]

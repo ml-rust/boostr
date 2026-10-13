@@ -34,24 +34,21 @@ fn layout(
     meta: &[QuestionMeta],
     temp: &TemperaturePolicy,
 ) -> Result<Layout> {
+    temp.check_questions(meta.len())?;
     let mut spans = Vec::with_capacity(meta.len());
     let mut temperatures = Vec::with_capacity(logits_counts.len());
     let mut want: Vec<usize> = Vec::with_capacity(logits_counts.len());
-    for m in meta {
+    for (q, m) in meta.iter().enumerate() {
         let first = want.len();
+        let t = temp.for_question(q, m)?;
         if matches!(m.kind, QuestionKind::Score { isolated: true, .. }) {
-            let level = QuestionMeta {
-                kind: m.kind.clone(),
-                options: 2,
-            };
-            let t = temp.resolve(&level)?;
             for _ in 0..m.options {
                 want.push(2);
                 temperatures.push(t);
             }
         } else {
             want.push(m.options);
-            temperatures.push(temp.resolve(m)?);
+            temperatures.push(t);
         }
         spans.push((first, want.len() - first));
     }
@@ -314,6 +311,16 @@ mod tests {
             panic!("expected isolated Score answers");
         };
         assert!((e1 - e2).abs() < 1e-6 && (m1 - m2).abs() < 1e-6);
+
+        // Per-question temperatures reach every level row of their question.
+        let per = TemperaturePolicy::PerQuestion(vec![1.5, 0.5]);
+        let again = finish(&client, &logits(&device, &rows), &metas, &per, &opts).unwrap();
+        assert_eq!(again, out);
+        let short = TemperaturePolicy::PerQuestion(vec![1.5]);
+        let e = finish(&client, &logits(&device, &rows), &metas, &short, &opts)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("1 temperatures for 2 questions"), "{e}");
     }
 
     #[test]

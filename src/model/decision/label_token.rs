@@ -7,7 +7,7 @@
 //! question takes one item per level, labels `[no, yes]`.
 
 use crate::error::{Error, Result};
-use crate::inference::decision::{DecisionBackbone, DecisionHead, OptionLogits};
+use crate::inference::decision::{DecisionBackbone, DecisionHead, GatherIndexed, OptionLogits};
 use crate::model::traits::ModelClient;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
@@ -23,6 +23,14 @@ pub struct LabelTokenItem {
     /// The label token id of each option, in option order. Non-empty, no
     /// repeats, each below the backbone's vocabulary size.
     pub labels: Vec<u32>,
+}
+
+/// Merging requests moves `slot` past the earlier requests' gathers.
+impl GatherIndexed for LabelTokenItem {
+    fn offset_gathers(mut self, by: usize) -> Self {
+        self.slot += by;
+        self
+    }
 }
 
 /// Option logits as label-token logits at answer slots.

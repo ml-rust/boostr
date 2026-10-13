@@ -30,6 +30,11 @@ pub enum TemperaturePolicy {
         /// Floor. Must be finite and > 0.
         min: f64,
     },
+    /// One temperature per question, in question order. Each applies to
+    /// every scoring row of its question, the level rows of an isolated
+    /// Score question included. A run with merged requests uses it to keep
+    /// each request's own temperatures.
+    PerQuestion(Vec<f64>),
 }
 
 fn checked(t: f64, what: &str) -> Result<f64> {
@@ -55,9 +60,15 @@ fn finite(v: f64, what: &str) -> Result<f64> {
 }
 
 impl TemperaturePolicy {
-    /// The temperature of a question. Errors when the result is not finite and > 0.
+    /// The temperature of a question. Errors when the result is not finite
+    /// and > 0, and for [`TemperaturePolicy::PerQuestion`], which needs the
+    /// question's index: use [`TemperaturePolicy::for_question`].
     pub fn resolve(&self, meta: &QuestionMeta) -> Result<f64> {
         match self {
+            Self::PerQuestion(_) => Err(Error::InvalidArgument {
+                arg: "temperature",
+                reason: "a PerQuestion policy needs the question index; call for_question".into(),
+            }),
             Self::Fixed(t) => checked(*t, "Fixed temperature"),
             Self::ByKind {
                 choice,
@@ -75,6 +86,56 @@ impl TemperaturePolicy {
                 let n = meta.options.max(2) as f64;
                 checked((a + b * n.ln()).max(min), "ByOptions temperature")
             }
+        }
+    }
+
+    /// The temperature every scoring row of question `q` takes.
+    ///
+    /// An isolated Score question's level rows each resolve as a
+    /// two-option row of that question's kind. `PerQuestion` gives entry
+    /// `q`.
+    ///
+    /// # Errors
+    ///
+    /// As [`TemperaturePolicy::resolve`], and when `q` is past a
+    /// `PerQuestion` list or its entry is not finite and > 0, naming `q`.
+    pub fn for_question(&self, q: usize, meta: &QuestionMeta) -> Result<f64> {
+        if let Self::PerQuestion(ts) = self {
+            let t = ts.get(q).copied().ok_or_else(|| Error::InvalidArgument {
+                arg: "temperature",
+                reason: format!(
+                    "PerQuestion has {} temperatures, question {q} has none",
+                    ts.len()
+                ),
+            })?;
+            return checked(t, &format!("PerQuestion temperature {q}"));
+        }
+        if matches!(meta.kind, QuestionKind::Score { isolated: true, .. }) {
+            let level = QuestionMeta {
+                kind: meta.kind.clone(),
+                options: 2,
+            };
+            return self.resolve(&level);
+        }
+        self.resolve(meta)
+    }
+
+    /// Checks that a `PerQuestion` list holds one temperature for each of
+    /// `questions` questions. Other policies always pass.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] naming both counts.
+    pub fn check_questions(&self, questions: usize) -> Result<()> {
+        match self {
+            Self::PerQuestion(ts) if ts.len() != questions => Err(Error::InvalidArgument {
+                arg: "temperature",
+                reason: format!(
+                    "PerQuestion has {} temperatures for {questions} questions",
+                    ts.len()
+                ),
+            }),
+            _ => Ok(()),
         }
     }
 }
@@ -185,6 +246,44 @@ mod tests {
             let bad = TemperaturePolicy::ByOptions { a, b, min };
             assert!(bad.resolve(&meta(QuestionKind::Choice, 3)).is_err());
         }
+    }
+
+    #[test]
+    fn for_question_resolves_levels_and_indices() {
+        let iso = meta(
+            QuestionKind::Score {
+                values: None,
+                isolated: true,
+            },
+            5,
+        );
+        // An isolated Score level row resolves as two options: a + b ln 2.
+        let by_opts = TemperaturePolicy::ByOptions {
+            a: 3.0,
+            b: -1.0,
+            min: 0.05,
+        };
+        let t = by_opts.for_question(0, &iso).unwrap();
+        assert!((t - (3.0 - 2f64.ln())).abs() < 1e-12);
+        let c4 = meta(QuestionKind::Choice, 4);
+        let t = by_opts.for_question(7, &c4).unwrap();
+        assert!((t - (3.0 - 4f64.ln())).abs() < 1e-12);
+
+        let per = TemperaturePolicy::PerQuestion(vec![0.5, 2.0]);
+        assert_eq!(per.for_question(1, &iso).unwrap(), 2.0);
+        assert_eq!(per.for_question(0, &c4).unwrap(), 0.5);
+        let e = per.for_question(2, &c4).unwrap_err().to_string();
+        assert!(
+            e.contains("PerQuestion has 2 temperatures, question 2 has none"),
+            "{e}"
+        );
+        assert!(per.resolve(&c4).is_err());
+        assert!(per.check_questions(2).is_ok());
+        let e = per.check_questions(3).unwrap_err().to_string();
+        assert!(e.contains("2 temperatures for 3 questions"), "{e}");
+        assert!(by_opts.check_questions(9).is_ok());
+        let bad = TemperaturePolicy::PerQuestion(vec![0.0]);
+        assert!(bad.for_question(0, &c4).is_err());
     }
 
     #[test]

@@ -73,6 +73,14 @@ pub enum Error {
         reason: String,
     },
 
+    /// A caller cancelled the work through its cancel token. Nothing after
+    /// `at` ran, and no partial result is returned.
+    #[error("cancelled {at}")]
+    Cancelled {
+        /// The point the work stopped at, such as "before pass 2 of 5".
+        at: String,
+    },
+
     /// Scheduler error
     #[error("scheduler error: {reason}")]
     SchedulerError {

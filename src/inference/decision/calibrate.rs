@@ -5,7 +5,7 @@
 //! (see [`super::objective`]). Only `T > 0` is searched, so the fit never
 //! changes an argmax.
 
-use super::objective::{CalibrationSample, evaluate, is_flat, validate_samples};
+use super::objective::{CalibrationSample, ObjectivePoint, evaluate, is_flat, validate_samples};
 use crate::error::{Error, Result};
 
 /// The most Newton iterations a fit runs.
@@ -67,7 +67,36 @@ pub struct TemperatureFit {
     pub outcome: FitOutcome,
 }
 
-fn check_bounds(b: TemperatureBounds) -> Result<()> {
+/// The first point on the way from `beta` toward `target`, halving the
+/// step, that lowers the NLL or settles at the minimum. `None` when no
+/// halving does.
+///
+/// Near the minimum the NLL change falls below its rounding error. A step
+/// that shrinks |grad| and raises NLL by no more than that error is kept.
+pub(crate) fn backtrack(
+    eval: impl Fn(f64) -> ObjectivePoint,
+    beta: f64,
+    point: &ObjectivePoint,
+    target: f64,
+) -> Option<(f64, ObjectivePoint)> {
+    let mut step = target - beta;
+    let noise = NLL_ROUNDING * point.nll.abs().max(1.0);
+    for _ in 0..=MAX_HALVINGS {
+        let candidate = beta + step;
+        if candidate > 0.0 {
+            let next = eval(candidate);
+            let descends = next.nll <= point.nll;
+            let settles = next.grad.abs() < point.grad.abs() && next.nll <= point.nll + noise;
+            if descends || settles {
+                return Some((candidate, next));
+            }
+        }
+        step *= 0.5;
+    }
+    None
+}
+
+pub(crate) fn check_bounds(b: TemperatureBounds) -> Result<()> {
     if b.min.is_finite() && b.max.is_finite() && b.min > 0.0 && b.max > b.min {
         Ok(())
     } else {
@@ -132,24 +161,7 @@ pub fn fit_temperature(
                 outcome,
             ));
         }
-        let mut step = target - beta;
-        let mut accepted = None;
-        // Near the minimum the NLL change falls below its rounding error. A step
-        // that shrinks |grad| and raises NLL by no more than that error is kept.
-        let noise = NLL_ROUNDING * point.nll.abs().max(1.0);
-        for _ in 0..=MAX_HALVINGS {
-            let candidate = beta + step;
-            if candidate > 0.0 {
-                let next = evaluate(samples, candidate);
-                let descends = next.nll <= point.nll;
-                let settles = next.grad.abs() < point.grad.abs() && next.nll <= point.nll + noise;
-                if descends || settles {
-                    accepted = Some((candidate, next));
-                    break;
-                }
-            }
-            step *= 0.5;
-        }
+        let accepted = backtrack(|b| evaluate(samples, b), beta, &point, target);
         let Some((next_beta, next)) = accepted else {
             return Ok(finish(
                 beta,
@@ -185,7 +197,8 @@ pub fn fit_temperature(
     ))
 }
 
-fn finish(
+/// The fit result at `beta`, reporting a bound exactly when `beta` sits on one.
+pub(crate) fn finish(
     beta: f64,
     nll_after: f64,
     nll_before: f64,
@@ -213,15 +226,15 @@ fn finish(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::objective::Target;
     use super::*;
 
     /// 64-bit LCG (Knuth MMIX constants); `uniform` gives a uniform in `[0, 1)`.
-    struct Lcg(u64);
+    pub(crate) struct Lcg(pub(crate) u64);
 
     impl Lcg {
-        fn uniform(&mut self) -> f64 {
+        pub(crate) fn uniform(&mut self) -> f64 {
             self.0 = self
                 .0
                 .wrapping_mul(6364136223846793005)

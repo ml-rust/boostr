@@ -74,6 +74,14 @@ pub trait DecisionBackbone<R: Runtime<DType = DType>> {
         device: &R::Device,
     ) -> Result<(LayeredKvCache<R>, LayeredGdnState<R>)>;
 
+    /// The bytes of cache state one lane of `width` suffix positions
+    /// holds: the buffers [`DecisionBackbone::lane_caches`] allocates for
+    /// one lane. `lane_caches(n, width, _)` holds `n * lane_bytes(width)`.
+    ///
+    /// Activations a forward pass allocates and frees are not counted.
+    /// The prefix's caches are shared by every lane and not counted.
+    fn lane_bytes(&self, width: usize) -> usize;
+
     /// Run `ids` `[lanes, width]` (right-padded suffixes) as lanes that
     /// each continue `prefix`, and return the normed hidden rows `[G,
     /// hidden_size]` at `gather` `[G]` i64 flat indices `lane * width + t`.

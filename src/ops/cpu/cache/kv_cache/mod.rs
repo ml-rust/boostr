@@ -6,3 +6,6 @@ mod append_kv_int4;
 mod batched;
 mod block_ops;
 mod ops;
+mod reshape_and_cache;
+#[cfg(test)]
+mod test_support;

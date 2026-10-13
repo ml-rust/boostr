@@ -1,15 +1,7 @@
 pub mod activation;
-pub mod adain;
-pub mod causal_conv1d;
-pub mod conv1d;
-pub mod conv2d;
-pub mod dropout;
+mod conv;
 pub mod embedding;
 pub mod fsq;
-pub mod gated_rmsnorm;
-pub mod groupnorm;
-pub mod hadamard;
-pub mod layernorm;
 pub mod linear;
 pub mod lora;
 pub mod lora_metadata;
@@ -20,13 +12,12 @@ pub mod maybe_lora;
 pub mod mla;
 pub mod module;
 pub mod moe;
-pub mod qk_norm;
+mod norm;
 pub mod quant_embedding;
-pub mod rmsnorm;
+mod reexports;
+mod regularize;
 pub mod rope;
-pub mod rotated_embedding;
-pub mod rotated_mlp;
-pub mod stochastic_depth;
+mod rotated;
 pub mod timestep_embedding;
 pub mod var_builder;
 pub mod var_ops;
@@ -35,50 +26,4 @@ pub mod vocab_resize;
 pub mod weight;
 pub mod weight_norm;
 
-pub use activation::Activation;
-pub use adain::AdaIn1d;
-pub use causal_conv1d::causal_conv1d;
-pub use conv1d::Conv1d;
-pub use conv2d::Conv2d;
-pub use dropout::Dropout;
-pub use embedding::Embedding;
-pub use fsq::{Fsq, FsqConfig, ResidualFsq, ResidualFsqConfig, ResidualFsqWeights};
-pub use gated_rmsnorm::{GateOrder, GatedRmsNorm};
-pub use groupnorm::GroupNorm;
-pub use hadamard::HadamardRotation;
-pub use layernorm::LayerNorm;
-pub use linear::{Linear, MaybeQuantLinear, MaybeRotatedLinear, QuantLinear, RotatedLinear};
-pub use lora::{FusedLoraPart, LoraFactors, LoraLinear};
-pub use lora_metadata::{
-    LoraMetadata, build_lora_metadata, check_lora_metadata, parse_lora_metadata,
-};
-pub use lora_targets::{
-    LoraTargets, adapt_if_targeted, load_lora_child, named_tensors_to_id_map, push_projection_name,
-};
-pub use loss::{
-    contrastive_loss, cross_entropy_loss, cross_entropy_loss_masked, cross_entropy_loss_smooth,
-    flow_matching_interpolate, flow_matching_loss, flow_matching_target, focal_loss, kl_div_loss,
-    mse_loss, router_z_loss,
-};
-pub use lstm::{BiLstm, Lstm};
-pub use maybe_lora::MaybeLoraLinear;
-pub use mla::{Mla, MlaConfig, MlaWeights};
-pub use module::{Module, StateDict, TrainMode, child_params, extend_named};
-pub use moe::{
-    Expert, MoeLayer, MoeLayerConfig, MoeLoadBalanceLossMode, MoeOutput, MoeRouter,
-    MoeRouterConfig, RouterOutput,
-};
-pub use qk_norm::{LastAxisNorm, QkNorm, apply_qk_norm};
-pub use quant_embedding::{MaybeQuantEmbedding, QuantEmbedding};
-pub use rmsnorm::RmsNorm;
-pub use rope::RoPE;
-pub use rotated_embedding::{MaybeRotatedEmbedding, RotatedEmbedding};
-pub use rotated_mlp::{MlpProjection, RotatedMlp};
-pub use stochastic_depth::StochasticDepth;
-pub use timestep_embedding::{SinusoidalPosEmb, TimestepEmbedding};
-pub use var_builder::VarBuilder;
-pub use var_ops::{repeat_kv, var_contiguous};
-pub use varmap::{Init, VarMap};
-pub use vocab_resize::resize_rows_mean_init;
-pub use weight::Weight;
-pub use weight_norm::fuse_weight_norm;
+pub use reexports::*;

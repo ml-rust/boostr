@@ -62,17 +62,17 @@ Add boostr to `Cargo.toml`:
 
 ```toml
 [dependencies]
-boostr = "0.8"
+boostr = "0.9"
 ```
 
 Enable a backend with a feature:
 
 ```toml
 # CUDA: requires CUDA 12.8+ or 13.x
-boostr = { version = "0.8", features = ["cuda"] }
+boostr = { version = "0.9", features = ["cuda"] }
 
 # WebGPU: requires Vulkan, Metal, or DX12 GPU drivers
-boostr = { version = "0.8", features = ["wgpu"] }
+boostr = { version = "0.9", features = ["wgpu"] }
 ```
 
 ### Build from Source

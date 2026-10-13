@@ -7,7 +7,9 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased]
+## [0.9.0] - 2026-10-13
+
+Adds joint-schema decision heads, F32 weight-row reads and score confidence rules, and a new required `DecisionBackbone::output_rows` method.
 
 ### Added
 
@@ -37,14 +39,24 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`PrefixState::bytes`** — the device bytes a prefix state holds, each buffer at its allocated size.
 - **`peak_lane_bytes`** — the lane-state bytes of a plan's largest pass under a `RunnerConfig`.
 - **`plan_from_rows_at`** — `plan_from_rows` with the prefix cut at a given length, capped as `plan_from_rows` caps it. A single row takes a prefix too, so every request about one state cuts at that state's end.
+- **`model::decision::joint_schema`** — the joint-schema decision head. `JointSchemaHead::from_dir` reads `joint_head_config.json` and `joint_head.safetensors` from a checkpoint directory. `JointSchemaHead::from_tensors` builds a head from tensors. `HeadDtype::F32` casts every weight to F32 at load. `HeadDtype::Checkpoint` keeps the stored dtype. A `JointSchemaItem` holds one question's `FieldKind`, its question span and its `JointOption`s. `joint_answer_options` gives the answer options, scored with `ScoreConfidence::MaxProbability`. `full_sequence_plan` builds a `DecisionPlan` over a full token sequence. A load error names the file.
+- **`MaybeRotatedLinear::weight_rows_f32`** — the chosen rows of the effective weight, in F32, shape `[ids.len(), in_features]`. Row `n` gives output `ids[n]` when dotted with an input row, bias aside. An id may repeat. A dense weight casts its rows. A block-quantized weight dequantizes only those rows. An AWQ/GPTQ weight runs its packed words as a sub-weight. A Hadamard-rotated projection returns the inverse rotation of its stored rows. An empty list, an id out of range and a LoRA-adapted projection are errors.
+- **`Qwen35Model::output_rows`** — the F32 `lm_head` rows of the given token ids, read through `MaybeRotatedLinear::weight_rows_f32`. A tied head reads the embedding storage it shares. A LoRA-adapted `lm_head` is an error.
+- **`ScoreConfidence`** — the rule that maps a Score question's level probabilities to one confidence. `Distance` is the default. `ChanceCorrected` applies the Choice rule to the levels. `MaxProbability` gives the largest level probability, uncorrected for chance. `score_confidence` applies a rule to a distribution.
+- **`choice_confidence`** and **`certainty`** — `choice_confidence` gives the chance-corrected confidence of a Choice question's probabilities. `certainty` gives the entropy-based certainty of a distribution.
+- **`HadamardRotation::inverse_cast`** — `inverse` for an `x` of any float dtype. The signs cast to `x`'s dtype first when they are held in another dtype. The cast is exact.
+- **`qwen35_config_from_hf`** — builds a `UniversalConfig` from a parsed Hugging Face `config.json` for Qwen3.5 models.
+- **`attach_adapter`** on `MaybeRotatedLinear`, `RotatedMlp` and `Qwen35AttentionBlock` — attaches frozen LoRA factors with a scaling. A Hadamard-rotated or already adapted projection is an error.
 
 ### Changed
 
+- **`DecisionBackbone::output_rows`** — **Breaking:** a new required method. Every implementation must provide it. It returns the output-head rows of the given token ids. `Qwen35Model` implements it through `Qwen35Model::output_rows`.
 - **`restructure_hf_checkpoint`** — the client must implement `TypeConversionOps`. Generic callers add the bound.
 - **`RunnerConfig`** — gains `max_lane_bytes` and `cancel`, and is no longer `Copy`. A struct literal must name the new fields or use `..RunnerConfig::default()`.
 - **`DecisionBackbone`** — every implementation must provide `lane_bytes`.
 - **`run_decision`** — checks the pass layout before it runs the prefix, so a bad config fails before any device work.
 - **`Qwen35AttentionBlock::forward`** — refuses a cache whose lanes hold different numbers of keys. The shared append writes every lane at one position, so such a cache produced wrong keys before. The error names each lane's length.
+- **Module layout** — the `nn` layers, `model`, `distributed`, `inference`, `ops`, `quant` and `tcf` moved into submodule directories. Each `mod.rs` holds declarations and re-exports. Public paths are unchanged.
 
 ### Fixed
 

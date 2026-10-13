@@ -1,6 +1,6 @@
 [package]
 name = "boostr"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.95"
 description = "ML framework built on numr - attention, quantization, model architectures"
@@ -31,7 +31,7 @@ exclude = [
 bench = false
 
 [dependencies]
-numr = "0.12"
+numr = "0.13"
 half = { version = "2", features = ["bytemuck"] }
 thiserror = "2.0"
 serde = { version = "1", features = ["derive"] }

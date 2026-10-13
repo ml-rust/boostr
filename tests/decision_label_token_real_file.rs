@@ -11,7 +11,7 @@
 //!   both set is an error.
 //! - `BOOSTR_DECISION_FIXTURE_DIR`: the `*.json` fixtures of that model,
 //!   written by `ref_label_token.py` (schema
-//!   `boostr.decision.label_token.v1`, documented at the top of that
+//!   `boostr.decision.label_token.v2`, documented at the top of that
 //!   script): each row's prompt token ids, the shared prefix length, every
 //!   scoring row's answer slot, label ids, raw label logits, probabilities
 //!   and temperature, and every question's final distribution.

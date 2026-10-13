@@ -1,4 +1,4 @@
-//! Label-token decision fixtures (schema `boostr.decision.label_token.v1`,
+//! Label-token decision fixtures (schema `boostr.decision.label_token.v2`,
 //! written by `ref_label_token.py`) and the `DecisionPlan`, items,
 //! question metadata and temperature policy each one describes.
 
@@ -13,7 +13,7 @@ use serde::Deserialize;
 pub const ENV_MODEL: &str = "BOOSTR_DECISION_MODEL_DIR";
 pub const ENV_GGUF: &str = "BOOSTR_DECISION_GGUF";
 pub const ENV_FIXTURES: &str = "BOOSTR_DECISION_FIXTURE_DIR";
-pub const SCHEMA: &str = "boostr.decision.label_token.v1";
+pub const SCHEMA: &str = "boostr.decision.label_token.v2";
 
 /// The temperature the reference applies to each answer type.
 #[derive(Deserialize)]

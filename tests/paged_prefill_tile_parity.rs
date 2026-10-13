@@ -187,7 +187,7 @@ fn f16_prefill_small_and_large_tile_agree() {
             // difference is the final store of the output — one ULP of F16
             // (eps 9.8e-4) at most, not the input-quantization-dominated
             // error a cross-backend (CPU-vs-CUDA) comparison has to tolerate
-            // (2e-3 atol / 1e-2 rtol in `tests/backend_parity/mqa_gqa_attention.rs`).
+            // (2e-3 atol / 1e-2 rtol in `tests/backend_parity/attn/mqa_gqa_attention.rs`).
             // This tolerance is set tighter than that cross-backend bound,
             // not looser.
             assert_close(
@@ -305,7 +305,7 @@ fn bf16_prefill_small_and_large_tile_agree() {
             // amplify a difference is the final BF16 store — at most a few
             // ULPs of BF16. Set tighter than the cross-backend (CPU-vs-CUDA)
             // BF16 bound of 2e-2 atol / 6e-2 rtol in
-            // `tests/backend_parity/mqa_gqa_attention.rs`, which additionally
+            // `tests/backend_parity/attn/mqa_gqa_attention.rs`, which additionally
             // has to absorb input-quantization error this comparison does not.
             assert_close(
                 &large_out_f32,

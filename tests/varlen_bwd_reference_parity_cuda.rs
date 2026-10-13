@@ -7,7 +7,7 @@
 //! per `(q_row, k_idx, d)` straight into output storage, to FP32 register
 //! accumulation per K-row within a tile with ONE atomic per `(k_row, d)` per
 //! Q-block. The identical defect class in the paged-attention backward
-//! kernel (see `tests/backend_parity/paged_attention.rs`) produced up to 83%
+//! kernel (see `tests/backend_parity/attn/paged_attention.rs`) produced up to 83%
 //! relative error on dK/dV while every prior test still passed — that was
 //! caught only by comparing against a CPU reference at half precision. This
 //! file does the same for varlen.

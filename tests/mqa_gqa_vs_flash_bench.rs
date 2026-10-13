@@ -4,7 +4,7 @@
 //! shapes the kernel's own capability gate (`should_use_mqa_gqa`) admits?
 //!
 //! This is NOT a correctness test — numerical parity against the CPU
-//! reference is already covered by `tests/backend_parity/mqa_gqa_attention.rs`.
+//! reference is already covered by `tests/backend_parity/attn/mqa_gqa_attention.rs`.
 //! This file only measures relative speed, so it is `#[ignore]`d: it never
 //! runs under plain `cargo test` or `cargo test --features cuda`, only when
 //! explicitly requested.

@@ -8,7 +8,7 @@
 //!
 //! `tests/decode_graph_window.rs` covers the equivalent *contiguous* graph
 //! decode path (`decode_attention_graph_fwd`); this file mirrors its style
-//! for the paged path. `tests/backend_parity/paged_decode_split.rs` covers
+//! for the paged path. `tests/backend_parity/attn/paged_decode_split.rs` covers
 //! the *non-graph* paged split path, which serves as the trusted reference
 //! here.
 //!
@@ -188,7 +188,7 @@ fn paged_split_graph_decode(
 /// Trusted reference: the non-graph `paged_attention_fwd` decode fast path,
 /// over the same full-width `block_table`. It sizes its own split count from
 /// the live `seq_len_k`, independently of the graph path under test, and is
-/// already checked against CPU in `tests/backend_parity/paged_decode_split.rs`.
+/// already checked against CPU in `tests/backend_parity/attn/paged_decode_split.rs`.
 fn paged_split_reference_decode(
     client: &CudaClient,
     q: &Tensor<CudaRuntime>,

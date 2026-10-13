@@ -20,6 +20,7 @@ mod cache;
 mod capture;
 mod cross_attention;
 mod decoder;
+mod decoder_uncached;
 mod helpers;
 mod layer;
 

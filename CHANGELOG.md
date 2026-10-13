@@ -44,6 +44,7 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`SafeTensorsLoader::open` on a sharded directory** — with `model.safetensors.index.json` present, it opens only the shards the index's `weight_map` names. It opened every `.safetensors` file of the directory before, so a head or adapter file beside the shards joined the model's tensors. A malformed index is an error naming the file.
 - **Chunked GDN prefill precision** — chunked prefill of Qwen3.5-style gated delta net layers lost precision on prompts longer than a few dozen tokens. The error grew through the layers, so the logits drifted from the reference model. The UT transform of each chunk now runs as forward substitution through numr's batched triangular solve, in one call for all chunks and heads. F16 and BF16 inputs solve in F32.
 - **Qwen3.5 checkpoint edits in half precision** — `restructure_hf_checkpoint` computes the norm offset `1 + w` and `a_neg_exp = -exp(A_log)` of a Qwen3.5 checkpoint in F32, as the llama.cpp converter does. An F16 or BF16 tensor is cast to F32 on its device, edited, and cast back to its own dtype, so it rounds once. An F32 checkpoint takes the edits in F32 with no cast.
 

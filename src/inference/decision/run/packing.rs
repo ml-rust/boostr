@@ -177,6 +177,32 @@ pub fn pack_passes(
     Ok(passes)
 }
 
+/// The lane-state bytes of the largest pass of `plan` under `cfg`:
+/// `lanes * lane_bytes(width)` of the pass that holds the most. A plan
+/// whose gathers all read the prefix runs no pass and holds 0.
+///
+/// A caller that keeps other device state beside a run, such as cached
+/// prefix states, frees this much before it.
+///
+/// # Errors
+///
+/// Plan errors as [`DecisionPlan::validate`]. [`Error::InvalidArgument`]
+/// when `max_lanes` or `pass_tokens` is 0, or when one lane of a pass
+/// needs more than `max_lane_bytes`.
+pub fn peak_lane_bytes(
+    plan: &DecisionPlan,
+    cfg: &RunnerConfig,
+    lane_bytes: impl Fn(usize) -> usize,
+) -> Result<usize> {
+    plan.validate()?;
+    let passes = pack_passes(plan, cfg, &lane_bytes)?;
+    Ok(passes
+        .iter()
+        .map(|pass| pass.rows.len().saturating_mul(lane_bytes(pass.width)))
+        .max()
+        .unwrap_or(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::plan::{Gather, PrefixInput};
@@ -305,6 +331,36 @@ mod tests {
             e.contains("4 tokens wide needs 450 bytes, the budget is 449 bytes"),
             "{e}"
         );
+    }
+
+    /// Rows of 4, 2, 4, 2, 2 in one pass hold 5 lanes 4 wide; under a
+    /// 1000-byte budget the largest pass holds 2 lanes 4 wide.
+    #[test]
+    fn peak_is_the_largest_pass() {
+        let p = plan(
+            1,
+            &[4, 2, 4, 2, 2],
+            &[
+                (Some(0), 1),
+                (Some(1), 1),
+                (Some(2), 1),
+                (Some(3), 1),
+                (Some(4), 1),
+            ],
+        );
+        let mut c = cfg(64, 1000);
+        assert_eq!(peak_lane_bytes(&p, &c, bytes).unwrap(), 5 * 450);
+        c.max_lane_bytes = Some(1000);
+        assert_eq!(peak_lane_bytes(&p, &c, bytes).unwrap(), 2 * 450);
+        let prefix_only = plan(3, &[], &[(None, 0)]);
+        assert_eq!(peak_lane_bytes(&prefix_only, &c, bytes).unwrap(), 0);
+        let mut bad = p.clone();
+        bad.gathers.push(Gather {
+            row: Some(9),
+            pos: 1,
+        });
+        let e = peak_lane_bytes(&bad, &c, bytes).unwrap_err().to_string();
+        assert!(e.contains("names row 9"), "{e}");
     }
 
     #[test]

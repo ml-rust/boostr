@@ -27,7 +27,9 @@
 //!
 //! Each fixture becomes one `DecisionPlan`: the shared prefix, each row's
 //! tokens after it, and one gather per scoring row at its answer slot. Each
-//! scoring row becomes one `LabelTokenItem`.
+//! scoring row becomes one `LabelTokenItem`. The CPU and CUDA tests also
+//! run each fixture with a shared prefix over a `PrefixStateCache`: a miss,
+//! then a hit whose answers equal the run that prefills.
 //!
 //! # Tolerances
 //!
@@ -54,7 +56,8 @@
 mod common;
 
 use boostr::inference::decision::{
-    Answer, AnswerOptions, DecisionResult, RunnerConfig, run_decision, tempered_softmax,
+    Answer, AnswerOptions, DecisionResult, PrefixState, PrefixStateCache, RunnerConfig,
+    cached_prefix, run_decision, tempered_softmax,
 };
 use boostr::model::decision::LabelTokenHead;
 use boostr::model::{ModelClient, Qwen35Model};
@@ -326,6 +329,60 @@ where
     }
 }
 
+/// Every fixture with a shared prefix through a [`PrefixStateCache`]: the
+/// first lookup runs the prefix and keeps it, the second reads it back,
+/// and the run over the kept state equals the run that prefills it, then
+/// the reference within `tol`.
+fn check_cached<R>(client: &R::Client, model: &Qwen35Model<R>, fixtures: &[Fixture], tol: Tolerance)
+where
+    R: Runtime<DType = DType>,
+    R::Client: ModelClient<R>,
+{
+    let opts = AnswerOptions::default();
+    let cfg = RunnerConfig::default();
+    for fx in fixtures.iter().filter(|fx| fx.shared_prefix_len > 0) {
+        let what = format!("{} over a cached prefix", fx.label());
+        let (plan, items, meta, temp) = request(fx);
+        let mut cache = PrefixStateCache::<Vec<u32>, R>::new(usize::MAX);
+        let mut states = Vec::with_capacity(2);
+        for want_hit in [false, true] {
+            let key = plan.prefix.tokens().to_vec();
+            let found = cached_prefix(&mut cache, client, model, &plan, key, &cfg)
+                .unwrap_or_else(|e| panic!("{what}: cached_prefix: {e}"))
+                .unwrap_or_else(|| panic!("{what}: a prefix plan with row gathers is kept"));
+            assert_eq!(found.hit, want_hit, "{what}: hit");
+            states.push(found.state);
+        }
+        let go = |prefix: Option<&PrefixState<R>>| {
+            run_decision(
+                client,
+                model,
+                &LabelTokenHead,
+                &plan,
+                prefix,
+                &items,
+                &meta,
+                &temp,
+                &opts,
+                &cfg,
+            )
+            .unwrap_or_else(|e| panic!("{what}: run_decision: {e}"))
+        };
+        let fresh = go(None);
+        let cached = go(Some(&*states[1]));
+        for (s, (c, f)) in cached.raw_logits.iter().zip(&fresh.raw_logits).enumerate() {
+            let here = format!("{what} scoring row {s}");
+            assert_eq!(c.len(), f.len(), "{here}: logit count");
+            for (g, w) in c.iter().zip(f) {
+                assert!((g - w).abs() <= 1e-5, "{here}: {g} cached vs {w} fresh");
+            }
+        }
+        compare(fx, &cached, tol);
+        let stats = cache.stats();
+        assert_eq!((stats.hits, stats.misses), (1, 1), "{what}: {stats:?}");
+    }
+}
+
 #[test]
 fn label_token_matches_reference_cpu() {
     let Some((dir, fixtures)) = inputs() else {
@@ -336,6 +393,7 @@ fn label_token_matches_reference_cpu() {
     let config = config(&dir);
     let model = build_model::<CpuRuntime>(&dir, &config, &device, DType::F32, None);
     check_all::<CpuRuntime>(&client, &model, &fixtures, CPU_F32);
+    check_cached::<CpuRuntime>(&client, &model, &fixtures, CPU_F32);
 }
 
 /// The same fixtures on the CUDA runtime with the checkpoint in BF16.
@@ -355,6 +413,7 @@ fn label_token_matches_reference_cuda() {
     let config = config(&dir);
     let model = build_model::<CudaRuntime>(&dir, &config, &device, DType::BF16, None);
     check_all::<CudaRuntime>(&client, &model, &fixtures, CUDA_BF16);
+    check_cached::<CudaRuntime>(&client, &model, &fixtures, CUDA_BF16);
 }
 
 /// The same fixtures through the GGUF of `BOOSTR_DECISION_GGUF` on the

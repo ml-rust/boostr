@@ -5,6 +5,7 @@ use crate::error::Result;
 use crate::inference::{LayeredGdnState, LayeredKvCache};
 use crate::model::traits::ModelClient;
 use numr::dtype::DType;
+use numr::ops::IndexingOps;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -35,6 +36,28 @@ impl<R: Runtime> PrefixState<R> {
     /// The row of `hidden` that holds prefix position `pos`.
     pub fn hidden_row(&self, pos: usize) -> Option<usize> {
         self.rows.iter().position(|&r| r == pos)
+    }
+}
+
+impl<R: Runtime<DType = DType>> PrefixState<R>
+where
+    R::Client: IndexingOps<R>,
+{
+    /// The device bytes the state holds: the buffers of every attention
+    /// layer's keys and values, every GDN layer's convolution window and
+    /// recurrent state, and `hidden`, each counted at its allocated size.
+    pub fn bytes(&self) -> usize {
+        let size = |t: &Tensor<R>| t.storage().size_in_bytes();
+        let kv: usize = (0..self.kv.num_layers())
+            .filter_map(|l| self.kv.layer(l))
+            .map(|c| size(c.k_cache_raw()).saturating_add(size(c.v_cache_raw())))
+            .sum();
+        let gdn: usize = (0..self.gdn.num_layers())
+            .filter_map(|l| self.gdn.layer(l))
+            .map(|s| size(s.conv()).saturating_add(size(s.ssm())))
+            .sum();
+        kv.saturating_add(gdn)
+            .saturating_add(self.hidden.as_ref().map_or(0, size))
     }
 }
 

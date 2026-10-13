@@ -23,7 +23,7 @@ pub use request::{
 };
 pub use run::{
     CancelToken, DecisionBackbone, DecisionHead, DecisionPlan, Gather, OptionLogits, PrefixInput,
-    PrefixState, RunnerConfig, run_decision,
+    PrefixState, PrefixStateCache, RunnerConfig, StateCacheStats, cached_prefix, run_decision,
 };
 pub use temperature::{TemperaturePolicy, tempered_softmax};
 pub use types::{Answer, DecisionResult, QuestionKind, QuestionMeta};

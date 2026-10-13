@@ -51,24 +51,9 @@ fn common_prefix(rows: &[Vec<u32>]) -> usize {
     })
 }
 
-/// The plan of `rows` (full prompt token ids) read at `slots`.
-///
-/// The prefix length is the longest common prefix of the rows when there
-/// are two or more, capped at the earliest slot so every slot reads a row
-/// token, and capped so every row keeps at least one token. A capped
-/// length below `min_prefix`, or a single row, gives no prefix. Rows no
-/// slot reads stay in the plan and the runner skips them.
-///
-/// # Errors
-///
-/// [`Error::InvalidArgument`] when there are no rows or no slots, when a
-/// row is empty, or when a slot names a row past `rows` or a position past
-/// its row's last token, naming the row, slot and value.
-pub fn plan_from_rows(
-    rows: Vec<Vec<u32>>,
-    slots: &[RowSlot],
-    min_prefix: usize,
-) -> Result<RowsPlan> {
+/// `rows` and `slots` hold a plan: rows and slots exist, every row has a
+/// token, and every slot names a row and a position inside it.
+fn check_rows(rows: &[Vec<u32>], slots: &[RowSlot]) -> Result<()> {
     if rows.is_empty() {
         return Err(invalid("rows", "no rows".into()));
     }
@@ -104,16 +89,20 @@ pub fn plan_from_rows(
             ));
         }
     }
+    Ok(())
+}
 
+/// `len` cut back to end at or before the earliest slot and to leave
+/// every row at least one token.
+fn cap_prefix(rows: &[Vec<u32>], slots: &[RowSlot], len: usize) -> usize {
     let shortest = rows.iter().map(Vec::len).min().unwrap_or(1);
     let earliest = slots.iter().map(|s| s.pos).min().unwrap_or(0);
-    let shared = if rows.len() >= 2 {
-        common_prefix(&rows).min(earliest).min(shortest - 1)
-    } else {
-        0
-    };
-    let p = if shared < min_prefix { 0 } else { shared };
+    len.min(earliest).min(shortest.saturating_sub(1))
+}
 
+/// The plan of checked `rows` with a prefix of `p` tokens, every row
+/// sharing them.
+fn build(rows: Vec<Vec<u32>>, slots: &[RowSlot], p: usize) -> Result<RowsPlan> {
     let prefix = rows[0][..p].to_vec();
     let suffixes = rows.into_iter().map(|mut row| row.split_off(p)).collect();
     let mut seen: HashMap<RowSlot, usize> = HashMap::with_capacity(slots.len());
@@ -137,6 +126,56 @@ pub fn plan_from_rows(
     };
     plan.validate()?;
     Ok(RowsPlan { plan, slot_gathers })
+}
+
+/// The plan of `rows` (full prompt token ids) read at `slots`.
+///
+/// The prefix length is the longest common prefix of the rows when there
+/// are two or more, capped at the earliest slot so every slot reads a row
+/// token, and capped so every row keeps at least one token. A capped
+/// length below `min_prefix`, or a single row, gives no prefix. Rows no
+/// slot reads stay in the plan and the runner skips them.
+///
+/// # Errors
+///
+/// [`Error::InvalidArgument`] when there are no rows or no slots, when a
+/// row is empty, or when a slot names a row past `rows` or a position past
+/// its row's last token, naming the row, slot and value.
+pub fn plan_from_rows(
+    rows: Vec<Vec<u32>>,
+    slots: &[RowSlot],
+    min_prefix: usize,
+) -> Result<RowsPlan> {
+    check_rows(&rows, slots)?;
+    let shared = if rows.len() >= 2 {
+        cap_prefix(&rows, slots, common_prefix(&rows))
+    } else {
+        0
+    };
+    let p = if shared < min_prefix { 0 } else { shared };
+    build(rows, slots, p)
+}
+
+/// The plan of `rows` read at `slots` with the prefix cut at `prefix_len`
+/// tokens: a caller that keeps prefix states across requests cuts every
+/// request about one state at that state's end, whatever its rows share
+/// past it.
+///
+/// The prefix is the first `prefix_len` tokens, capped at the rows' common
+/// prefix, at the earliest slot, and so every row keeps at least one
+/// token. A single row takes a prefix too. `prefix_len` 0 gives none.
+///
+/// # Errors
+///
+/// As [`plan_from_rows`].
+pub fn plan_from_rows_at(
+    rows: Vec<Vec<u32>>,
+    slots: &[RowSlot],
+    prefix_len: usize,
+) -> Result<RowsPlan> {
+    check_rows(&rows, slots)?;
+    let p = cap_prefix(&rows, slots, prefix_len.min(common_prefix(&rows)));
+    build(rows, slots, p)
 }
 
 #[cfg(test)]
@@ -240,6 +279,34 @@ mod tests {
         let out = build(&rows, &[slot(1, 5), slot(0, 2)], 0).unwrap();
         assert_eq!(out.plan.prefix.tokens(), &[8, 9]);
         assert_eq!(out.plan.rows, vec![vec![7], vec![1, 2, 3, 4]]);
+    }
+
+    /// The cut lands where asked, inside the rows' longer common prefix,
+    /// for one row too; the earliest slot and the shortest row still cap
+    /// it.
+    #[test]
+    fn prefix_cut_at_a_given_length() {
+        let rows = vec![vec![1, 2, 3, 4, 5, 6], vec![1, 2, 3, 4, 7]];
+        let slots = [slot(0, 5), slot(1, 4)];
+        let out = plan_from_rows_at(rows.clone(), &slots, 2).unwrap();
+        assert_eq!(out.plan.prefix.tokens(), &[1, 2]);
+        assert_eq!(out.plan.rows, vec![vec![3, 4, 5, 6], vec![3, 4, 7]]);
+        assert_eq!(out.plan.gathers, vec![at(0, 5), at(1, 4)]);
+        let one = plan_from_rows_at(vec![rows[0].clone()], &[slot(0, 5)], 3).unwrap();
+        assert_eq!(one.plan.prefix.tokens(), &[1, 2, 3]);
+        assert_eq!(one.plan.rows, vec![vec![4, 5, 6]]);
+        let common = plan_from_rows_at(rows.clone(), &slots, 9).unwrap();
+        assert_eq!(common.plan.prefix_len(), 4);
+        let early = plan_from_rows_at(rows.clone(), &[slot(0, 5), slot(1, 1)], 3).unwrap();
+        assert_eq!(early.plan.prefix_len(), 1);
+        let whole = plan_from_rows_at(vec![vec![8, 9]], &[slot(0, 1)], 5).unwrap();
+        assert_eq!(whole.plan.prefix.tokens(), &[8]);
+        let none = plan_from_rows_at(rows, &slots, 0).unwrap();
+        assert!(none.plan.prefix.is_empty());
+        let e = plan_from_rows_at(vec![vec![1]], &[slot(0, 1)], 1)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("slot 0 reads position 1 of row 0"), "{e}");
     }
 
     #[test]

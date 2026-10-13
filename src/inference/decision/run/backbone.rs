@@ -108,4 +108,10 @@ pub trait DecisionBackbone<R: Runtime<DType = DType>> {
         hidden: &Tensor<R>,
         ids: &Tensor<R>,
     ) -> Result<Tensor<R>>;
+
+    /// F32 rows `[ids.len(), hidden_size]` of the output projection at the
+    /// token ids `ids` (at least one, each `< vocab_size`, repeats
+    /// allowed): row `n` dotted with a normed hidden row gives token
+    /// `ids[n]`'s logit, before any bias.
+    fn output_rows<C: ModelClient<R>>(&self, client: &C, ids: &[u32]) -> Result<Tensor<R>>;
 }

@@ -134,6 +134,14 @@ mod tests {
         ) -> Result<Tensor<CpuRuntime>> {
             DecisionBackbone::candidate_logits(self.inner, client, hidden, ids)
         }
+
+        fn output_rows<C: ModelClient<CpuRuntime>>(
+            &self,
+            client: &C,
+            ids: &[u32],
+        ) -> Result<Tensor<CpuRuntime>> {
+            DecisionBackbone::output_rows(self.inner, client, ids)
+        }
     }
 
     fn one_lane(token: &CancelToken) -> RunnerConfig {

@@ -219,6 +219,10 @@ where
     ) -> Result<Tensor<R>> {
         Qwen35Model::candidate_logits(self, client, hidden, ids)
     }
+
+    fn output_rows<C: ModelClient<R>>(&self, client: &C, ids: &[u32]) -> Result<Tensor<R>> {
+        Qwen35Model::output_rows(self, client, ids)
+    }
 }
 
 #[cfg(test)]

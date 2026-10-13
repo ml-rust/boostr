@@ -1,5 +1,6 @@
 //! [`Qwen35Model::candidate_logits`]: F32 logits of a few candidate tokens
-//! per hidden row, read from the matching `lm_head` rows only.
+//! per hidden row, read from the matching `lm_head` rows only, and
+//! [`Qwen35Model::output_rows`]: those `lm_head` rows themselves in F32.
 
 use super::build::Qwen35Model;
 use crate::error::{Error, Result};
@@ -53,6 +54,36 @@ where
             });
         }
         self.lm_head.row_logits_f32(client, hidden, candidates)
+    }
+
+    /// The `lm_head` rows of the token ids `ids`, F32 `[ids.len(),
+    /// hidden_size]`: row `n` dotted with a hidden row after `output_norm`
+    /// gives token `ids[n]`'s logit. An id may repeat.
+    ///
+    /// A tied head reads the embedding storage it shares. A
+    /// Hadamard-rotated head gives the inverse rotation of its stored rows,
+    /// the rows of the unrotated head. A quantized head dequantizes only
+    /// the chosen rows. See
+    /// [`MaybeRotatedLinear::weight_rows_f32`](crate::nn::MaybeRotatedLinear::weight_rows_f32).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ModelError`] when `lm_head` carries a LoRA adapter.
+    /// [`Error::InvalidArgument`] when `ids` is empty or an id lies outside
+    /// `[0, vocab_size)`, naming the first such id.
+    pub fn output_rows<C>(&self, client: &C, ids: &[u32]) -> Result<Tensor<R>>
+    where
+        C: ModelClient<R>,
+    {
+        if self.lm_head.is_adapted() {
+            return Err(Error::ModelError {
+                reason: "qwen35: lm_head carries a LoRA adapter; adapters never target \
+                         lm_head, so output_rows has no adapted-head path"
+                    .into(),
+            });
+        }
+        let ids: Vec<usize> = ids.iter().map(|&id| id as usize).collect();
+        self.lm_head.weight_rows_f32(client, &ids)
     }
 }
 
@@ -122,6 +153,56 @@ mod tests {
         let model = chunked_model(&device, 0x3535_0052, CHUNK, true, Head::Own);
         assert!(model.lm_head.is_rotated());
         check(&client, &device, &model);
+    }
+
+    /// `output_rows` dotted with gathered hidden rows equals
+    /// `candidate_logits` at the same ids, for an own, a tied and a rotated
+    /// head.
+    #[test]
+    fn output_rows_give_candidate_logits() {
+        let (client, device) = cpu_setup();
+        for (seed, rotated, head) in [
+            (0x3535_0054, false, Head::Own),
+            (0x3535_0055, false, Head::Tied),
+            (0x3535_0056, true, Head::Own),
+        ] {
+            let model = chunked_model(&device, seed, CHUNK, rotated, head);
+            let input_ids = ids(&device, &TOKENS, 2);
+            let (mut kv, mut gdn) = caches(&device, &model, 2);
+            let gather = index(&device, &GATHER);
+            let hidden = model
+                .forward_qwen35_gather(&client, &input_ids, &mut kv, &mut gdn, 0, &gather)
+                .unwrap();
+            let candidates =
+                Tensor::<CpuRuntime>::from_slice(&CANDIDATES, &[GATHER.len(), K], &device).unwrap();
+            let want = model
+                .candidate_logits(&client, &hidden, &candidates)
+                .unwrap()
+                .to_vec::<f32>();
+            let token_ids: Vec<u32> = CANDIDATES.iter().map(|&c| c as u32).collect();
+            let rows = model.output_rows(&client, &token_ids).unwrap();
+            assert_eq!(rows.shape(), &[CANDIDATES.len(), HIDDEN]);
+            assert_eq!(rows.dtype(), DType::F32);
+            let rows = rows.to_vec::<f32>();
+            let hidden = hidden.to_vec::<f32>();
+            let got: Vec<f32> = (0..CANDIDATES.len())
+                .map(|i| {
+                    let h = &hidden[(i / K) * HIDDEN..(i / K + 1) * HIDDEN];
+                    let r = &rows[i * HIDDEN..(i + 1) * HIDDEN];
+                    h.iter().zip(r).map(|(a, b)| a * b).sum()
+                })
+                .collect();
+            assert_close(&got, &want, 1e-4);
+        }
+        let model = chunked_model(&device, 0x3535_0057, CHUNK, false, Head::Own);
+        let err = model
+            .output_rows(&client, &[1, VOCAB as u32])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("id 16 at position 1 is outside [0, 16)"),
+            "{err}"
+        );
     }
 
     #[test]

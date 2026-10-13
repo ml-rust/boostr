@@ -8,7 +8,7 @@
 use crate::error::{Error, Result};
 use crate::quant::traits::Rotation;
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, FwhtOps};
+use numr::ops::{BinaryOps, FwhtOps, TypeConversionOps};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -123,6 +123,26 @@ impl<R: Runtime<DType = DType>> HadamardRotation<R> {
             Some(signs) => {
                 check_dtype_match(&transformed, signs)?;
                 client.mul(&transformed, signs).map_err(Error::Numr)
+            }
+        }
+    }
+
+    /// [`Self::inverse`] for an `x` of any float dtype: the signs are cast
+    /// to `x`'s dtype first when they are held in another. The signs are
+    /// `+1`/`-1`, so the cast is exact.
+    pub fn inverse_cast<C>(&self, client: &C, x: &Tensor<R>) -> Result<Tensor<R>>
+    where
+        C: FwhtOps<R> + BinaryOps<R> + TypeConversionOps<R>,
+    {
+        let transformed = client.fwht(x, self.block_size, None).map_err(Error::Numr)?;
+        match &self.signs {
+            None => Ok(transformed),
+            Some(signs) if signs.dtype() == x.dtype() => {
+                client.mul(&transformed, signs).map_err(Error::Numr)
+            }
+            Some(signs) => {
+                let signs = client.cast(signs, x.dtype()).map_err(Error::Numr)?;
+                client.mul(&transformed, &signs).map_err(Error::Numr)
             }
         }
     }
@@ -328,5 +348,25 @@ mod tests {
 
         assert!(rotation.forward(&client, &x).is_err());
         assert!(rotation.inverse(&client, &x).is_err());
+    }
+
+    /// F32 signs over an F64 `x`: `inverse_cast` equals `inverse` over the
+    /// same values in F32.
+    #[test]
+    fn inverse_cast_takes_x_dtype() {
+        let (client, device) = cpu_setup();
+        let signs_i8: Vec<i8> = vec![1, -1, -1, 1, 1, 1, -1, 1];
+        let rotation =
+            HadamardRotation::<CpuRuntime>::new(8, Some(&signs_i8), DType::F32, &device).unwrap();
+        let data: Vec<f64> = (0..16).map(|i| f64::from(i) * 0.13 - 0.9).collect();
+        let x = Tensor::<CpuRuntime>::from_slice(&data, &[2, 8], &device).unwrap();
+        let got = rotation.inverse_cast(&client, &x).unwrap();
+        assert_eq!(got.dtype(), DType::F64);
+        let narrow: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+        let x32 = Tensor::<CpuRuntime>::from_slice(&narrow, &[2, 8], &device).unwrap();
+        let want = rotation.inverse(&client, &x32).unwrap().to_vec::<f32>();
+        for (g, w) in got.to_vec::<f64>().iter().zip(&want) {
+            assert!((*g as f32 - w).abs() < 1e-5, "got {g}, expected {w}");
+        }
     }
 }

@@ -3,7 +3,7 @@
 //! the other outputs.
 
 use super::layer::MaybeRotatedLinear;
-use super::row_checks::{check_row_inputs, name_out_of_range};
+use super::row_checks::{check_row_inputs, name_out_of_range, to_f32};
 use crate::error::{Error, Result};
 use crate::nn::linear::maybe_quant_linear::MaybeQuantLinear;
 use crate::quant::traits::{DequantOps, QuantMatmulOps};
@@ -105,18 +105,6 @@ impl<R: Runtime<DType = DType>> MaybeRotatedLinear<R> {
             }
         }
     }
-}
-
-/// `t` in F32; a clone when it already is.
-fn to_f32<R, C>(client: &C, t: &Tensor<R>) -> Result<Tensor<R>>
-where
-    R: Runtime<DType = DType>,
-    C: TypeConversionOps<R>,
-{
-    if t.dtype() == DType::F32 {
-        return Ok(t.clone());
-    }
-    Ok(client.cast(t, DType::F32)?)
 }
 
 /// `[Q, K]`: input row `q` `[H]` dotted with weight rows `q * K .. q * K + K`

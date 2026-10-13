@@ -1,13 +1,26 @@
-//! Input checks of [`MaybeRotatedLinear::row_logits_f32`], and
+//! Input checks of [`MaybeRotatedLinear::row_logits_f32`],
 //! [`name_out_of_range`], which names the id behind a failed device-side
-//! bounds check.
+//! bounds check, and [`to_f32`], the F32 cast the row readers share.
 //!
 //! [`MaybeRotatedLinear::row_logits_f32`]: super::layer::MaybeRotatedLinear::row_logits_f32
 
 use crate::error::{Error, Result};
 use numr::dtype::DType;
+use numr::ops::TypeConversionOps;
 use numr::runtime::{Device, Runtime};
 use numr::tensor::Tensor;
+
+/// `t` in F32; a clone when it already is.
+pub(super) fn to_f32<R, C>(client: &C, t: &Tensor<R>) -> Result<Tensor<R>>
+where
+    R: Runtime<DType = DType>,
+    C: TypeConversionOps<R>,
+{
+    if t.dtype() == DType::F32 {
+        return Ok(t.clone());
+    }
+    Ok(client.cast(t, DType::F32)?)
+}
 
 /// `(Q, K)` once `input` is `[Q, in_features]` float and `rows` is
 /// `[Q, K]` i64 on the same device with `Q, K >= 1`.

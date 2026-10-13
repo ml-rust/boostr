@@ -1,4 +1,4 @@
-//! [`Weights`]: the named tensors a joint-schema head is built from, taken
+//! `Weights`: the named tensors a joint-schema head is built from, taken
 //! one by one with their shapes checked and cast to the compute dtype, and
 //! assembled into the head's building blocks.
 

@@ -4,7 +4,7 @@
 //! - `reorder`: [`reorder_v_heads`], grouped to tiled value-head order, and
 //!   [`reorder_qkv_v_rows`], the same on the V rows of `in_proj_qkv`
 //! - `edits`: the per-tensor edits of one layer
-//! - `restructure`: [`restructure`], every name and layout edit on a `VarMap`
+//! - `restructure`: [`mod@restructure`], every name and layout edit on a `VarMap`
 
 mod edits;
 pub mod rename;

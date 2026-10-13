@@ -1,7 +1,7 @@
-//! The host-built index layout of one record's fields ([`Layout`]) and the
+//! The host-built index layout of one record's fields (`Layout`) and the
 //! row reductions the head composes from numr ops: span means
-//! ([`span_means`]), row dot products ([`row_dots`]) and L2 normalisation
-//! ([`l2_normalize`]). Reductions accumulate in F32, as torch reduces a
+//! (`span_means`), row dot products (`row_dots`) and L2 normalisation
+//! (`l2_normalize`). Reductions accumulate in F32, as torch reduces a
 //! half-width tensor, and return the compute dtype.
 
 use super::item::JointSchemaItem;

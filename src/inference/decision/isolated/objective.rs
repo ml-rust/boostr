@@ -45,7 +45,7 @@ fn gap(level: &[f64; 2]) -> f64 {
 ///
 /// # Errors
 ///
-/// [`Error::InvalidArgument`] naming the first sample and value that fail.
+/// [`crate::error::Error::InvalidArgument`] naming the first sample and value that fail.
 pub fn validate_isolated(samples: &[IsolatedSample]) -> Result<()> {
     if samples.is_empty() {
         return Err(invalid("no calibration samples".into()));

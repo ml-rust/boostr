@@ -25,7 +25,7 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
     /// # Errors
     ///
     /// [`Error::ModelError`] when a shape or dtype check of
-    /// [`check_factors`] fails, or when `scaling` is not finite.
+    /// `check_factors` fails, or when `scaling` is not finite.
     pub fn from_scaled_weights(
         base: impl Into<MaybeQuantLinear<R>>,
         lora_a: Tensor<R>,

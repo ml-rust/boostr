@@ -42,14 +42,14 @@ where
 
 /// Answers every question of `plan`.
 ///
-/// Runs [`gather_plan_hidden`], hands the rows to `head` with `items`, and
+/// Runs `gather_plan_hidden`, hands the rows to `head` with `items`, and
 /// answers `meta` from the head's option logits: per-question temperature
 /// from `temp`, one device softmax, one read-back. See the `head` module
 /// for the scoring-row layout an isolated Score question takes.
 ///
 /// # Errors
 ///
-/// As [`gather_plan_hidden`]; `Error::Cancelled` when `cfg.cancel` is set
+/// As `gather_plan_hidden`; `Error::Cancelled` when `cfg.cancel` is set
 /// before scoring; head errors propagate; `Error::InvalidArgument` when
 /// the head's rows disagree with `meta`; temperature and answer errors
 /// propagate.

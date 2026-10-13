@@ -14,6 +14,8 @@ pub enum ScoreConfidence {
     Distance,
     /// The Choice rule `(p_max - 1/L) / (1 - 1/L)` applied to the levels.
     ChanceCorrected,
+    /// The largest level probability `p_max`, uncorrected for chance.
+    MaxProbability,
 }
 
 /// The index of the first largest entry. `probs` must not be empty.
@@ -57,6 +59,7 @@ pub fn score_confidence(probs: &[f64], rule: ScoreConfidence) -> f64 {
             (1.0 - spread / d).clamp(0.0, 1.0)
         }
         ScoreConfidence::ChanceCorrected => choice_confidence(probs),
+        ScoreConfidence::MaxProbability => probs[first_argmax(probs)],
     }
 }
 
@@ -129,6 +132,14 @@ mod tests {
         // K = 2, p = [0.9, 0.1]: 1 - (-(0.9 ln 0.9 + 0.1 ln 0.1)) / ln 2.
         let h = -(0.9f64 * 0.9f64.ln() + 0.1f64 * 0.1f64.ln());
         assert!((certainty(&[0.9, 0.1]) - (1.0 - h / 2f64.ln())).abs() < 1e-12);
+    }
+
+    #[test]
+    fn max_probability_score() {
+        let m = ScoreConfidence::MaxProbability;
+        assert_eq!(score_confidence(&[0.1, 0.8, 0.1], m), 0.8);
+        assert_eq!(score_confidence(&[0.25; 4], m), 0.25);
+        assert_eq!(score_confidence(&[1.0], m), 1.0);
     }
 
     #[test]

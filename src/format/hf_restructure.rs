@@ -30,7 +30,7 @@ use crate::format::safetensors_name_map::normalize_hf_name;
 use crate::model::config::{BlockConfig, UniversalConfig};
 use crate::nn::{VarMap, Weight};
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, IndexingOps, ShapeOps, UnaryOps};
+use numr::ops::{BinaryOps, IndexingOps, ShapeOps, TypeConversionOps, UnaryOps};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 use std::collections::BTreeMap;
@@ -440,7 +440,7 @@ pub fn restructure_hf_checkpoint<R: Runtime<DType = DType>>(
     _device: &R::Device,
 ) -> Result<()>
 where
-    R::Client: ShapeOps<R> + BinaryOps<R> + IndexingOps<R> + UnaryOps<R>,
+    R::Client: ShapeOps<R> + BinaryOps<R> + IndexingOps<R> + UnaryOps<R> + TypeConversionOps<R>,
 {
     if map.is_hf_restructured() {
         return Err(Error::ModelError {

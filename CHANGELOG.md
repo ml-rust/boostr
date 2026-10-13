@@ -30,6 +30,7 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`restructure_hf_checkpoint`** — the client must implement `TypeConversionOps`. Generic callers add the bound.
 - **`RunnerConfig`** — gains `max_lane_bytes` and `cancel`, and is no longer `Copy`. A struct literal must name the new fields or use `..RunnerConfig::default()`.
 - **`DecisionBackbone`** — every implementation must provide `lane_bytes`.
 - **`run_decision`** — checks the pass layout before it runs the prefix, so a bad config fails before any device work.
@@ -38,6 +39,7 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **Chunked GDN prefill precision** — chunked prefill of Qwen3.5-style gated delta net layers lost precision on prompts longer than a few dozen tokens. The error grew through the layers, so the logits drifted from the reference model. The UT transform of each chunk now runs as forward substitution through numr's batched triangular solve, in one call for all chunks and heads. F16 and BF16 inputs solve in F32.
+- **Qwen3.5 checkpoint edits in half precision** — `restructure_hf_checkpoint` computes the norm offset `1 + w` and `a_neg_exp = -exp(A_log)` of a Qwen3.5 checkpoint in F32, as the llama.cpp converter does. An F16 or BF16 tensor is cast to F32 on its device, edited, and cast back to its own dtype, so it rounds once. An F32 checkpoint takes the edits in F32 with no cast.
 
 ---
 

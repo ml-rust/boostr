@@ -16,8 +16,16 @@
 //!    `model.norm`. `linear_attn.norm` keeps its weight.
 //!
 //! `conv1d` keeps its `[channels, 1, kernel]` shape. `q_proj` keeps its
-//! per-head `[query | gate]` rows. Every edit stays in the tensor's dtype
-//! and on its device.
+//! per-head `[query | gate]` rows.
+//!
+//! Every tensor leaves in the dtype it arrived in and stays on its device.
+//! The reorder is a permutation in that dtype. Steps 3 and 4 compute in
+//! F32, as the llama.cpp converter does: an F16 or BF16 tensor is cast to
+//! F32 on its device, edited, and cast back, so it rounds once. An F32
+//! tensor takes the edit in F32 with no cast. The result keeps the input
+//! dtype because the model computes in one dtype: `Qwen35Model::dtype` is
+//! the `model.norm` dtype, and the Gated DeltaNet block multiplies
+//! `a_neg_exp` into its activations as stored.
 
 use super::edits::{edit, edit_gdn_layer, model_error, plus_one};
 use super::rename::qwen35_name;
@@ -25,7 +33,7 @@ use crate::error::Result;
 use crate::model::config::UniversalConfig;
 use crate::nn::VarMap;
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, ShapeOps, UnaryOps};
+use numr::ops::{BinaryOps, ShapeOps, TypeConversionOps, UnaryOps};
 use numr::runtime::Runtime;
 
 /// Rename a Hugging Face Qwen3.5 checkpoint's tensors and make the layout
@@ -45,7 +53,7 @@ pub fn restructure<R: Runtime<DType = DType>>(
     config: &UniversalConfig,
 ) -> Result<()>
 where
-    R::Client: ShapeOps<R> + BinaryOps<R> + UnaryOps<R>,
+    R::Client: ShapeOps<R> + BinaryOps<R> + UnaryOps<R> + TypeConversionOps<R>,
 {
     if map.is_hf_restructured() {
         return Err(model_error(
@@ -416,6 +424,40 @@ pub(crate) mod tests {
         assert!(from_hf.iter().all(|v| v.is_finite()));
         let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         assert_eq!(bits(&from_hf), bits(&direct));
+    }
+
+    /// A BF16 checkpoint leaves in BF16, each tensor the F32 result
+    /// rounded once.
+    #[cfg(feature = "f16")]
+    #[test]
+    fn bf16_checkpoint_rounds_the_f32_layout_once() {
+        let (client, device) = cpu_setup();
+        let config = tiny_config();
+        let (mut hf32, ours) = maps(&client, &device, &config);
+        let wide = |t: &Tensor<CpuRuntime>| client.cast(t, DType::F32).unwrap();
+        let mut hf = VarMap::new();
+        let names: Vec<String> = hf32.names().map(str::to_string).collect();
+        for name in names {
+            let half = client
+                .cast(hf32.get_tensor(&name).unwrap(), DType::BF16)
+                .unwrap();
+            hf32.insert(name.clone(), wide(&half));
+            hf.insert(name, half);
+        }
+        restructure(&mut hf, &config).unwrap();
+        restructure(&mut hf32, &config).unwrap();
+        for name in ours.names() {
+            let got = hf.get_tensor(name).unwrap();
+            assert_eq!(got.dtype(), DType::BF16, "{name}");
+            let once = client
+                .cast(hf32.get_tensor(name).unwrap(), DType::BF16)
+                .unwrap();
+            assert_eq!(
+                wide(got).to_vec::<f32>(),
+                wide(&once).to_vec::<f32>(),
+                "{name}"
+            );
+        }
     }
 
     #[test]

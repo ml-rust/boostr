@@ -1,4 +1,5 @@
-//! Continuous batching sequence scheduler
+//! Continuous batching sequence scheduler: the scheduler state, request
+//! admission, and read accessors.
 
 use crate::error::{Error, Result};
 use crate::inference::memory::{BlockAllocator, BlockId, BlockTable};
@@ -6,21 +7,20 @@ use crate::inference::prefix_cache::PrefixCache;
 use std::collections::{HashMap, VecDeque};
 
 use super::types::{
-    ScheduledBatch, SchedulerConfig, SchedulerStats, SequenceData, SequenceId, SequenceRequest,
-    SequenceState,
+    SchedulerConfig, SchedulerStats, SequenceData, SequenceId, SequenceRequest, SequenceState,
 };
 
 /// Continuous batching sequence scheduler
 pub struct SequenceScheduler<A: BlockAllocator> {
-    allocator: A,
-    config: SchedulerConfig,
-    sequences: HashMap<SequenceId, SequenceData>,
-    waiting_queue: VecDeque<SequenceId>,
-    running_set: Vec<SequenceId>,
-    preempted_set: Vec<SequenceId>,
-    stats: SchedulerStats,
+    pub(super) allocator: A,
+    pub(super) config: SchedulerConfig,
+    pub(super) sequences: HashMap<SequenceId, SequenceData>,
+    pub(super) waiting_queue: VecDeque<SequenceId>,
+    pub(super) running_set: Vec<SequenceId>,
+    pub(super) preempted_set: Vec<SequenceId>,
+    pub(super) stats: SchedulerStats,
     /// Optional prefix cache for KV block reuse across sequences
-    prefix_cache: Option<PrefixCache<A>>,
+    pub(super) prefix_cache: Option<PrefixCache<A>>,
 }
 
 impl<A: BlockAllocator> SequenceScheduler<A> {
@@ -70,347 +70,6 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
         self.stats.waiting_count += 1;
 
         Ok(())
-    }
-
-    pub fn schedule(&mut self) -> Result<Option<ScheduledBatch>> {
-        self.schedule_with_limit(usize::MAX)
-    }
-
-    /// [`schedule`](Self::schedule) with a cap on batch growth.
-    ///
-    /// Waiting and preempted sequences join the running set only while it
-    /// holds fewer than `running_limit` sequences. Sequences already running
-    /// keep decoding above the cap. `config.max_batch_size` still applies.
-    pub fn schedule_with_limit(&mut self, running_limit: usize) -> Result<Option<ScheduledBatch>> {
-        let mut batch = ScheduledBatch {
-            prefill_sequences: Vec::new(),
-            decode_sequences: Vec::new(),
-            block_tables: HashMap::new(),
-            preempted_sequences: Vec::new(),
-            cached_token_counts: HashMap::new(),
-        };
-
-        let mut batch_tokens = 0;
-
-        // Step 1: Add running sequences to decode batch
-        let mut sequences_to_keep = Vec::new();
-        for &seq_id in &self.running_set {
-            if let Some(seq) = self.sequences.get(&seq_id) {
-                let blocks_needed = seq.blocks_needed_for_next_token();
-                if blocks_needed > 0
-                    && !self.allocator.can_allocate(blocks_needed)
-                    && self.config.enable_preemption
-                    && batch.preempted_sequences.len() < self.config.max_preempt_per_step
-                {
-                    batch.preempted_sequences.push(seq_id);
-                    continue;
-                }
-
-                if batch.len() < self.config.max_batch_size
-                    && batch_tokens < self.config.max_batch_tokens
-                {
-                    batch.decode_sequences.push(seq_id);
-                    batch
-                        .block_tables
-                        .insert(seq_id, seq.block_table.blocks.clone());
-                    batch_tokens += 1;
-                    sequences_to_keep.push(seq_id);
-                }
-            }
-        }
-
-        for seq_id in &batch.preempted_sequences {
-            self.preempt_sequence(*seq_id)?;
-        }
-
-        self.running_set = sequences_to_keep;
-
-        // Step 2: Schedule waiting sequences for prefill
-        let mut scheduled_waiting = Vec::new();
-        for &seq_id in self.waiting_queue.iter() {
-            if batch.len() >= self.config.max_batch_size
-                || self.running_set.len() + scheduled_waiting.len() >= running_limit
-            {
-                break;
-            }
-
-            if let Some(seq) = self.sequences.get(&seq_id) {
-                let prompt_tokens = seq.prompt_len;
-
-                if batch_tokens + prompt_tokens > self.config.max_batch_tokens {
-                    continue;
-                }
-
-                // Try prefix cache first for block reuse
-                let (blocks, cached_count) = if let Some(ref mut cache) = self.prefix_cache {
-                    let tokens = &seq.request.prompt_tokens;
-                    match cache.get_or_allocate_blocks(seq_id, tokens) {
-                        Ok(result) => {
-                            let cached = result.cached_count();
-                            let cached_tokens = cached * self.config.block_size;
-                            (result.into_blocks(), cached_tokens.min(prompt_tokens))
-                        }
-                        Err(_) => {
-                            // Fallback to direct allocation
-                            let blocks_needed =
-                                BlockTable::blocks_needed(prompt_tokens, self.config.block_size);
-                            if !self.allocator.can_allocate(blocks_needed) {
-                                continue;
-                            }
-                            (self.allocator.allocate(blocks_needed)?, 0)
-                        }
-                    }
-                } else {
-                    let blocks_needed =
-                        BlockTable::blocks_needed(prompt_tokens, self.config.block_size);
-                    if !self.allocator.can_allocate(blocks_needed) {
-                        continue;
-                    }
-                    (self.allocator.allocate(blocks_needed)?, 0)
-                };
-
-                if let Some(seq_mut) = self.sequences.get_mut(&seq_id) {
-                    seq_mut.block_table.blocks = blocks.clone();
-                    seq_mut.block_table.num_tokens = prompt_tokens;
-                    seq_mut.cached_token_count = cached_count;
-                    seq_mut.state = SequenceState::Running;
-                }
-
-                batch.prefill_sequences.push(seq_id);
-                batch.block_tables.insert(seq_id, blocks);
-                if cached_count > 0 {
-                    batch.cached_token_counts.insert(seq_id, cached_count);
-                }
-                batch_tokens += prompt_tokens;
-                scheduled_waiting.push(seq_id);
-            }
-        }
-
-        self.waiting_queue
-            .retain(|id| !scheduled_waiting.contains(id));
-
-        for seq_id in &scheduled_waiting {
-            self.running_set.push(*seq_id);
-            self.stats.waiting_count -= 1;
-            self.stats.running_count += 1;
-        }
-
-        // Step 3: Resume preempted sequences
-        let mut resumed = Vec::new();
-        for &seq_id in &self.preempted_set {
-            if batch.len() >= self.config.max_batch_size
-                || self.running_set.len() + resumed.len() >= running_limit
-            {
-                break;
-            }
-
-            if let Some(seq) = self.sequences.get(&seq_id) {
-                if batch_tokens + seq.total_tokens > self.config.max_batch_tokens {
-                    continue;
-                }
-
-                let blocks_needed =
-                    BlockTable::blocks_needed(seq.total_tokens, self.config.block_size);
-                if !self.allocator.can_allocate(blocks_needed) {
-                    continue;
-                }
-
-                let seq_tokens = seq.total_tokens;
-                let blocks = self.allocator.allocate(blocks_needed)?;
-
-                if let Some(seq_mut) = self.sequences.get_mut(&seq_id) {
-                    seq_mut.block_table.blocks = blocks.clone();
-                    seq_mut.block_table.num_tokens = seq_mut.total_tokens;
-                    seq_mut.state = SequenceState::Running;
-                }
-
-                batch.decode_sequences.push(seq_id);
-                batch.block_tables.insert(seq_id, blocks);
-                batch_tokens += seq_tokens;
-                resumed.push(seq_id);
-            }
-        }
-
-        self.preempted_set.retain(|id| !resumed.contains(id));
-        for seq_id in resumed {
-            self.running_set.push(seq_id);
-            self.stats.preempted_count -= 1;
-            self.stats.running_count += 1;
-        }
-
-        if batch.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(batch))
-        }
-    }
-
-    pub fn prefill_complete(&mut self, seq_id: SequenceId) -> Result<()> {
-        if let Some(seq) = self.sequences.get_mut(&seq_id) {
-            if seq.state != SequenceState::Running {
-                return Err(Error::SchedulerError {
-                    reason: format!("Sequence {} is not running", seq_id),
-                });
-            }
-            Ok(())
-        } else {
-            Err(Error::SchedulerError {
-                reason: format!("Sequence {} not found", seq_id),
-            })
-        }
-    }
-
-    pub fn append_token(&mut self, seq_id: SequenceId, token: u32) -> Result<bool> {
-        if let Some(seq) = self.sequences.get_mut(&seq_id) {
-            if seq.state != SequenceState::Running {
-                return Err(Error::SchedulerError {
-                    reason: format!("Sequence {} is not running", seq_id),
-                });
-            }
-
-            // Ensure a physical block exists for the slot where the new token lands
-            // before committing any state change.  The new token occupies position
-            // `total_tokens` (0-indexed), which belongs to block
-            // `total_tokens / block_size`.
-            let new_token_block_idx = seq.total_tokens / seq.block_table.block_size;
-            if new_token_block_idx >= seq.block_table.blocks.len() {
-                if !self.allocator.can_allocate(1) {
-                    return Err(Error::SchedulerError {
-                        reason: format!(
-                            "Cannot append token to sequence {}: no free blocks available",
-                            seq_id
-                        ),
-                    });
-                }
-                let blk = self.allocator.allocate(1)?;
-                seq.block_table.append_blocks(blk);
-            }
-
-            seq.generated_tokens.push(token);
-            seq.total_tokens += 1;
-            seq.block_table.num_tokens = seq.total_tokens;
-            self.stats.total_tokens_generated += 1;
-
-            // Best-effort preallocation for the token after next (non-fatal if it fails).
-            let blocks_needed = seq.blocks_needed_for_next_token();
-            if blocks_needed > 0
-                && self.allocator.can_allocate(blocks_needed)
-                && let Ok(new_blocks) = self.allocator.allocate(blocks_needed)
-            {
-                seq.block_table.append_blocks(new_blocks);
-            }
-
-            if seq.is_finished() || seq.total_tokens >= self.config.max_seq_len {
-                self.finish_sequence(seq_id)?;
-                return Ok(true);
-            }
-
-            Ok(false)
-        } else {
-            Err(Error::SchedulerError {
-                reason: format!("Sequence {} not found", seq_id),
-            })
-        }
-    }
-
-    pub fn finish_sequence(&mut self, seq_id: SequenceId) -> Result<()> {
-        if let Some(seq) = self.sequences.get_mut(&seq_id) {
-            if !seq.block_table.blocks.is_empty() {
-                Self::release_blocks(
-                    &mut self.prefix_cache,
-                    &self.allocator,
-                    seq_id,
-                    &seq.block_table.blocks,
-                )?;
-            }
-
-            seq.state = SequenceState::Finished;
-            seq.block_table.blocks.clear();
-
-            self.running_set.retain(|&id| id != seq_id);
-            self.stats.running_count -= 1;
-            self.stats.finished_count += 1;
-
-            Ok(())
-        } else {
-            Err(Error::SchedulerError {
-                reason: format!("Sequence {} not found", seq_id),
-            })
-        }
-    }
-
-    pub fn abort_sequence(&mut self, seq_id: SequenceId) -> Result<()> {
-        if let Some(seq) = self.sequences.get_mut(&seq_id) {
-            // Idempotent: already terminal, nothing to do.
-            if seq.state == SequenceState::Finished {
-                return Ok(());
-            }
-
-            // Free physical blocks first, then clear to prevent double-free on
-            // a second call before cleanup_finished() runs.
-            if !seq.block_table.blocks.is_empty() {
-                Self::release_blocks(
-                    &mut self.prefix_cache,
-                    &self.allocator,
-                    seq_id,
-                    &seq.block_table.blocks,
-                )?;
-                seq.block_table.blocks.clear();
-            }
-
-            match seq.state {
-                SequenceState::Waiting => {
-                    self.waiting_queue.retain(|&id| id != seq_id);
-                    self.stats.waiting_count -= 1;
-                }
-                SequenceState::Running => {
-                    self.running_set.retain(|&id| id != seq_id);
-                    self.stats.running_count -= 1;
-                }
-                SequenceState::Preempted => {
-                    self.preempted_set.retain(|&id| id != seq_id);
-                    self.stats.preempted_count -= 1;
-                }
-                SequenceState::Finished => unreachable!("guarded above"),
-            }
-
-            seq.state = SequenceState::Finished;
-            self.stats.finished_count += 1;
-
-            Ok(())
-        } else {
-            Err(Error::SchedulerError {
-                reason: format!("Sequence {} not found", seq_id),
-            })
-        }
-    }
-
-    fn preempt_sequence(&mut self, seq_id: SequenceId) -> Result<()> {
-        if let Some(seq) = self.sequences.get_mut(&seq_id) {
-            if !seq.block_table.blocks.is_empty() {
-                Self::release_blocks(
-                    &mut self.prefix_cache,
-                    &self.allocator,
-                    seq_id,
-                    &seq.block_table.blocks,
-                )?;
-            }
-
-            seq.state = SequenceState::Preempted;
-            seq.block_table.blocks.clear();
-
-            self.running_set.retain(|&id| id != seq_id);
-            self.preempted_set.push(seq_id);
-            self.stats.running_count -= 1;
-            self.stats.preempted_count += 1;
-            self.stats.total_preemptions += 1;
-
-            Ok(())
-        } else {
-            Err(Error::SchedulerError {
-                reason: format!("Sequence {} not found", seq_id),
-            })
-        }
     }
 
     pub fn stats(&self) -> SchedulerStats {
@@ -469,7 +128,7 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
 
     /// Release physical blocks for a sequence, delegating to the prefix cache
     /// when present or falling back to the block allocator directly.
-    fn release_blocks(
+    pub(super) fn release_blocks(
         prefix_cache: &mut Option<PrefixCache<A>>,
         allocator: &A,
         seq_id: SequenceId,
@@ -481,73 +140,5 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
             allocator.free(blocks)?;
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::inference::memory::CpuBlockAllocator;
-
-    fn scheduler(max_batch_size: usize) -> SequenceScheduler<CpuBlockAllocator> {
-        let config = SchedulerConfig {
-            max_batch_size,
-            block_size: 4,
-            ..Default::default()
-        };
-        SequenceScheduler::new(CpuBlockAllocator::new(64, 4), config)
-    }
-
-    fn add(sched: &mut SequenceScheduler<CpuBlockAllocator>, id: SequenceId) {
-        sched
-            .add_request(SequenceRequest::new(id, vec![1, 2, 3]).with_max_tokens(8))
-            .expect("add_request");
-    }
-
-    #[test]
-    fn the_limit_stops_admission_and_keeps_running_sequences() {
-        let mut sched = scheduler(8);
-        add(&mut sched, 1);
-        add(&mut sched, 2);
-        let first = sched
-            .schedule_with_limit(1)
-            .expect("schedule")
-            .expect("batch");
-        assert_eq!(first.prefill_sequences, vec![1]);
-        assert_eq!(sched.stats().waiting_count, 1);
-
-        // The running set is at the cap: sequence 1 decodes, 2 waits.
-        let held = sched
-            .schedule_with_limit(1)
-            .expect("schedule")
-            .expect("batch");
-        assert_eq!(held.decode_sequences, vec![1]);
-        assert!(held.prefill_sequences.is_empty());
-        assert_eq!(sched.stats().waiting_count, 1);
-
-        // A cap below the running set never evicts a running sequence.
-        let below = sched
-            .schedule_with_limit(0)
-            .expect("schedule")
-            .expect("batch");
-        assert_eq!(below.decode_sequences, vec![1]);
-
-        let grown = sched.schedule().expect("schedule").expect("batch");
-        assert_eq!(grown.prefill_sequences, vec![2]);
-        assert_eq!(sched.stats().waiting_count, 0);
-        assert_eq!(sched.stats().running_count, 2);
-    }
-
-    #[test]
-    fn max_batch_size_still_applies_under_a_higher_limit() {
-        let mut sched = scheduler(1);
-        add(&mut sched, 1);
-        add(&mut sched, 2);
-        let batch = sched
-            .schedule_with_limit(4)
-            .expect("schedule")
-            .expect("batch");
-        assert_eq!(batch.len(), 1);
-        assert_eq!(sched.stats().waiting_count, 1);
     }
 }

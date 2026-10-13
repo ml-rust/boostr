@@ -14,7 +14,7 @@ pub mod types;
 
 pub use answer::{AnswerOptions, SUM_TOLERANCE, answer_from_probs, combine_isolated};
 pub use calibrate::{FitOutcome, TemperatureBounds, TemperatureFit, fit_temperature};
-pub use confidence::{ScoreConfidence, choice_confidence, score_confidence};
+pub use confidence::{ScoreConfidence, certainty, choice_confidence, score_confidence};
 pub use isolated::{IsolatedSample, fit_temperature_isolated};
 pub use noul::{NoulBand, NoulMap};
 pub use objective::{CalibrationSample, Target};

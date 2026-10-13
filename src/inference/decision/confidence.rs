@@ -1,4 +1,5 @@
-//! Confidence scalars of Choice and Score answers.
+//! Confidence scalars of Choice and Score answers, and the entropy-based
+//! certainty of any distribution.
 //!
 //! Inputs are distributions that the caller has already checked.
 
@@ -59,6 +60,22 @@ pub fn score_confidence(probs: &[f64], rule: ScoreConfidence) -> f64 {
     }
 }
 
+/// `1 - H(p) / ln K`, floored at 0: 1 when all mass is on one option, 0 for
+/// a flat distribution; 1 when K = 1. Zero entries add nothing to the
+/// entropy `H(p) = -sum p_i ln p_i`.
+pub fn certainty(probs: &[f64]) -> f64 {
+    let k = probs.len();
+    if k <= 1 {
+        return 1.0;
+    }
+    let h: f64 = probs
+        .iter()
+        .filter(|&&p| p > 0.0)
+        .map(|&p| -p * p.ln())
+        .sum();
+    (1.0 - h / (k as f64).ln()).max(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,6 +117,18 @@ mod tests {
         let b = score_confidence(&p, ScoreConfidence::ChanceCorrected);
         assert!((a - 0.4).abs() < 1e-12);
         assert!((b - 0.4).abs() < 1e-12);
+    }
+
+    #[test]
+    fn certainty_ends_and_hand_value() {
+        assert_eq!(certainty(&[0.0, 1.0, 0.0]), 1.0);
+        assert!(certainty(&[0.25; 4]).abs() < 1e-12);
+        assert_eq!(certainty(&[1.0]), 1.0);
+        // K = 2, p = [0.5, 0.5]: H = ln 2, so 0.
+        assert!(certainty(&[0.5, 0.5]).abs() < 1e-12);
+        // K = 2, p = [0.9, 0.1]: 1 - (-(0.9 ln 0.9 + 0.1 ln 0.1)) / ln 2.
+        let h = -(0.9f64 * 0.9f64.ln() + 0.1f64 * 0.1f64.ln());
+        assert!((certainty(&[0.9, 0.1]) - (1.0 - h / 2f64.ln())).abs() < 1e-12);
     }
 
     #[test]

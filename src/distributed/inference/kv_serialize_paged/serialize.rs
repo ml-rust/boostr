@@ -1,4 +1,4 @@
-//! Serializing a `LayeredPagedKvCache` into the wire format documented in `super`.
+//! Serializing a `LayeredPagedKvCache` into the wire format documented in `super::codec`.
 
 use super::codec::{PAGED_MAGIC, append_le_elements, write_header};
 use crate::inference::{BlockTable, LayeredPagedKvCache};

@@ -1,4 +1,30 @@
-//! Serializing a `LayeredKvCache` into the flat wire format documented in `super`.
+//! Serializing a `LayeredKvCache` into the flat wire format.
+//!
+//! # Wire format — `LayeredKvCache`
+//!
+//! ```text
+//! [magic:       u32 LE = 0xB0057B01]   — flat (non-paged) KV cache
+//! [version:     u32 LE = 1]
+//! [dtype_tag:   u32 LE]                — numr DType discriminant: 1 = f32, 2 = f16, 3 = bf16
+//! [num_layers:  u32 LE]
+//! [seq_len:     u32 LE]       — used token count (same for all layers)
+//! For each layer:
+//!   [batch_size:    u32 LE]
+//!   [num_kv_heads:  u32 LE]
+//!   [head_dim:      u32 LE]
+//!   [k_data:        seq_len * batch_size * num_kv_heads * head_dim * E bytes (LE)]
+//!   [v_data:        seq_len * batch_size * num_kv_heads * head_dim * E bytes (LE)]
+//! ```
+//!
+//! `E` is the element width the dtype tag names: 4 bytes for f32, 2 for f16 and bf16.
+//! Elements are little-endian on every host and are decoded element-wise, so a received
+//! buffer needs no alignment.
+//!
+//! The dtype tag round-trips: a bf16 cache is written as bf16 elements and comes back as
+//! a bf16 cache. Only dtypes carried end to end are accepted — f32, f16 and bf16. Any
+//! other dtype is refused by [`serialize_kv_cache`], naming itself, rather than
+//! reinterpreted or converted, since either hands the peer numbers it cannot know are
+//! wrong.
 
 use crate::distributed::inference::kv_serialize_paged::{
     FLAT_MAGIC, HEADER_LEN, append_le_elements, unsupported_dtype_err, write_header,

@@ -1,5 +1,13 @@
 //! Deserializing bytes produced by [`super::serialize_kv_cache`] back into a
-//! `LayeredKvCache`.
+//! `LayeredKvCache`. `super::serialize` documents the wire format.
+//!
+//! The magic differs from the paged cache's `0xB0057B02`, so a paged buffer handed to
+//! [`deserialize_kv_cache`] errors on the first four bytes.
+//!
+//! Both magics sit above `0xB0057B00` = 2_952_003_840. The pre-header format started
+//! straight at `num_layers`, and no cache has billions of layers — every layer allocates
+//! its own K and V tensors — so an old buffer can never present a matching magic. It is
+//! rejected up front instead of being misparsed.
 
 use crate::distributed::inference::kv_serialize_paged::{
     FLAT_MAGIC, HEADER_LEN, read_header, tensor_from_le_wire,

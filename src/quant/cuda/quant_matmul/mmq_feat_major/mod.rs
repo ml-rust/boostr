@@ -8,28 +8,10 @@
 //! compiled per (weight format, feature tile, token tile, activation cadence),
 //! in four roles: tile-parallel over one K range, tile-parallel over several
 //! ranges, split-K, and the split-K fixup. This module owns the rules that
-//! choose among them (`tiling`) and the launches (`dispatch`). The split
-//! count is fixed by K, N and the device, and every schedule sums the same
-//! range partials in the same order, so a row's result never depends on M or
-//! on its tile position. Whether the ranges run as the split-K pair or inside
-//! the tile-parallel grid is a per-(device, format) pick measured on the
-//! device at first use (`tiling::prefers_tile_parallel`). The kernels
-//! themselves live in `src/quant/cuda/kernels/mmq_mma/`, one translation unit
-//! and one module per weight format (`FeatMajorFormat::module`). At one
-//! token, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, IQ4_NL, IQ4_XS, PQ2_0, Q2_0, Q1_0,
-//! PTQ1_0, Q4_K, Q5_K, Q6_K, Q3_K and Q2_K take a third schedule, the
-//! `M = 1` kernel in `quant_mmq_gemv1.cu` (`gemv1`), which forms the same
-//! bits without the tensor-core tile's padding.
+//! choose among them (`tiling`) and the launches (`dispatch`).
 //!
-//! The kernel family is parameterized over the weight format; everything that
-//! differs per format is a field of `FeatMajorFormat`. Q8_0, Q4_0, Q4_1,
-//! Q5_0, Q5_1, Q4_K, Q5_K, Q6_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS, IQ2_XXS, IQ2_XS,
-//! IQ2_S, IQ3_XXS, IQ3_S, IQ1_S, PQ2_0, Q2_0, Q1_0, PTQ1_0 and the TCF native
-//! encodings `Q8S32T64` and `Q4AS32DT64` are the formats compiled today.
-//!
-//! This path needs sm_80 and its own repacked activation layout, so the caller
-//! gates on `caps.int8_mma_m16n8k32` and falls back to `quant_mmq_q8_0_q8_1_mma`
-//! when this returns `Ok(None)`.
+//! `tiling::split_k` documents the split count, `launch` the kernel home,
+//! `gemv1` the single-token schedule, `formats` the compiled formats, `dispatch` the sm_80 gate.
 
 mod dispatch;
 mod formats;

@@ -1,5 +1,59 @@
 //! The [`TcfWriter::finish`] entry points: the three passes in order, over
 //! an in-memory buffer or a `Write + Seek` sink. Section 4.1, Section 5.3.
+//!
+//! # The three passes
+//!
+//! The property that makes the order work is that **the directory is computable from headers alone**:
+//! `physical_span_bytes` is a function of shape and encoding, and
+//! `data_offset` is a running 64-aligned sum. Neither needs tensor data.
+//!
+//! ```text
+//! pass 1   `plan` + `emit_directory`
+//!          every physical_span_bytes, data_offset, proof_rel_off
+//!          header, all six record arrays, string table
+//!
+//! pass 2   `emit_payloads`, in directory order, one tensor at a time:
+//!          payload_digest, semantic_digest and the 64 proof values
+//!          payload written at its precomputed data_offset, zero-filled to
+//!          physical_span_bytes (Section 14.4), then the payload dropped
+//!
+//! pass 3   `finalize`
+//!          header_digest, then directory_digest (Section 5.3)
+//! ```
+//!
+//! Pass 2 moves each payload out of the writer, writes it at its final
+//! offset, and drops it before the next tensor is touched. The proof vector
+//! each tensor produces is written straight into the proof section at its
+//! final offset rather than buffered, which leaves the section complete
+//! before pass 3 computes the digest covering it.
+//!
+//! # Memory: the two entry points differ, and only one is streaming
+//!
+//! Neither [`TcfWriter::finish`] nor [`TcfWriter::finish_into`] holds a
+//! second copy of a payload, and neither is one-tensor-in-flight either:
+//! [`TcfWriter::add_block_tensor`] and [`TcfWriter::add_raw_tensor`]
+//! store their payload in the writer, so every tensor's payload is resident
+//! at once by the time pass 2 starts. What pass 2 bounds is the *extra* cost
+//! on top of that set, not the set itself.
+//!
+//! [`TcfWriter::finish_streaming`] is the path that holds one payload at a
+//! time. A caller registers each tensor's record with
+//! [`TcfWriter::register_block_tensor`] or
+//! [`TcfWriter::register_raw_tensor`], supplying no payload, and passes a
+//! callback the writer pulls from once per tensor in directory order. That
+//! works because the directory is computable from headers alone: only the
+//! per-tensor digests need data, and the directory is written last. Peak
+//! memory is then the directory plus one tensor.
+//!
+//! All three write byte-identical files for the same tensors in the same
+//! order.
+//!
+//! Every path buffers `[0, data_off)` — the header, the six record arrays,
+//! the string table, and the proof section. That is a function of record
+//! **count**, not of payload size. Payload bytes are written to the sink at
+//! their precomputed absolute offsets and never enter a buffer that scales
+//! with the file. [`TcfWriter::finish`] is [`TcfWriter::finish_into`] over
+//! an in-memory sink, and returns the whole file.
 
 use std::io::{Seek, Write};
 

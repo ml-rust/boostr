@@ -1,6 +1,20 @@
 //! The [`TcfFile`] type: [`TcfFile::open`] and the directory accessors.
-//! See the module documentation for the Section 16 guarantee `open` makes
-//! true by construction.
+//!
+//! # The directory-only guarantee, by construction
+//!
+//! Section 16 requires a placement planner to produce a complete plan
+//! without touching a tensor payload page. [`TcfFile::open`] therefore never
+//! reads a byte at or past `data_off`.
+//!
+//! That is structural here, not a convention: `open` splits the caller's
+//! slice once, at `data_off`, and every later step of `open` reads the
+//! `directory` half. The `data` half is reachable only from
+//! [`TcfFile::payload`] and [`TcfFile::verify_tensor`]. A payload page is
+//! mapped in when a caller asks for that tensor's bytes, never before.
+//!
+//! Splitting a slice reads nothing, so this holds for a memory-mapped file
+//! as well as an in-memory one. Mapping is the host's job: this reader
+//! borrows a slice and owns none of it.
 
 use std::collections::{HashMap, HashSet};
 

@@ -1,5 +1,19 @@
 //! In-memory importance matrix: entries, validation on insert, and the
 //! check against a model's weights.
+//!
+//! # What a value means
+//!
+//! `sums[j]` is `sum over rows of x_j * x_j` — a SUM, never a mean. The
+//! divisor is `rows`, carried beside it, so a consumer picks its own
+//! normalization and two files collected over different corpus sizes stay
+//! combinable. `token_count` is the run-level total, which lets a consumer
+//! tell a 10-token collection from a 100k-token one at a glance.
+//!
+//! # Absent is not zero
+//!
+//! A tensor the run never exercised has NO entry. It is never written as a
+//! zero vector: zero importance and "never measured" mean opposite things to
+//! a quantizer, and only one of them is safe to act on.
 
 use std::collections::BTreeMap;
 

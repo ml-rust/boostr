@@ -1,5 +1,12 @@
 //! `PrefixLookup` trait, `GpuRadixTree`'s data layout, hashing, and
 //! construction. The lookup/insert/eviction algorithm lives in `super::ops`.
+//!
+//! CPU layout (one entry per slot):
+//! ```text
+//! keys:      [u64; capacity]   — FNV hash of the token subsequence
+//! values:    [i32; capacity]   — BlockId (-1 = empty slot)
+//! metadata:  [u64; capacity]   — packed (ref_count: u32, lru_timestamp: u32)
+//! ```
 
 use crate::inference::memory::BlockId;
 

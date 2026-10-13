@@ -3,6 +3,31 @@
 //! [`super::fit`], per [`SuperPrecision`]'s storage rule, then re-derives
 //! every group's sub-levels via [`super::refine`]. This is the module's
 //! public entry point.
+//!
+//! Why this probe exists: `Q6S16D_T64`'s super-scale probe found bf16 worth
+//! only a little over f16 at 6.5 bpw. `Q4AS32D_T64` — TCF's best 4-bit
+//! encoding, at parity with GGUF's `q4_k` — stores the same bf16-super
+//! design TWICE: a super-scale and a super-minimum. This probe isolates
+//! whether f16 helps there too, holding every other structural knob (group
+//! count, sub-level width, code range) fixed across the three
+//! [`SuperPrecision`] arms, exactly as `two_level.rs` does for the
+//! symmetric case.
+//!
+//! [`SuperPrecision::Bf16Reserved`] is not applicable: it retired a reserved
+//! CODE on `two_level.rs`'s SIGNED 6-bit grid, and this geometry's codes are
+//! UNSIGNED with no reserved pattern. [`two_level_asymmetric_round_trip`]
+//! refuses it outright rather than silently mapping it onto [`Bf16`].
+//!
+//! Mirrors the retired TCF native quantizer's asymmetric super-block
+//! search: same three-pass shape (fit every group's `f32` pair, derive the
+//! super pair, round and refine each group's sub-levels against it), same
+//! weighted least-squares refit closing each candidate, same `±2 x ±2`
+//! sub-level search. It differs only where `two_level.rs` already differs:
+//! no binary16 rounding of the per-group intermediate (kept exact `f32`),
+//! and a local candidate-multiplier sweep in place of that quantizer's
+//! search-effort ladder — see `fit::asymmetric_candidate_multipliers`.
+//!
+//! [`Bf16`]: crate::quant::codebook::two_level::SuperPrecision::Bf16
 
 use super::super::roundtrip::GROUP_SIZE;
 use super::super::two_level::{SuperPrecision, round_bf16, round_f16};

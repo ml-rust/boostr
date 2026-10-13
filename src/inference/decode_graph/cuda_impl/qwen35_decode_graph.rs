@@ -15,6 +15,24 @@
 //! lane, and writes the chosen tokens back with
 //! [`Qwen35DecodeGraph::set_next_tokens`]. Two lanes in one capture can
 //! therefore run different sampling policies in the same replay.
+//!
+//! The `qwen35` graph (`Qwen35DecodeGraph`) has no RoPE slices; it adds three
+//! more stable inputs, all written before each replay or by the graph
+//! itself. Its key range and its IMROPE positions come from a `LaneTable`,
+//! one entry per lane, so one capture serves lanes of different lengths:
+//!
+//! | Tensor             | Allocated   | Updated how                          |
+//! |--------------------|-------------|--------------------------------------|
+//! | lane `kv_start`    | pre-capture | H2D async (HtoDAsync) from CPU       |
+//! | lane `kv_end`      | pre-capture | H2D async (HtoDAsync) from CPU       |
+//! | lane `positions`   | pre-capture | H2D async (HtoDAsync) from CPU       |
+//! | `GdnState` buffers | pre-capture | written by graph (`copy_into`)       |
+//!
+//! The `qwen35` capture ends at the logits copy and picks no token. Its
+//! `token_buf` takes one H2D async write per step, carrying the tokens the
+//! caller sampled from the stable `[batch, 1, vocab]` `logits_buf`. Sampling
+//! policy therefore lives with the caller, per lane, and two lanes in one
+//! capture can sample differently in the same replay.
 
 use numr::dtype::DType;
 use numr::ops::HostCopyOps;

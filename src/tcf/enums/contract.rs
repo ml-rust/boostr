@@ -4,6 +4,13 @@
 //! `ScaleComputeDtype` (Section 9.1); each is still modeled as a fallible enum so a
 //! future minor version can add variants without changing decode behavior
 //! for value `1`/`0`.
+//!
+//! A block tensor declares the `GgmlReference` contract: the kernel family
+//! `ggml-quants.c` defines for its block type, whose activation path is
+//! per backend. The container therefore pins bytes, provenance, and the
+//! family today. Pinning one activation representation across backends,
+//! or a payload measurably better than the GGML blocks, is future work and
+//! arrives with its own encoding or contract value.
 
 crate::define_enum_u16! {
     /// `ContractRecord.input_representation`. Section 9.1.

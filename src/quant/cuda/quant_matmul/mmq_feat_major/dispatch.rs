@@ -1,3 +1,9 @@
+//! Feature-major MMQ dispatch: format and tile selection, then the launches.
+//!
+//! This path needs sm_80 and its own repacked activation layout, so the caller
+//! gates on `caps.int8_mma_m16n8k32` and falls back to `quant_mmq_q8_0_q8_1_mma`
+//! when this returns `Ok(None)`.
+
 use crate::error::{Error, Result};
 use crate::quant::QuantTensor;
 use numr::runtime::Device;

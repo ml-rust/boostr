@@ -8,6 +8,12 @@
 //! the tile count, or the token tile. A row's result is then the same bits
 //! at every batch size and at every tile position. Only the launch choice
 //! ([`use_split_launch`]) reads the tile count, and it is bit-neutral.
+//!
+//! The split count is fixed by K, N and the device, and every schedule sums
+//! the same range partials in the same order, so a row's result never depends
+//! on M or on its tile position. Whether the ranges run as the split-K pair or
+//! inside the tile-parallel grid is a per-(device, format) pick measured on
+//! the device at first use (`tiling::prefers_tile_parallel`).
 
 use super::geometry::{FEAT_TILE_DEFAULT, FEAT_TILE_NARROW};
 

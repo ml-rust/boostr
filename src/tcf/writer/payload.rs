@@ -1,6 +1,12 @@
 //! Pass 2 of the writer: one tensor's payload at a time. `FORMAT.md`
 //! Section 8.0.1, Section 14, Section 14.4, Section 15.
 //!
+//! # What the writer does not own
+//!
+//! Payload layout. A block payload is the GGML stream the producer's
+//! quantizer emitted, stored as-is; no file in the writer module holds a bit
+//! position, nibble index, or plane order.
+//!
 //! Each payload is moved out of the writer, digested, written at the
 //! `data_offset` pass 1 computed, zero-filled to `physical_span_bytes`, and
 //! dropped before the next tensor is touched. That drop is what bounds

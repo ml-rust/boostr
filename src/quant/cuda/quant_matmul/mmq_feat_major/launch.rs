@@ -1,4 +1,8 @@
 //! One tensor-core launch of the feature-major family, on either schedule.
+//!
+//! The kernels themselves live in `src/quant/cuda/kernels/mmq_mma/`, one
+//! translation unit and one module per weight format
+//! (`FeatMajorFormat::module`).
 
 use crate::error::{Error, Result};
 use cudarc::driver::PushKernelArg;

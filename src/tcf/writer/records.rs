@@ -1,6 +1,35 @@
 //! The [`TcfWriter`] type, its record `add_*` and [`TcfWriter::intern`]
 //! API, and the derived record digests pass 1 starts with. Section 6,
 //! Section 7, Section 9, Section 11.
+//!
+//! # What the writer owns
+//!
+//! A caller supplies policy — encoding, `fallback_reason`, residency,
+//! telemetry — and never the layout arithmetic. The writer fills in
+//! `data_offset`, `logical_payload_bytes`, `physical_span_bytes`,
+//! `resident_bytes`, `transfer_bytes`, `semantic_digest`, `payload_digest`,
+//! `proof_rel_off`, `proof_count`, and `proof_format` on every tensor. A
+//! caller-set non-zero value in any of them is rejected by name rather than
+//! silently overwritten: a producer that computed an offset itself and got
+//! it wrong must hear about it.
+//!
+//! The three derived record digests are owned the same way: Section 9
+//! requires a producer to compute `policy_digest` (Section 7),
+//! `contract_digest` (Section 9), and `relation_digest` (Section 11), so
+//! [`TcfWriter::finish`] computes each from the record's own encoded bytes
+//! and rejects a caller-supplied non-zero value by name. `contract_digest`
+//! is an integrity identity: a carried-over wrong one hides a corrupted
+//! record and nothing downstream can tell.
+//!
+//! `logical_payload_bytes` is determined, never accepted, for a raw tensor
+//! as well as a quantized one (Section 8.0.1): it is
+//! `product(dims) * width` from the encoding's element size. A caller's
+//! byte vector of a different length is rejected rather than stored.
+//!
+//! Every record the writer emits is decoded back out of the buffer it was
+//! just written into. A record that the reader would reject — a bad rank, a
+//! non-zero reserved byte, an undefined enum value — fails here, in the
+//! producer, instead of in the consumer.
 
 use std::collections::HashMap;
 

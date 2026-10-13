@@ -4,6 +4,11 @@
 //! format occupies today — K-quants are affine with uniform levels, IQ
 //! formats are non-uniform but symmetric.
 //!
+//! Together the four combinations isolate level PLACEMENT (uniform vs
+//! non-uniform) from AFFINE-vs-symmetric geometry, the cell no GGUF format
+//! occupies on its own (K-quants are affine+uniform, IQ formats are
+//! non-uniform+symmetric).
+//!
 //! Reuses the symmetric arm's candidate-scale sweep
 //! ([`candidate_multipliers`]) unchanged, and applies the SAME first-on-tie
 //! nearest-level rule via [`nearest_code`] (index instead of value, so the

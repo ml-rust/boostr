@@ -1,4 +1,12 @@
 //! Lookup, insertion, reference counting and LRU eviction for `GpuRadixTree`.
+//!
+//! Probing strategy: open addressing with linear probing.  The capacity is
+//! always a power of two so that `hash & (capacity - 1)` gives the slot index.
+//!
+//! # Tiering
+//!
+//! VRAM (hot) → RAM (warm) → NVMe (cold, future work).
+//! Eviction promotes entries toward cold tiers; insertion starts in VRAM.
 
 use super::types::{EMPTY_SLOT, GpuRadixStats, GpuRadixTree, PrefixLookup, pack_meta, unpack_meta};
 use crate::inference::memory::BlockId;

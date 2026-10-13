@@ -13,31 +13,14 @@ pub use autograd_attention::var_flash_attention;
 pub use autograd_biased_attention::{AttentionCausality, var_attention_with_bias};
 pub use autograd_rope::{RopeVariant, attach_rope_backward};
 pub use impl_generic::position::mrope_stream_selector;
-pub use traits::AlibiOps;
-pub use traits::AttentionOps;
-pub use traits::AttnOutLayout;
-pub use traits::CalibrationOps;
-pub use traits::DeviceGrammarDfa;
-pub use traits::FlashAttentionOps;
-pub use traits::FusedFp8TrainingOps;
-pub use traits::FusedOptimizerOps;
-pub use traits::FusedQkvOps;
-pub use traits::GatedDeltaNetOps;
-pub use traits::GrammarDfaOps;
-pub use traits::KvCacheOps;
-pub use traits::KvSeqLen;
-pub use traits::MRopeOps;
-pub use traits::MlaOps;
-pub use traits::MoEOps;
-pub use traits::PagedAttentionOps;
-pub use traits::RoPEOps;
-pub use traits::RoPEPackedOps;
-pub use traits::SamplingOps;
-pub use traits::SamplingScratch;
-pub use traits::SpeculativeOps;
-pub use traits::VarLenAttentionOps;
 pub use traits::architecture::moe::MoEActivation;
-pub use traits::{Int4GroupSize, KvCacheQuantOps, KvQuantMode};
+pub use traits::{
+    AlibiOps, AttentionOps, AttnOutLayout, CalibrationOps, DeviceGrammarDfa, FlashAttentionOps,
+    FusedFp8TrainingOps, FusedOptimizerOps, FusedQkvOps, GatedDeltaNetOps, GrammarDfaOps,
+    Int4GroupSize, KvCacheOps, KvCacheQuantOps, KvQuantMode, KvSeqLen, MRopeOps, MlaOps, MoEOps,
+    PagedAttentionOps, RoPEOps, RoPEPackedOps, SamplingOps, SamplingScratch, SpeculativeOps,
+    VarLenAttentionOps,
+};
 
 // Re-export numr's TensorOps which bundles all operation traits
 pub use numr::ops::traits::TensorOps;

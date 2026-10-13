@@ -3,6 +3,16 @@
 //! variants and their errors here; the automatic policy for
 //! [`FeatTile::Auto`] is `super::auto::select_auto_tiling`. The token tile at
 //! one feature tile comes from `variant::select_variant`.
+//!
+//! Module layout: `geometry` holds constants, [`FeatTile`](super::FeatTile),
+//! [`Schedule`](super::Schedule), [`Cadence`](super::Cadence),
+//! [`Role`](super::Role), and shared-memory math. `tile` holds
+//! [`Tiling`](super::Tiling) and its derived values. `variant` holds the token
+//! tile at one feature tile. `select` holds the forced-tiling paths and the
+//! entry point. `auto` holds the automatic tiling policy `select` applies for
+//! [`FeatTile::Auto`](super::FeatTile::Auto). `split_k` holds the split count
+//! and the launch choice. `tile_parallel_tune` holds the per-device
+//! measurement the launch choice reads.
 
 use crate::error::{Error, Result};
 

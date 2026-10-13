@@ -194,10 +194,11 @@ fn indexed_shards(dir: &Path) -> Result<Option<Vec<PathBuf>>> {
         .ok_or_else(|| bad("has no weight_map object".into()))?;
     let mut shards = Vec::with_capacity(map.len());
     for (tensor, file) in map {
-        let file = file
-            .as_str()
-            .filter(|f| !f.is_empty())
-            .ok_or_else(|| bad(format!("weight_map maps {tensor} to {file}, not a file name")))?;
+        let file = file.as_str().filter(|f| !f.is_empty()).ok_or_else(|| {
+            bad(format!(
+                "weight_map maps {tensor} to {file}, not a file name"
+            ))
+        })?;
         shards.push(dir.join(file));
     }
     shards.sort();
@@ -214,9 +215,7 @@ mod tests {
 
     /// A SafeTensors file holding one F32 tensor `name` of `[1]`.
     fn write_one(path: &Path, name: &str) {
-        let header = format!(
-            r#"{{"{name}":{{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}}}"#
-        );
+        let header = format!(r#"{{"{name}":{{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}}}"#);
         let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
         bytes.extend_from_slice(header.as_bytes());
         bytes.extend_from_slice(&1.5f32.to_le_bytes());
@@ -230,7 +229,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_one(&dir.path().join("model-00001-of-00002.safetensors"), "a");
         write_one(&dir.path().join("model-00002-of-00002.safetensors"), "b");
-        write_one(&dir.path().join("joint_head.safetensors"), "hidden_norm.weight");
+        write_one(
+            &dir.path().join("joint_head.safetensors"),
+            "hidden_norm.weight",
+        );
         let globbed = SafeTensorsLoader::open(dir.path()).unwrap();
         assert_eq!(globbed.num_shards(), 3, "no index: every file is a shard");
 
@@ -244,10 +246,16 @@ mod tests {
         assert_eq!(names, ["a", "b"]);
 
         std::fs::write(dir.path().join(SHARD_INDEX), r#"{"weight_map": {"a": 3}}"#).unwrap();
-        let e = SafeTensorsLoader::open(dir.path()).err().unwrap().to_string();
+        let e = SafeTensorsLoader::open(dir.path())
+            .err()
+            .unwrap()
+            .to_string();
         assert!(e.contains("maps a to 3"), "{e}");
         std::fs::write(dir.path().join(SHARD_INDEX), r#"{"metadata": {}}"#).unwrap();
-        let e = SafeTensorsLoader::open(dir.path()).err().unwrap().to_string();
+        let e = SafeTensorsLoader::open(dir.path())
+            .err()
+            .unwrap()
+            .to_string();
         assert!(e.contains("no weight_map"), "{e}");
     }
 }

@@ -78,7 +78,10 @@ pub fn save_checkpoint<P: AsRef<Path>>(
     let json = serde_json::to_string_pretty(&state).map_err(|e| Error::TrainingError {
         reason: format!("failed to serialize training state: {e}"),
     })?;
-    std::fs::write(dir.join("training_state.json"), json).map_err(|e| Error::TrainingError {
+    crate::format::atomic_write::write_atomic(dir.join("training_state.json"), |w| {
+        std::io::Write::write_all(w, json.as_bytes())
+    })
+    .map_err(|e| Error::TrainingError {
         reason: format!("failed to write training state: {e}"),
     })?;
 

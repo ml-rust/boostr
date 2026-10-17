@@ -71,11 +71,10 @@ impl ImportanceMatrix {
         out
     }
 
-    /// Write to `path`, creating or truncating it.
+    /// Write to `path` atomically, creating or replacing it.
     pub fn write_to_path(&self, path: &Path) -> Result<()> {
-        let mut file = std::fs::File::create(path)?;
-        file.write_all(&self.to_bytes())?;
-        file.flush()?;
+        let bytes = self.to_bytes();
+        crate::format::atomic_write::write_atomic(path, |w| w.write_all(&bytes))?;
         Ok(())
     }
 

@@ -22,6 +22,10 @@ Adds exact-resume optimizer state export and import, keyed by parameter name.
 - **State keys** — `AdamW` and `Lamb` write `<name>.exp_avg`, `<name>.exp_avg_sq`, `<name>.master` and `__step`. `AdaGrad` writes `<name>.sum_sq` and `<name>.master`. `Sgd` writes `<name>.momentum_buffer` and `<name>.master`. `<name>.master` exists only for a parameter with an F32 master copy. `__step` is a 1-element F64 tensor. `AdaGrad` and `Sgd` have no step key and refuse one on load.
 - **`FusedDistributedOptimizer`, `ZeroStage1`, `ZeroStage2`, `ZeroStage3`** — gain `state_dict` and `load_state_dict`, which forward to the inner `AdamW`. A ZeRO stage holds the state of its owned parameters only, so each rank saves its own shard.
 
+### Fixed
+
+- **`save_safetensors`, `save_checkpoint`, `save_distributed_checkpoint`, imatrix `write_to_path`** — writes are atomic. Each write goes to a sibling `.<file_name>.tmp-<pid>-<n>` file, which is synced and renamed over the target. A failed save no longer truncates or corrupts an existing file. `save_safetensors` encodes every tensor and the header before it touches the filesystem, so an unsupported dtype leaves the target unchanged. The output bytes are unchanged.
+
 ## [0.9.0] - 2026-10-13
 
 Adds joint-schema decision heads, F32 weight-row reads and score confidence rules, and a new required `DecisionBackbone::output_rows` method.

@@ -50,7 +50,10 @@ pub fn save_distributed_checkpoint<P: AsRef<Path>>(
         std::fs::create_dir_all(dir).map_err(|e| Error::TrainingError {
             reason: format!("failed to create checkpoint dir: {e}"),
         })?;
-        std::fs::write(dir.join("sharding_meta.json"), json).map_err(|e| Error::TrainingError {
+        crate::format::atomic_write::write_atomic(dir.join("sharding_meta.json"), |w| {
+            std::io::Write::write_all(w, json.as_bytes())
+        })
+        .map_err(|e| Error::TrainingError {
             reason: format!("failed to write sharding meta: {e}"),
         })?;
     }

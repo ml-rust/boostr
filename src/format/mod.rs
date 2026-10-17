@@ -1,3 +1,4 @@
+pub(crate) mod atomic_write;
 pub mod device_map;
 pub mod gguf;
 pub mod gguf_vocab;

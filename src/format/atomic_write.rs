@@ -16,7 +16,7 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 ///
 /// On any error the function removes the temp file and returns the original
 /// error. An existing file at `path` stays unchanged.
-pub(crate) fn write_atomic<P, F>(path: P, write: F) -> io::Result<()>
+pub fn write_atomic<P, F>(path: P, write: F) -> io::Result<()>
 where
     P: AsRef<Path>,
     F: FnOnce(&mut BufWriter<File>) -> io::Result<()>,

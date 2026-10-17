@@ -12,6 +12,7 @@ pub mod tcf;
 pub mod torch_pt;
 pub mod weight_source;
 
+pub use atomic_write::write_atomic;
 pub use device_map::{DevicePlacement, LayerDeviceMap};
 pub use gguf::{
     GgmlType, Gguf, GgufMetadata, GgufTensorInfo, GgufValue, GgufValueType, HadamardContract,

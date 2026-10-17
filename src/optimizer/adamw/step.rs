@@ -113,6 +113,18 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for AdamW<R> {
     fn reset(&mut self) {
         AdamW::reset(self);
     }
+
+    fn state_dict(&self, names: &HashMap<TensorId, String>) -> Result<HashMap<String, Tensor<R>>> {
+        self.export_state(names)
+    }
+
+    fn load_state_dict(
+        &mut self,
+        ids: &HashMap<String, TensorId>,
+        state: &HashMap<String, Tensor<R>>,
+    ) -> Result<()> {
+        self.import_state(ids, state)
+    }
 }
 
 #[cfg(test)]

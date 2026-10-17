@@ -81,8 +81,8 @@ pub(super) struct LambState<R: Runtime> {
 /// are exact rather than rounded to the parameter's width. See
 /// [`crate::optimizer::precision`].
 ///
-/// Optimizer state is not persisted by this type — a resumed run rebuilds the
-/// master copies from the checkpointed parameters on its first step.
+/// `state_dict` exports the state keyed by parameter name. `load_state_dict`
+/// restores it, so a resumed run continues the exact update sequence.
 pub struct Lamb<R: Runtime> {
     pub(super) config: LambConfig,
     pub(super) state: HashMap<TensorId, LambState<R>>,

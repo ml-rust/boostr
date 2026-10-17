@@ -180,6 +180,8 @@ impl<R: Runtime<DType = DType>> ZeroStage3<R> {
 // Use the macro for the 4 common methods, then manually impl the Stage 3 overrides.
 // Unfortunately Rust doesn't support partial macro trait impls, so we do it manually
 // but still eliminate the boilerplate for the common methods.
+super::zero_state::impl_zero_state_dict!(ZeroStage3);
+
 impl<R: Runtime<DType = DType>> ZeroOptimizer<R> for ZeroStage3<R> {
     fn owned_param_ids(&self) -> &HashSet<TensorId> {
         &self.base.owned_params

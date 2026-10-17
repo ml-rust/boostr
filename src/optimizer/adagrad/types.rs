@@ -59,8 +59,8 @@ pub(super) struct ParamState<R: Runtime> {
 /// parameter directly rounds every step away and the model never trains. See
 /// [`crate::optimizer::precision`].
 ///
-/// Optimizer state is not persisted by this type — a resumed run rebuilds the
-/// master copies from the checkpointed parameters on its first step.
+/// `state_dict` exports the state keyed by parameter name. `load_state_dict`
+/// restores it, so a resumed run continues the exact update sequence.
 pub struct AdaGrad<R: Runtime> {
     pub(super) config: AdaGradConfig,
     pub(super) state: HashMap<TensorId, ParamState<R>>,

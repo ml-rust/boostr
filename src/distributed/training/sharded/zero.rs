@@ -71,6 +71,7 @@ impl<R: Runtime<DType = DType>> ZeroStage1<R> {
 }
 
 crate::distributed::zero_base::impl_zero_optimizer!(ZeroStage1);
+super::zero_state::impl_zero_state_dict!(ZeroStage1);
 
 #[cfg(test)]
 mod tests {

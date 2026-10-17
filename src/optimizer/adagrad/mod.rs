@@ -4,6 +4,7 @@
 //! per-parameter based on accumulated squared gradients. Particularly effective
 //! for sparse gradients (e.g., embedding layers).
 
+mod state_dict;
 mod step;
 mod types;
 

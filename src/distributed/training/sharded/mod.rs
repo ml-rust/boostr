@@ -6,6 +6,7 @@ pub mod zero2_trainer;
 pub mod zero3;
 pub mod zero3_trainer;
 pub mod zero_base;
+pub(crate) mod zero_state;
 pub mod zero_trainer;
 pub(crate) mod zero_trainer_base;
 

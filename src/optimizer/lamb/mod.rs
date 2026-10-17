@@ -8,6 +8,7 @@
 //! by setting `use_adam = false`, which uses SGD-style momentum instead of Adam moments.
 
 mod apply;
+mod state_dict;
 mod step;
 mod types;
 

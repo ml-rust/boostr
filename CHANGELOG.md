@@ -7,6 +7,21 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+Adds exact-resume optimizer state export and import, keyed by parameter name.
+
+### ⚠️ Breaking changes
+
+- **`Optimizer`** — the trait gains two required methods, `state_dict` and `load_state_dict`. Every implementation must provide both. `AdamW`, `Lamb`, `AdaGrad` and `Sgd` implement them.
+
+### Added
+
+- **`Optimizer::state_dict`** — exports the optimizer state as `HashMap<String, Tensor<R>>`. The caller passes each parameter's name by `TensorId`. Tensors keep their dtype and are deep copies on the optimizer's device. A parameter with no state writes no key. A parameter with state and no name is an error.
+- **`Optimizer::load_state_dict`** — replaces the optimizer state from a state dictionary. The caller passes each parameter's id by name. The load checks every key before it modifies the optimizer, so an error leaves it unchanged. An unknown parameter name, an unknown field, a shape or dtype mismatch, a partial set of keys and a missing `__step` are errors that name the key. The first step after a load continues from the loaded state.
+- **State keys** — `AdamW` and `Lamb` write `<name>.exp_avg`, `<name>.exp_avg_sq`, `<name>.master` and `__step`. `AdaGrad` writes `<name>.sum_sq` and `<name>.master`. `Sgd` writes `<name>.momentum_buffer` and `<name>.master`. `<name>.master` exists only for a parameter with an F32 master copy. `__step` is a 1-element F64 tensor. `AdaGrad` and `Sgd` have no step key and refuse one on load.
+- **`FusedDistributedOptimizer`, `ZeroStage1`, `ZeroStage2`, `ZeroStage3`** — gain `state_dict` and `load_state_dict`, which forward to the inner `AdamW`. A ZeRO stage holds the state of its owned parameters only, so each rank saves its own shard.
+
 ## [0.9.0] - 2026-10-13
 
 Adds joint-schema decision heads, F32 weight-row reads and score confidence rules, and a new required `DecisionBackbone::output_rows` method.

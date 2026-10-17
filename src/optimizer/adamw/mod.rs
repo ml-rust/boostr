@@ -4,6 +4,7 @@
 //! Uses numr tensor ops directly — works on any backend without GPU↔CPU transfers.
 
 mod apply;
+mod state_dict;
 mod step;
 mod types;
 

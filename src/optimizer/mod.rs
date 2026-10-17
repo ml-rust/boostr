@@ -8,6 +8,7 @@ pub mod lr_schedule;
 pub mod master_weight;
 pub mod precision;
 pub mod sgd;
+pub(crate) mod state_dict;
 pub mod traits;
 
 pub use adagrad::{AdaGrad, AdaGradConfig};

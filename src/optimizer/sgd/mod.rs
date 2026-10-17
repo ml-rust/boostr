@@ -4,6 +4,7 @@
 //! Follows PyTorch's SGD semantics with Nesterov momentum support.
 
 mod apply;
+mod state_dict;
 mod step;
 mod types;
 

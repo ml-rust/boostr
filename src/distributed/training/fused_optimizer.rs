@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use crate::distributed::comm_utils::all_reduce_tensor;
 use crate::error::{Error, Result};
+use crate::optimizer::Optimizer;
 use crate::optimizer::adamw::{AdamW, AdamWConfig};
 use numr::autograd::GradStore;
 use numr::dtype::DType;
@@ -65,6 +66,27 @@ impl<R: Runtime<DType = DType>> FusedDistributedOptimizer<R> {
             comm,
             bucket_size_bytes: config.bucket_size_bytes,
         }
+    }
+
+    /// Export the AdamW state, keyed by parameter name.
+    ///
+    /// See [`Optimizer::state_dict`] for the keys.
+    pub fn state_dict(
+        &self,
+        names: &HashMap<TensorId, String>,
+    ) -> Result<HashMap<String, Tensor<R>>> {
+        Optimizer::state_dict(&self.optimizer, names)
+    }
+
+    /// Replace the AdamW state with `state`.
+    ///
+    /// See [`Optimizer::load_state_dict`] for the checks.
+    pub fn load_state_dict(
+        &mut self,
+        ids: &HashMap<String, TensorId>,
+        state: &HashMap<String, Tensor<R>>,
+    ) -> Result<()> {
+        Optimizer::load_state_dict(&mut self.optimizer, ids, state)
     }
 
     /// Perform one fused optimization step.
@@ -233,6 +255,37 @@ mod tests {
     use crate::test_utils::cpu_setup;
     use numr::runtime::NoOpCommunicator;
     use numr::runtime::cpu::CpuRuntime;
+
+    #[test]
+    fn test_fused_optimizer_state_round_trip() {
+        let (client, device) = cpu_setup();
+        let comm = Arc::new(NoOpCommunicator);
+        let mut opt = FusedDistributedOptimizer::<CpuRuntime>::new(
+            FusedOptimizerConfig::default(),
+            comm.clone(),
+        );
+        let w = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+        let id = w.id();
+        let mut params = HashMap::new();
+        params.insert(id, w);
+        let mut grads = GradStore::new();
+        grads.insert(
+            id,
+            Tensor::<CpuRuntime>::from_slice(&[0.1f32, 0.2], &[2], &device).unwrap(),
+        );
+        opt.step(&client, &mut params, &mut grads).unwrap();
+
+        let names = HashMap::from([(id, "w".to_string())]);
+        let ids = HashMap::from([("w".to_string(), id)]);
+        let state = opt.state_dict(&names).unwrap();
+        assert!(state.contains_key("w.exp_avg_sq"));
+        assert!(state.contains_key("__step"));
+
+        let mut fresh =
+            FusedDistributedOptimizer::<CpuRuntime>::new(FusedOptimizerConfig::default(), comm);
+        fresh.load_state_dict(&ids, &state).unwrap();
+        assert_eq!(fresh.optimizer.timestep(), 1);
+    }
 
     #[test]
     fn test_fused_optimizer_single_device() {

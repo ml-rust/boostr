@@ -47,4 +47,34 @@ pub trait Optimizer<R: Runtime<DType = DType>> {
 
     /// Reset all optimizer state (moments, velocities, timestep).
     fn reset(&mut self);
+
+    /// Export the optimizer state, keyed by parameter name.
+    ///
+    /// `names` maps each parameter id to its name. Each key is `<name>.<field>`.
+    /// AdamW and Lamb also write `__step`, the global step.
+    /// A parameter with no state writes no key.
+    /// Tensors keep their dtype and are deep copies on the optimizer's device.
+    ///
+    /// # Errors
+    /// Returns an error when a parameter with state has no entry in `names`,
+    /// or when two parameters share one name.
+    fn state_dict(&self, names: &HashMap<TensorId, String>) -> Result<HashMap<String, Tensor<R>>>;
+
+    /// Replace the optimizer state with `state`, as written by [`Self::state_dict`].
+    ///
+    /// `ids` maps each parameter name to its id. The load checks every key
+    /// before it modifies the optimizer. After an error, the optimizer is unchanged.
+    /// The first step after a load continues from the loaded state.
+    ///
+    /// # Errors
+    /// Returns an error that names the key when:
+    /// - a key names a parameter that is not in `ids`, or has an unknown field
+    /// - a shape or dtype does not match the other tensors of that parameter
+    /// - a parameter has some of its required keys but not all
+    /// - `__step` is missing while per-parameter keys are present
+    fn load_state_dict(
+        &mut self,
+        ids: &HashMap<String, TensorId>,
+        state: &HashMap<String, Tensor<R>>,
+    ) -> Result<()>;
 }

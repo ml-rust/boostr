@@ -28,7 +28,9 @@ pub use super::moe::{
 pub use super::norm::*;
 pub use super::quant_embedding::{MaybeQuantEmbedding, QuantEmbedding};
 pub use super::regularize::*;
-pub use super::rnn::{LstmCellParams, LstmState, RnnConfig, TrainableLstm};
+pub use super::rnn::{
+    GruCellParams, LstmCellParams, LstmState, RnnCellParams, RnnConfig, TrainableGru, TrainableLstm,
+};
 pub use super::rope::RoPE;
 pub use super::rotated::*;
 pub use super::timestep_embedding::{SinusoidalPosEmb, TimestepEmbedding};

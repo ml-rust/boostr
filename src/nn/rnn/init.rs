@@ -1,12 +1,13 @@
-//! Load-or-initialize for [`TrainableLstm`], as `torch.nn.LSTM` initializes.
+//! Load-or-initialize for [`RnnStack`], as `torch.nn.LSTM` and `torch.nn.GRU` initialize.
 //!
 //! Every weight and bias absent from the map draws from
 //! `U(-1/sqrt(H), 1/sqrt(H))`. A seeded `VarBuilder` derives each draw from
 //! the full parameter name, so the result does not depend on build order.
 
+use super::cell::CellKind;
 use super::config::RnnConfig;
-use super::lstm::TrainableLstm;
 use super::params::build_cells;
+use super::stack::RnnStack;
 use crate::error::Result;
 use crate::nn::var_builder::VarBuilder;
 use crate::nn::varmap::Init;
@@ -15,7 +16,7 @@ use numr::dtype::DType;
 use numr::ops::{BinaryOps, CompareOps, RandomOps, ScalarOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
 
-impl<R: Runtime<DType = DType>> TrainableLstm<R> {
+impl<R: Runtime<DType = DType>, K: CellKind> RnnStack<R, K> {
     /// Take each weight from `vb`, or initialize it in `dtype` when absent.
     ///
     /// A present weight with the wrong shape is an error. Taken weights
@@ -42,7 +43,7 @@ impl<R: Runtime<DType = DType>> TrainableLstm<R> {
             let tensor = vb.take_or_init_tensor(&name, shape, dtype, init, client)?;
             Ok(Var::new(tensor, trainable))
         };
-        let cells = build_cells(&config, var)?;
+        let cells = build_cells(&config, Self::gate_rows(&config), var)?;
         Self::from_parts(config, cells)
     }
 }
@@ -50,6 +51,7 @@ impl<R: Runtime<DType = DType>> TrainableLstm<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nn::rnn::lstm::TrainableLstm;
     use crate::nn::varmap::VarMap;
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::CpuRuntime;

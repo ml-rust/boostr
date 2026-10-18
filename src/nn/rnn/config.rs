@@ -1,10 +1,10 @@
 //! [`RnnConfig`]: the shape and behavior of a recurrent layer stack.
 //!
-//! Field names and defaults follow `torch.nn.LSTM`.
+//! Field names and defaults follow `torch.nn.LSTM` and `torch.nn.GRU`.
 
 use crate::error::{Error, Result};
 
-/// Config of a recurrent layer stack, as `torch.nn.LSTM` takes it.
+/// Config of a recurrent layer stack, as `torch.nn.LSTM` and `torch.nn.GRU` take it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RnnConfig {
     /// Features per input step.
@@ -71,8 +71,10 @@ impl RnnConfig {
         if self.bidirectional { 2 } else { 1 }
     }
 
-    /// Rows of each weight and bias: `4 * hidden_size`, gates `[i, f, g, o]`.
-    pub fn gate_size(&self) -> usize {
+    /// Rows of each LSTM weight and bias: `4 * hidden_size`, gates `[i, f, g, o]`.
+    ///
+    /// A GRU weight has `3 * hidden_size` rows, gates `[r, z, n]`.
+    pub fn lstm_gate_size(&self) -> usize {
         4 * self.hidden_size
     }
 
@@ -114,7 +116,7 @@ mod tests {
             ..RnnConfig::new(7, 4)
         };
         assert_eq!(cfg.num_directions(), 2);
-        assert_eq!(cfg.gate_size(), 16);
+        assert_eq!(cfg.lstm_gate_size(), 16);
         assert_eq!(cfg.layer_input_size(0), 7);
         assert_eq!(cfg.layer_input_size(2), 8);
         assert_eq!(cfg.output_size(), 8);

@@ -1,13 +1,14 @@
-//! LSTM parameters under `torch.nn.LSTM` state-dict names.
+//! Recurrent parameters under `torch.nn.LSTM` and `torch.nn.GRU` state-dict names.
 //!
 //! Layer `k` holds `weight_ih_l{k}`, `weight_hh_l{k}`, `bias_ih_l{k}` and
 //! `bias_hh_l{k}`. The reverse direction adds the suffix `_reverse`. Names
-//! are flat, so [`TrainableLstm::named_parameters`] maps 1:1 to PyTorch.
+//! are flat, so [`RnnStack::named_parameters`] maps 1:1 to PyTorch.
 //! The order is layer, then direction, then `weight_ih`, `weight_hh`,
-//! `bias_ih`, `bias_hh`, as `torch.nn.LSTM.named_parameters` lists them.
+//! `bias_ih`, `bias_hh`, as PyTorch `named_parameters` lists them.
 
+use super::cell::CellKind;
 use super::config::RnnConfig;
-use super::lstm::TrainableLstm;
+use super::stack::RnnStack;
 use crate::error::{Error, Result};
 use crate::nn::module::Module;
 use crate::nn::var_builder::VarBuilder;
@@ -17,19 +18,26 @@ use numr::tensor::TensorId;
 
 /// Weights of one direction of one layer, in PyTorch layout.
 ///
-/// `weight_ih` is `[4H, I]`, `weight_hh` is `[4H, H]`, each bias is `[4H]`.
-/// Gate rows are ordered `[i, f, g, o]`.
-pub struct LstmCellParams<R: Runtime> {
+/// With `G` gates, `weight_ih` is `[G*H, I]`, `weight_hh` is `[G*H, H]` and
+/// each bias is `[G*H]`. LSTM has `G = 4`, rows `[i, f, g, o]`. GRU has
+/// `G = 3`, rows `[r, z, n]`.
+pub struct RnnCellParams<R: Runtime> {
     pub(super) weight_ih: Var<R>,
     pub(super) weight_hh: Var<R>,
     pub(super) bias_ih: Option<Var<R>>,
     pub(super) bias_hh: Option<Var<R>>,
 }
 
-impl<R: Runtime> LstmCellParams<R> {
+/// LSTM cell weights: `[4H, I]`, `[4H, H]`, rows `[i, f, g, o]`.
+pub type LstmCellParams<R> = RnnCellParams<R>;
+
+/// GRU cell weights: `[3H, I]`, `[3H, H]`, rows `[r, z, n]`.
+pub type GruCellParams<R> = RnnCellParams<R>;
+
+impl<R: Runtime> RnnCellParams<R> {
     /// Build from `Var`s. Pass `Var::with_id` values to keep optimizer ids.
     ///
-    /// `bias` is `(bias_ih, bias_hh)`. Shapes are checked by [`TrainableLstm::from_parts`].
+    /// `bias` is `(bias_ih, bias_hh)`. Shapes are checked by [`RnnStack::from_parts`].
     pub fn new(weight_ih: Var<R>, weight_hh: Var<R>, bias: Option<(Var<R>, Var<R>)>) -> Self {
         let (bias_ih, bias_hh) = match bias {
             Some((ih, hh)) => (Some(ih), Some(hh)),
@@ -60,8 +68,15 @@ impl<R: Runtime> LstmCellParams<R> {
     }
 
     /// Return an error unless every shape matches `config` at `layer`.
-    pub(super) fn check(&self, config: &RnnConfig, layer: usize, reverse: bool) -> Result<()> {
-        let gate = config.gate_size();
+    ///
+    /// `gate` is the row count of each weight and bias.
+    pub(super) fn check(
+        &self,
+        config: &RnnConfig,
+        gate: usize,
+        layer: usize,
+        reverse: bool,
+    ) -> Result<()> {
         let suffix = param_suffix(layer, reverse);
         let shape_is = |name: &str, var: &Var<R>, want: &[usize]| -> Result<()> {
             if var.shape() == want {
@@ -119,11 +134,13 @@ pub fn param_suffix(layer: usize, reverse: bool) -> String {
 }
 
 /// Build one cell per layer and direction, taking each weight from `var(name, shape)`.
+///
+/// `gate` is the row count of each weight and bias.
 pub(super) fn build_cells<R: Runtime>(
     config: &RnnConfig,
+    gate: usize,
     mut var: impl FnMut(String, &[usize]) -> Result<Var<R>>,
-) -> Result<Vec<LstmCellParams<R>>> {
-    let gate = config.gate_size();
+) -> Result<Vec<RnnCellParams<R>>> {
     let mut cells = Vec::with_capacity(config.num_layers * config.num_directions());
     for layer in 0..config.num_layers {
         for dir in 0..config.num_directions() {
@@ -141,13 +158,13 @@ pub(super) fn build_cells<R: Runtime>(
             } else {
                 None
             };
-            cells.push(LstmCellParams::new(weight_ih, weight_hh, bias));
+            cells.push(RnnCellParams::new(weight_ih, weight_hh, bias));
         }
     }
     Ok(cells)
 }
 
-impl<R: Runtime> TrainableLstm<R> {
+impl<R: Runtime, K: CellKind> RnnStack<R, K> {
     /// Load every weight from `vb` under PyTorch names, shape-checked.
     ///
     /// The tensors are cloned out of the map. A missing name or a shape
@@ -158,10 +175,12 @@ impl<R: Runtime> TrainableLstm<R> {
             let tensor = vb.get_with_shape(&name, shape)?;
             Ok(Var::new(tensor.clone(), trainable))
         };
-        let cells = build_cells(&config, var)?;
+        let cells = build_cells(&config, Self::gate_rows(&config), var)?;
         Self::from_parts(config, cells)
     }
+}
 
+impl<R: Runtime, K> RnnStack<R, K> {
     /// All parameters with their stable autograd ids, in PyTorch order.
     pub fn parameters(&self) -> Vec<(TensorId, &Var<R>)> {
         self.named_parameters()
@@ -178,7 +197,7 @@ impl<R: Runtime> TrainableLstm<R> {
             .collect()
     }
 
-    /// Parameters under `torch.nn.LSTM` names, in PyTorch order.
+    /// Parameters under PyTorch names, in PyTorch order.
     pub fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
         let dirs = self.config.num_directions();
         self.cells
@@ -189,30 +208,31 @@ impl<R: Runtime> TrainableLstm<R> {
     }
 }
 
-impl<R: Runtime> Module<R> for TrainableLstm<R> {
+impl<R: Runtime, K> Module<R> for RnnStack<R, K> {
     fn parameters(&self) -> Vec<&Var<R>> {
-        TrainableLstm::named_parameters(self)
+        RnnStack::named_parameters(self)
             .into_iter()
             .map(|(_, var)| var)
             .collect()
     }
 
     fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
-        TrainableLstm::named_parameters(self)
+        RnnStack::named_parameters(self)
     }
 
     fn parameters_with_ids(&self) -> Vec<(TensorId, &Var<R>)> {
-        TrainableLstm::parameters(self)
+        RnnStack::parameters(self)
     }
 
     fn trainable_parameters(&self) -> Vec<(TensorId, &Var<R>)> {
-        TrainableLstm::trainable_parameters(self)
+        RnnStack::trainable_parameters(self)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nn::rnn::lstm::TrainableLstm;
     use crate::nn::varmap::VarMap;
     use crate::test_utils::cpu_setup;
     use numr::dtype::DType;
@@ -226,7 +246,7 @@ mod tests {
 
     /// Fill `map` with zero tensors under PyTorch names for `cfg`.
     fn fill(map: &mut VarMap<CpuRuntime>, cfg: &RnnConfig, device: &CpuDevice) {
-        let gate = cfg.gate_size();
+        let gate = cfg.lstm_gate_size();
         for layer in 0..cfg.num_layers {
             for dir in 0..cfg.num_directions() {
                 let s = param_suffix(layer, dir == 1);

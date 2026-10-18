@@ -4,19 +4,34 @@
 //! Then `c' = f * c + i * g` and `h' = o * tanh(c')`, with
 //! `i, f, o = sigmoid(.)` and `g = tanh(.)`.
 
+use super::cell::{CellKind, LstmKind, Recurrence, state_count_error};
 use crate::error::{Error, Result};
 use numr::autograd::{Var, var_add, var_matmul, var_mul, var_narrow, var_sigmoid, var_tanh};
 use numr::dtype::DType;
 use numr::ops::{ScalarOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
 
-/// Recurrent weights of one direction, prepared once per sequence.
-pub(super) struct Recurrence<'a, R: Runtime> {
-    /// `W_hh^T`, `[H, 4H]`.
-    pub(super) w_hh_t: &'a Var<R>,
-    /// `b_hh`, `[4H]`, if the layer has bias.
-    pub(super) b_hh: Option<&'a Var<R>>,
-    pub(super) hidden: usize,
+impl CellKind for LstmKind {
+    const GATES: usize = 4;
+    const STATES: &'static [&'static str] = &["h0", "c0"];
+
+    fn step<R, C>(
+        client: &C,
+        rec: &Recurrence<'_, R>,
+        xw_t: &Var<R>,
+        state: &[Var<R>],
+    ) -> Result<Vec<Var<R>>>
+    where
+        R: Runtime<DType = DType>,
+        C: RuntimeClient<R> + TensorOps<R> + ScalarOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R>,
+    {
+        let [h, c] = state else {
+            return Err(state_count_error(2, state.len()));
+        };
+        let (h_next, c_next) = lstm_cell_step(client, rec, xw_t, h, c)?;
+        Ok(vec![h_next, c_next])
+    }
 }
 
 /// Advance `(h, c)` by one step.
@@ -111,5 +126,12 @@ mod tests {
                 assert!((a - w).abs() < 1e-5, "{a} vs {w}");
             }
         }
+
+        let next = LstmKind::step(&client, &rec, &xw, &[leaf(&h0), leaf(&c0)]).unwrap();
+        assert_eq!(next.len(), 2);
+        let trait_h: Vec<f32> = next[0].tensor().contiguous().unwrap().to_vec();
+        let fn_h: Vec<f32> = got_h.tensor().contiguous().unwrap().to_vec();
+        assert_eq!(trait_h, fn_h);
+        assert!(LstmKind::step(&client, &rec, &xw, &[leaf(&h0)]).is_err());
     }
 }

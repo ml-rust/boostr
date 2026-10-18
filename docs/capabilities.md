@@ -64,6 +64,7 @@ For the feature flags, see the [README](../README.md#feature-flags).
 - **LoRA linear** layers (`maybe_lora.rs`)
 - **Quantized embedding** (`quant_embedding.rs`)
 - **Trainable LSTM** (`rnn/`): multi-layer and bidirectional, with `torch.nn.LSTM` parameter names, in autograd. The inference `Lstm` and `BiLstm` (`lstm.rs`) hold raw tensors.
+- **Trainable GRU** (`rnn/`): multi-layer and bidirectional, with `torch.nn.GRU` math and parameter names, in autograd. It shares the stack driver with the trainable LSTM.
 
 ## Inference
 

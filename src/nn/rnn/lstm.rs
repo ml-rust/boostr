@@ -1,90 +1,31 @@
 //! [`TrainableLstm`]: a multi-layer, optionally bidirectional LSTM in autograd.
 //!
-//! The math and weight layout equal `torch.nn.LSTM`. Each direction projects
-//! the whole input in one matmul, `xw = x @ W_ih^T + b_ih`, then runs
-//! [`lstm_cell_step`] once per time step. The reverse direction walks time
-//! backward and stores each output at its original index. Directions join on
-//! the feature axis. Dropout runs between layers in training mode only, never
-//! after the last layer.
+//! The math and weight layout equal `torch.nn.LSTM`. The shared
+//! [`RnnStack`] driver runs layers, directions and dropout, and each
+//! time step runs the LSTM cell: gates `[i, f, g, o]`, state `(h, c)`.
 //!
 //! The inference [`Lstm`](crate::nn::Lstm) holds raw tensors with private
 //! fields, so no bridge from it exists. Load both from the same checkpoint
 //! names instead.
 
-use super::config::RnnConfig;
-use super::lstm_cell::{Recurrence, lstm_cell_step};
-use super::params::LstmCellParams;
-use crate::error::{Error, Result};
-use crate::nn::module::TrainMode;
-use crate::nn::var_ops::var_contiguous;
-use numr::autograd::{
-    Var, var_add, var_cat, var_dropout, var_matmul, var_narrow, var_permute, var_reshape,
-    var_transpose,
-};
+use super::cell::{LstmKind, state_count_error};
+use super::stack::RnnStack;
+use crate::error::Result;
+use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::{RandomOps, ScalarOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
-use numr::tensor::Tensor;
 
 /// Final `(h_n, c_n)`, each `[num_layers * num_directions, B, H]`.
 pub type LstmState<R> = (Var<R>, Var<R>);
 
 /// Trainable LSTM stack with `torch.nn.LSTM` semantics and parameter names.
 ///
-/// Build it with [`TrainableLstm::load`], [`TrainableLstm::init`] or
-/// [`TrainableLstm::from_parts`]. It starts in training mode, as PyTorch does.
-pub struct TrainableLstm<R: Runtime> {
-    pub(super) config: RnnConfig,
-    /// One entry per layer and direction, at index `layer * dirs + dir`.
-    pub(super) cells: Vec<LstmCellParams<R>>,
-    training: bool,
-}
+/// Build it with `TrainableLstm::load`, `TrainableLstm::init` or
+/// `TrainableLstm::from_parts`. It starts in training mode, as PyTorch does.
+pub type TrainableLstm<R> = RnnStack<R, LstmKind>;
 
-impl<R: Runtime> TrainableLstm<R> {
-    /// Build from one [`LstmCellParams`] per layer and direction.
-    ///
-    /// `cells[layer * dirs + dir]` holds layer `layer`, with `dir == 1` the
-    /// reverse direction. A wrong count, a wrong shape or a bias that
-    /// disagrees with `config.bias` is an error.
-    pub fn from_parts(config: RnnConfig, cells: Vec<LstmCellParams<R>>) -> Result<Self> {
-        config.validate()?;
-        let dirs = config.num_directions();
-        let want = config.num_layers * dirs;
-        if cells.len() != want {
-            return Err(Error::InvalidArgument {
-                arg: "cells",
-                reason: format!(
-                    "expected {want} cells ({} layers x {dirs} directions), got {}",
-                    config.num_layers,
-                    cells.len()
-                ),
-            });
-        }
-        for (slot, cell) in cells.iter().enumerate() {
-            cell.check(&config, slot / dirs, slot % dirs == 1)?;
-        }
-        Ok(Self {
-            config,
-            cells,
-            training: true,
-        })
-    }
-
-    pub fn config(&self) -> &RnnConfig {
-        &self.config
-    }
-
-    /// Weights of `layer` in the given direction, if that cell exists.
-    pub fn cell(&self, layer: usize, reverse: bool) -> Option<&LstmCellParams<R>> {
-        if reverse && !self.config.bidirectional {
-            return None;
-        }
-        let slot = layer * self.config.num_directions() + usize::from(reverse);
-        self.cells.get(slot)
-    }
-}
-
-impl<R: Runtime<DType = DType>> TrainableLstm<R> {
+impl<R: Runtime<DType = DType>> RnnStack<R, LstmKind> {
     /// Run the stack over a whole sequence.
     ///
     /// * `x` — `[B, T, input_size]` with `batch_first`, else `[T, B, input_size]`.
@@ -104,192 +45,11 @@ impl<R: Runtime<DType = DType>> TrainableLstm<R> {
         C: RuntimeClient<R> + TensorOps<R> + RandomOps<R> + ScalarOps<R>,
         R::Client: TensorOps<R> + ScalarOps<R>,
     {
-        let cfg = &self.config;
-        let layout = if cfg.batch_first {
-            "[B, T, I]"
-        } else {
-            "[T, B, I]"
-        };
-        if x.shape().len() != 3 || x.shape()[2] != cfg.input_size {
-            return Err(Error::InvalidArgument {
-                arg: "x",
-                reason: format!(
-                    "expected {layout} with I = {}, got {:?}",
-                    cfg.input_size,
-                    x.shape()
-                ),
-            });
-        }
-        let x_tm = if cfg.batch_first {
-            var_permute(x, &[1, 0, 2]).map_err(Error::Numr)?
-        } else {
-            x.alias()
-        };
-        let x_tm = var_contiguous(&x_tm)?;
-        let (steps, batch) = (x_tm.shape()[0], x_tm.shape()[1]);
-        if steps == 0 || batch == 0 {
-            return Err(Error::InvalidArgument {
-                arg: "x",
-                reason: format!(
-                    "sequence length and batch must be at least 1, got {:?} for {layout}",
-                    x.shape()
-                ),
-            });
-        }
-
-        let dirs = cfg.num_directions();
-        let slots = cfg.num_layers * dirs;
-        let state_shape = [slots, batch, cfg.hidden_size];
-        let initial = match state {
-            Some((h0, c0)) => {
-                for (arg, v) in [("h0", h0), ("c0", c0)] {
-                    if v.shape() != state_shape {
-                        return Err(Error::InvalidArgument {
-                            arg,
-                            reason: format!(
-                                "expected {state_shape:?} [layers * dirs, B, H], got {:?}",
-                                v.shape()
-                            ),
-                        });
-                    }
-                }
-                Some((var_contiguous(h0)?, var_contiguous(c0)?))
-            }
-            None => None,
-        };
-        let start = |slot: usize| -> Result<(Var<R>, Var<R>)> {
-            let shape = [batch, cfg.hidden_size];
-            match &initial {
-                Some((h0, c0)) => {
-                    Ok((state_slot(h0, slot, &shape)?, state_slot(c0, slot, &shape)?))
-                }
-                None => {
-                    let zeros = || {
-                        Tensor::<R>::zeros(&shape, x.tensor().dtype(), x.tensor().device())
-                            .map(|t| Var::new(t, false))
-                            .map_err(Error::Numr)
-                    };
-                    Ok((zeros()?, zeros()?))
-                }
-            }
-        };
-
-        let mut layer_in = x_tm;
-        let mut h_n = Vec::with_capacity(slots);
-        let mut c_n = Vec::with_capacity(slots);
-        for (layer, cells) in self.cells.chunks(dirs).enumerate() {
-            let mut outs = Vec::with_capacity(dirs);
-            for (dir, cell) in cells.iter().enumerate() {
-                let (h, c) = start(layer * dirs + dir)?;
-                let (out, h_last, c_last) =
-                    self.run_direction(client, cell, &layer_in, h, c, dir == 1)?;
-                outs.push(out);
-                h_n.push(var_reshape(&h_last, &[1, batch, cfg.hidden_size]).map_err(Error::Numr)?);
-                c_n.push(var_reshape(&c_last, &[1, batch, cfg.hidden_size]).map_err(Error::Numr)?);
-            }
-            let out = if outs.len() == 1 {
-                outs.swap_remove(0)
-            } else {
-                let refs: Vec<&Var<R>> = outs.iter().collect();
-                var_cat(&refs, 2, client).map_err(Error::Numr)?
-            };
-            let drop = self.training && cfg.dropout > 0.0 && layer + 1 < cfg.num_layers;
-            layer_in = if drop {
-                var_dropout(&out, cfg.dropout, client)
-                    .map_err(Error::Numr)?
-                    .0
-            } else {
-                out
-            };
-        }
-
-        let output = if cfg.batch_first {
-            var_contiguous(&var_permute(&layer_in, &[1, 0, 2]).map_err(Error::Numr)?)?
-        } else {
-            layer_in
-        };
-        let h_refs: Vec<&Var<R>> = h_n.iter().collect();
-        let c_refs: Vec<&Var<R>> = c_n.iter().collect();
-        let h_n = var_cat(&h_refs, 0, client).map_err(Error::Numr)?;
-        let c_n = var_cat(&c_refs, 0, client).map_err(Error::Numr)?;
+        let given = state.map(|(h0, c0)| [h0, c0]);
+        let (output, finals) = self.run(client, x, given.as_ref().map(|s| s.as_slice()))?;
+        let [h_n, c_n] =
+            <[Var<R>; 2]>::try_from(finals).map_err(|v| state_count_error(2, v.len()))?;
         Ok((output, (h_n, c_n)))
-    }
-
-    /// One direction of one layer over time-major `input` `[T, B, F]`.
-    ///
-    /// Returns `(output [T, B, H], h_last [B, H], c_last [B, H])`. `output`
-    /// is in original time order for both directions.
-    fn run_direction<C>(
-        &self,
-        client: &C,
-        cell: &LstmCellParams<R>,
-        input: &Var<R>,
-        mut h: Var<R>,
-        mut c: Var<R>,
-        reverse: bool,
-    ) -> Result<(Var<R>, Var<R>, Var<R>)>
-    where
-        C: RuntimeClient<R> + TensorOps<R> + ScalarOps<R>,
-        R::Client: TensorOps<R> + ScalarOps<R>,
-    {
-        let (steps, batch, features) = (input.shape()[0], input.shape()[1], input.shape()[2]);
-        let hidden = self.config.hidden_size;
-        let gate = self.config.gate_size();
-
-        let flat = var_reshape(input, &[steps * batch, features]).map_err(Error::Numr)?;
-        let w_ih_t = var_transpose(&cell.weight_ih).map_err(Error::Numr)?;
-        let xw = var_matmul(&flat, &w_ih_t, client).map_err(Error::Numr)?;
-        let xw = match &cell.bias_ih {
-            Some(b) => var_add(&xw, b, client).map_err(Error::Numr)?,
-            None => xw,
-        };
-        let xw = var_reshape(&xw, &[steps, batch, gate]).map_err(Error::Numr)?;
-
-        let w_hh_t = var_transpose(&cell.weight_hh).map_err(Error::Numr)?;
-        let rec = Recurrence {
-            w_hh_t: &w_hh_t,
-            b_hh: cell.bias_hh.as_ref(),
-            hidden,
-        };
-        let mut outs = Vec::with_capacity(steps);
-        for step in 0..steps {
-            let t = if reverse { steps - 1 - step } else { step };
-            let xw_t = var_narrow(&xw, 0, t, 1).map_err(Error::Numr)?;
-            let xw_t = var_reshape(&var_contiguous(&xw_t)?, &[batch, gate]).map_err(Error::Numr)?;
-            let (h_next, c_next) = lstm_cell_step(client, &rec, &xw_t, &h, &c)?;
-            outs.push(var_reshape(&h_next, &[1, batch, hidden]).map_err(Error::Numr)?);
-            h = h_next;
-            c = c_next;
-        }
-        if reverse {
-            outs.reverse();
-        }
-        let refs: Vec<&Var<R>> = outs.iter().collect();
-        let output = var_cat(&refs, 0, client).map_err(Error::Numr)?;
-        Ok((output, h, c))
-    }
-}
-
-/// Entry `slot` of a `[slots, B, H]` state, as `[B, H]`.
-fn state_slot<R: Runtime<DType = DType>>(
-    state: &Var<R>,
-    slot: usize,
-    shape: &[usize],
-) -> Result<Var<R>>
-where
-    R::Client: TensorOps<R>,
-{
-    let row = var_narrow(state, 0, slot, 1).map_err(Error::Numr)?;
-    var_reshape(&var_contiguous(&row)?, shape).map_err(Error::Numr)
-}
-
-impl<R: Runtime> TrainMode for TrainableLstm<R> {
-    fn set_training(&mut self, training: bool) {
-        self.training = training;
-    }
-
-    fn is_training(&self) -> bool {
-        self.training
     }
 }
 
@@ -297,12 +57,15 @@ impl<R: Runtime> TrainMode for TrainableLstm<R> {
 mod tests {
     use super::*;
     use crate::nn::lstm::{BiLstm, Lstm};
+    use crate::nn::module::TrainMode;
+    use crate::nn::rnn::config::RnnConfig;
     use crate::nn::rnn::params::param_suffix;
     use crate::nn::var_builder::VarBuilder;
     use crate::nn::varmap::VarMap;
     use crate::test_utils::cpu_setup;
-    use numr::autograd::{backward, var_mul, var_sum};
+    use numr::autograd::{backward, var_add, var_mul, var_sum};
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
+    use numr::tensor::Tensor;
 
     type Named = Vec<(String, Vec<usize>, Vec<f64>)>;
 
@@ -318,7 +81,7 @@ mod tests {
 
     /// Every parameter of `cfg` under its PyTorch name, with fixed values.
     fn weights(cfg: &RnnConfig) -> Named {
-        let gate = cfg.gate_size();
+        let gate = cfg.lstm_gate_size();
         let mut out = Vec::new();
         let mut salt = 0;
         for layer in 0..cfg.num_layers {

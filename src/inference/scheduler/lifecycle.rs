@@ -1,5 +1,19 @@
 //! Sequence lifecycle transitions: prefill completion, token append,
 //! finish, abort, and preemption.
+//!
+//! Each method checks the current state of the sequence first. A call in a
+//! state it does not accept returns an error and changes nothing. Valid
+//! states per method:
+//!
+//! | Method             | Valid state                 | Other states                   |
+//! | ------------------ | --------------------------- | ------------------------------ |
+//! | `prefill_complete` | Running                     | error                          |
+//! | `append_token`     | Running                     | error                          |
+//! | `finish_sequence`  | Running                     | Finished is a no-op, rest error |
+//! | `abort_sequence`   | Waiting, Running, Preempted | Finished is a no-op            |
+//! | `preempt_sequence` | Running                     | error                          |
+//!
+//! Every method returns an error for an id the scheduler does not track.
 
 use crate::error::{Error, Result};
 use crate::inference::memory::BlockAllocator;
@@ -8,29 +22,40 @@ use super::core::SequenceScheduler;
 use super::types::{SequenceId, SequenceState};
 
 impl<A: BlockAllocator> SequenceScheduler<A> {
-    pub fn prefill_complete(&mut self, seq_id: SequenceId) -> Result<()> {
-        if let Some(seq) = self.sequences.get_mut(&seq_id) {
-            if seq.state != SequenceState::Running {
-                return Err(Error::SchedulerError {
-                    reason: format!("Sequence {} is not running", seq_id),
-                });
-            }
-            Ok(())
-        } else {
-            Err(Error::SchedulerError {
-                reason: format!("Sequence {} not found", seq_id),
-            })
+    /// Release the blocks of a sequence and clear its table.
+    ///
+    /// On an error from the release the table keeps its blocks.
+    fn release_sequence_blocks(&mut self, seq_id: SequenceId, op: &str) -> Result<()> {
+        let Some(seq) = self.sequences.get_mut(&seq_id) else {
+            return Err(Self::not_found(seq_id, op));
+        };
+        if !seq.block_table.blocks.is_empty() {
+            Self::release_blocks(
+                &mut self.prefix_cache,
+                &self.allocator,
+                seq_id,
+                &seq.block_table.blocks,
+            )?;
+            seq.block_table.blocks.clear();
         }
+        Ok(())
     }
 
-    pub fn append_token(&mut self, seq_id: SequenceId, token: u32) -> Result<bool> {
-        if let Some(seq) = self.sequences.get_mut(&seq_id) {
-            if seq.state != SequenceState::Running {
-                return Err(Error::SchedulerError {
-                    reason: format!("Sequence {} is not running", seq_id),
-                });
-            }
+    /// Check that prefill of a Running sequence is complete.
+    ///
+    /// Valid state: Running. Changes nothing.
+    pub fn prefill_complete(&mut self, seq_id: SequenceId) -> Result<()> {
+        self.require_state(seq_id, "complete prefill of", &[SequenceState::Running])?;
+        Ok(())
+    }
 
+    /// Append a sampled token to a Running sequence.
+    ///
+    /// Returns true when the token ends the sequence, which then moves to
+    /// Finished. Valid state: Running.
+    pub fn append_token(&mut self, seq_id: SequenceId, token: u32) -> Result<bool> {
+        self.require_state(seq_id, "append a token to", &[SequenceState::Running])?;
+        if let Some(seq) = self.sequences.get_mut(&seq_id) {
             // Ensure a physical block exists for the slot where the new token lands
             // before committing any state change.  The new token occupies position
             // `total_tokens` (0-indexed), which belongs to block
@@ -71,110 +96,75 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
 
             Ok(false)
         } else {
-            Err(Error::SchedulerError {
-                reason: format!("Sequence {} not found", seq_id),
-            })
+            Err(Self::not_found(seq_id, "append a token to"))
         }
     }
 
+    /// Finish a Running sequence and release its blocks.
+    ///
+    /// Valid state: Running. A Finished sequence returns Ok and changes
+    /// nothing, so a finish that races a finish or an abort is harmless.
+    /// A Waiting or Preempted sequence is an error: finish needs a decode
+    /// step, so use [`abort_sequence`](Self::abort_sequence) to end it.
     pub fn finish_sequence(&mut self, seq_id: SequenceId) -> Result<()> {
-        if let Some(seq) = self.sequences.get_mut(&seq_id) {
-            if !seq.block_table.blocks.is_empty() {
-                Self::release_blocks(
-                    &mut self.prefix_cache,
-                    &self.allocator,
-                    seq_id,
-                    &seq.block_table.blocks,
-                )?;
-            }
-
-            seq.state = SequenceState::Finished;
-            seq.block_table.blocks.clear();
-
-            self.running_set.retain(|&id| id != seq_id);
-            self.stats.running_count -= 1;
-            self.stats.finished_count += 1;
-
-            Ok(())
-        } else {
-            Err(Error::SchedulerError {
-                reason: format!("Sequence {} not found", seq_id),
-            })
+        const OP: &str = "finish";
+        let state = self.require_state(
+            seq_id,
+            OP,
+            &[SequenceState::Running, SequenceState::Finished],
+        )?;
+        if state == SequenceState::Finished {
+            return Ok(());
         }
+        self.release_sequence_blocks(seq_id, OP)?;
+        self.running_set.retain(|&id| id != seq_id);
+        self.move_state(seq_id, OP, SequenceState::Running, SequenceState::Finished)
     }
 
+    /// Abort a sequence and release its blocks.
+    ///
+    /// Valid states: Waiting, Running, Preempted. A Finished sequence
+    /// returns Ok and changes nothing. The counter of the state the
+    /// sequence leaves drops by 1.
     pub fn abort_sequence(&mut self, seq_id: SequenceId) -> Result<()> {
-        if let Some(seq) = self.sequences.get_mut(&seq_id) {
-            // Idempotent: already terminal, nothing to do.
-            if seq.state == SequenceState::Finished {
-                return Ok(());
-            }
-
-            // Free physical blocks first, then clear to prevent double-free on
-            // a second call before cleanup_finished() runs.
-            if !seq.block_table.blocks.is_empty() {
-                Self::release_blocks(
-                    &mut self.prefix_cache,
-                    &self.allocator,
-                    seq_id,
-                    &seq.block_table.blocks,
-                )?;
-                seq.block_table.blocks.clear();
-            }
-
-            match seq.state {
-                SequenceState::Waiting => {
-                    self.waiting_queue.retain(|&id| id != seq_id);
-                    self.stats.waiting_count -= 1;
-                }
-                SequenceState::Running => {
-                    self.running_set.retain(|&id| id != seq_id);
-                    self.stats.running_count -= 1;
-                }
-                SequenceState::Preempted => {
-                    self.preempted_set.retain(|&id| id != seq_id);
-                    self.stats.preempted_count -= 1;
-                }
-                SequenceState::Finished => unreachable!("guarded above"),
-            }
-
-            seq.state = SequenceState::Finished;
-            self.stats.finished_count += 1;
-
-            Ok(())
-        } else {
-            Err(Error::SchedulerError {
-                reason: format!("Sequence {} not found", seq_id),
-            })
+        const OP: &str = "abort";
+        let state = self.require_state(
+            seq_id,
+            OP,
+            &[
+                SequenceState::Waiting,
+                SequenceState::Running,
+                SequenceState::Preempted,
+                SequenceState::Finished,
+            ],
+        )?;
+        if state == SequenceState::Finished {
+            return Ok(());
         }
+        // Release first, then clear: a second call before cleanup_finished
+        // must not free the blocks twice.
+        self.release_sequence_blocks(seq_id, OP)?;
+        match state {
+            SequenceState::Waiting => self.waiting_queue.retain(|&id| id != seq_id),
+            SequenceState::Running => self.running_set.retain(|&id| id != seq_id),
+            SequenceState::Preempted => self.preempted_set.retain(|&id| id != seq_id),
+            SequenceState::Finished => {}
+        }
+        self.move_state(seq_id, OP, state, SequenceState::Finished)
     }
 
+    /// Move a Running sequence to Preempted and release its blocks.
+    ///
+    /// Valid state: Running.
     pub(super) fn preempt_sequence(&mut self, seq_id: SequenceId) -> Result<()> {
-        if let Some(seq) = self.sequences.get_mut(&seq_id) {
-            if !seq.block_table.blocks.is_empty() {
-                Self::release_blocks(
-                    &mut self.prefix_cache,
-                    &self.allocator,
-                    seq_id,
-                    &seq.block_table.blocks,
-                )?;
-            }
-
-            seq.state = SequenceState::Preempted;
-            seq.block_table.blocks.clear();
-
-            self.running_set.retain(|&id| id != seq_id);
-            self.preempted_set.push(seq_id);
-            self.stats.running_count -= 1;
-            self.stats.preempted_count += 1;
-            self.stats.total_preemptions += 1;
-
-            Ok(())
-        } else {
-            Err(Error::SchedulerError {
-                reason: format!("Sequence {} not found", seq_id),
-            })
-        }
+        const OP: &str = "preempt";
+        self.require_state(seq_id, OP, &[SequenceState::Running])?;
+        self.release_sequence_blocks(seq_id, OP)?;
+        self.running_set.retain(|&id| id != seq_id);
+        self.preempted_set.push(seq_id);
+        self.move_state(seq_id, OP, SequenceState::Running, SequenceState::Preempted)?;
+        self.stats.total_preemptions += 1;
+        Ok(())
     }
 }
 
@@ -327,7 +317,7 @@ mod tests {
         let bases: [Vec<u32>; 3] = [(0..12).collect(), (50..62).collect(), (0..6).collect()];
         let mut next_id = 0u64;
         for op in 0..200 {
-            match rng.below(4) {
+            match rng.below(6) {
                 0 => {
                     let base = &bases[rng.below(3) as usize];
                     let keep = rng.below(base.len() as u64 + 1) as usize;
@@ -347,12 +337,40 @@ mod tests {
                         sched.finish_sequence(id).expect("finish");
                     }
                 }
-                _ => {
+                3 => {
                     let ids = live_ids(&sched, false);
                     if !ids.is_empty() {
                         let id = ids[rng.below(ids.len() as u64) as usize];
                         sched.abort_sequence(id).expect("cancel");
                     }
+                }
+                4 => {
+                    // Finish or preempt a sequence that is not running.
+                    let ids: Vec<u64> = live_ids(&sched, false)
+                        .into_iter()
+                        .filter(|&id| sched.get_sequence_state(id) != Some(SequenceState::Running))
+                        .collect();
+                    if !ids.is_empty() {
+                        let id = ids[rng.below(ids.len() as u64) as usize];
+                        let before = snapshot(&sched);
+                        let result = if rng.below(2) == 0 {
+                            sched.finish_sequence(id)
+                        } else {
+                            sched.preempt_sequence(id)
+                        };
+                        assert!(result.is_err(), "op {op}: a wrong-state call succeeded");
+                        assert_eq!(before, snapshot(&sched), "op {op}: a rejected call mutated");
+                    }
+                }
+                _ => {
+                    // Unknown id: every operation is an error and changes nothing.
+                    let unknown = next_id + 1000;
+                    let before = snapshot(&sched);
+                    assert!(sched.abort_sequence(unknown).is_err());
+                    assert!(sched.finish_sequence(unknown).is_err());
+                    assert!(sched.preempt_sequence(unknown).is_err());
+                    assert!(sched.append_token(unknown, 1).is_err());
+                    assert_eq!(before, snapshot(&sched), "op {op}: an unknown id mutated");
                 }
             }
             if op % 16 == 0 {
@@ -360,6 +378,19 @@ mod tests {
             }
             if let Err(e) = sched.check_block_invariants() {
                 panic!("seed {seed}, cache {with_cache}, op {op}: {e}");
+            }
+            // A wrapped counter is far above the number of sequences created.
+            let stats = sched.stats();
+            for count in [
+                stats.waiting_count,
+                stats.running_count,
+                stats.preempted_count,
+                stats.finished_count,
+            ] {
+                assert!(
+                    count as u64 <= next_id,
+                    "seed {seed}, op {op}: counter wrapped"
+                );
             }
         }
 
@@ -386,5 +417,150 @@ mod tests {
             stress(seed, true);
             stress(seed, false);
         }
+    }
+
+    /// Counters, queues, free blocks and every sequence's state and table.
+    fn snapshot(sched: &SequenceScheduler<CpuBlockAllocator>) -> String {
+        let mut seqs: Vec<_> = sched
+            .sequences
+            .iter()
+            .map(|(&id, s)| (id, s.state, s.block_table.blocks.clone()))
+            .collect();
+        seqs.sort_by_key(|entry| entry.0);
+        format!(
+            "{:?} {:?} {:?} {:?} free {} {seqs:?}",
+            sched.stats,
+            sched.waiting_queue,
+            sched.running_set,
+            sched.preempted_set,
+            sched.allocator().free_block_count()
+        )
+    }
+
+    /// A scheduler with sequence 1 in `state`.
+    fn in_state(state: SequenceState) -> SequenceScheduler<CpuBlockAllocator> {
+        let mut sched = scheduler(32, false);
+        let request = SequenceRequest::new(1, vec![1, 2, 3]).with_max_tokens(8);
+        sched.add_request(request).expect("add");
+        if state != SequenceState::Waiting {
+            sched.schedule().expect("schedule").expect("batch");
+        }
+        match state {
+            SequenceState::Preempted => sched.preempt_sequence(1).expect("preempt"),
+            SequenceState::Finished => sched.finish_sequence(1).expect("finish"),
+            _ => {}
+        }
+        assert_eq!(sched.get_sequence_state(1), Some(state));
+        sched.check_block_invariants().expect("invariants");
+        sched
+    }
+
+    fn counters(sched: &SequenceScheduler<CpuBlockAllocator>) -> [usize; 4] {
+        let s = sched.stats();
+        [
+            s.waiting_count,
+            s.running_count,
+            s.preempted_count,
+            s.finished_count,
+        ]
+    }
+
+    #[test]
+    fn wrong_state_operations_return_an_error_and_change_nothing() {
+        use SequenceState::{Finished, Preempted, Waiting};
+        fn apply(name: &str, s: &mut SequenceScheduler<CpuBlockAllocator>) -> Result<()> {
+            match name {
+                "finish" => s.finish_sequence(1),
+                "preempt" => s.preempt_sequence(1),
+                "append" => s.append_token(1, 5).map(drop),
+                _ => s.prefill_complete(1),
+            }
+        }
+        let cases = [
+            ("finish", Waiting),
+            ("finish", Preempted),
+            ("preempt", Waiting),
+            ("preempt", Preempted),
+            ("preempt", Finished),
+            ("append", Waiting),
+            ("append", Preempted),
+            ("append", Finished),
+            ("prefill_complete", Waiting),
+            ("prefill_complete", Preempted),
+            ("prefill_complete", Finished),
+        ];
+        for (name, state) in cases {
+            let mut sched = in_state(state);
+            let before = snapshot(&sched);
+            let err = apply(name, &mut sched).expect_err(name);
+            let text = err.to_string();
+            assert!(text.contains("sequence 1"), "{name} in {state:?}: {text}");
+            assert!(
+                text.contains(&format!("{state:?}")),
+                "{name} in {state:?}: {text}"
+            );
+            assert_eq!(before, snapshot(&sched), "{name} in {state:?} mutated");
+            sched.check_block_invariants().expect("invariants");
+        }
+    }
+
+    #[test]
+    fn an_unknown_sequence_is_an_error_for_every_operation() {
+        let mut sched = in_state(SequenceState::Running);
+        let before = snapshot(&sched);
+        assert!(sched.finish_sequence(9).is_err());
+        assert!(sched.abort_sequence(9).is_err());
+        assert!(sched.preempt_sequence(9).is_err());
+        assert!(sched.append_token(9, 1).is_err());
+        assert!(sched.prefill_complete(9).is_err());
+        assert_eq!(before, snapshot(&sched));
+    }
+
+    #[test]
+    fn finishing_twice_counts_once() {
+        let mut sched = in_state(SequenceState::Running);
+        sched.finish_sequence(1).expect("first finish");
+        let after_first = snapshot(&sched);
+        sched.finish_sequence(1).expect("second finish");
+        assert_eq!(after_first, snapshot(&sched));
+        assert_eq!(counters(&sched), [0, 0, 0, 1]);
+        sched.check_block_invariants().expect("invariants");
+    }
+
+    #[test]
+    fn finish_after_abort_and_abort_after_finish_are_no_ops() {
+        let mut sched = in_state(SequenceState::Running);
+        sched.abort_sequence(1).expect("abort");
+        sched.finish_sequence(1).expect("finish after abort");
+        sched.abort_sequence(1).expect("abort again");
+        assert_eq!(counters(&sched), [0, 0, 0, 1]);
+        assert_eq!(sched.allocator().free_block_count(), 32);
+        sched.check_block_invariants().expect("invariants");
+    }
+
+    #[test]
+    fn abort_moves_the_counter_of_the_state_it_leaves() {
+        let expected = [
+            (SequenceState::Waiting, [1, 0, 0, 0]),
+            (SequenceState::Running, [0, 1, 0, 0]),
+            (SequenceState::Preempted, [0, 0, 1, 0]),
+        ];
+        for (state, before) in expected {
+            let mut sched = in_state(state);
+            assert_eq!(counters(&sched), before, "{state:?}");
+            sched.abort_sequence(1).expect("abort");
+            assert_eq!(counters(&sched), [0, 0, 0, 1], "{state:?}");
+            assert!(!sched.has_work(), "{state:?}");
+            assert_eq!(sched.allocator().free_block_count(), 32, "{state:?}");
+            sched.check_block_invariants().expect("invariants");
+        }
+    }
+
+    #[test]
+    fn a_resumed_sequence_returns_to_running() {
+        let mut sched = in_state(SequenceState::Preempted);
+        sched.schedule().expect("schedule").expect("batch");
+        assert_eq!(counters(&sched), [0, 1, 0, 0]);
+        sched.check_block_invariants().expect("invariants");
     }
 }

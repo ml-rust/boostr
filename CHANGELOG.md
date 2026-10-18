@@ -24,6 +24,7 @@ Adds exact-resume optimizer state export and import, keyed by parameter name. Ad
 - **`PrefixCacheConfig::max_cached_blocks`** — a hard cap. A fresh full block past the cap stays private.
 - **`SequenceScheduler::add_request`** — an empty prompt is an error. A prefix cache whose `block_size` differs from the scheduler's is an error.
 - **`SequenceScheduler::finish_sequence`, `abort_sequence`** — a release error from the prefix cache returns as an error. It used to be dropped.
+- **`SequenceScheduler::finish_sequence`** — a Waiting or Preempted sequence is an error, and nothing changes. It used to return Ok and corrupt the counters. A Finished sequence returns Ok and changes nothing. Use `abort_sequence` to end a Waiting or Preempted sequence.
 
 ### Added
 
@@ -55,6 +56,7 @@ Adds exact-resume optimizer state export and import, keyed by parameter name. Ad
 
 ### Fixed
 
+- **`SequenceScheduler`** — a scheduler operation on a sequence in the wrong state returns an error instead of corrupting the counters. Every transition checks the current state and moves the counter of the state it leaves. A `finish_sequence` on a non-running sequence used to underflow `running_count`, which panics in debug builds and wraps in release builds.
 - **Prefix cache** — blocks no longer leak when the prefix cache is on. A finished, aborted or preempted sequence returns every block to the allocator, except the full prefix blocks the cache keeps. The cache used to keep each sequence's decode blocks forever.
 - **Prefix cache** — shared prefix blocks never include a partially filled block. Decode wrote into the cached partial block, so a second request with the same prompt read and overwrote the first request's decode KV.
 - **Prefix cache** — a prompt whose length is a multiple of `block_size` keeps its last block private. A full hit used to report the whole prompt as cached, so prefill had no token to compute.

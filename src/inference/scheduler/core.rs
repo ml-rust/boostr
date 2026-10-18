@@ -272,6 +272,33 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
         {
             return Err(format!("stats {:?} disagree with the queues", self.stats));
         }
+
+        let mut by_state = [0usize; 4];
+        for seq in self.sequences.values() {
+            by_state[seq.state as usize] += 1;
+        }
+        let counted = [
+            self.stats.waiting_count,
+            self.stats.running_count,
+            self.stats.preempted_count,
+            self.stats.finished_count,
+        ];
+        if by_state != counted {
+            return Err(format!(
+                "counters [waiting, running, preempted, finished] {counted:?} != sequences per state {by_state:?}"
+            ));
+        }
+        let queued_waiting = self
+            .waiting_queue
+            .iter()
+            .all(|id| self.get_sequence_state(*id) == Some(SequenceState::Waiting));
+        let queued_preempted = self
+            .preempted_set
+            .iter()
+            .all(|id| self.get_sequence_state(*id) == Some(SequenceState::Preempted));
+        if !queued_waiting || !queued_preempted {
+            return Err("a queued sequence is not in the state of its queue".to_string());
+        }
         Ok(())
     }
 }

@@ -121,7 +121,6 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
                     seq_mut.block_table.blocks = blocks.clone();
                     seq_mut.block_table.num_tokens = prompt_tokens;
                     seq_mut.cached_token_count = cached_count;
-                    seq_mut.state = SequenceState::Running;
                 }
 
                 batch.prefill_sequences.push(seq_id);
@@ -137,10 +136,14 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
         self.waiting_queue
             .retain(|id| !scheduled_waiting.contains(id));
 
-        for seq_id in &scheduled_waiting {
-            self.running_set.push(*seq_id);
-            self.stats.waiting_count -= 1;
-            self.stats.running_count += 1;
+        for seq_id in scheduled_waiting {
+            self.running_set.push(seq_id);
+            self.move_state(
+                seq_id,
+                "admit",
+                SequenceState::Waiting,
+                SequenceState::Running,
+            )?;
         }
 
         // Step 3: Resume preempted sequences
@@ -172,7 +175,6 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
                     seq_mut.block_table.num_tokens = seq_mut.total_tokens;
                     // Fresh blocks hold no KV, so nothing is cached.
                     seq_mut.cached_token_count = 0;
-                    seq_mut.state = SequenceState::Running;
                 }
 
                 batch.decode_sequences.push(seq_id);
@@ -185,8 +187,12 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
         self.preempted_set.retain(|id| !resumed.contains(id));
         for seq_id in resumed {
             self.running_set.push(seq_id);
-            self.stats.preempted_count -= 1;
-            self.stats.running_count += 1;
+            self.move_state(
+                seq_id,
+                "resume",
+                SequenceState::Preempted,
+                SequenceState::Running,
+            )?;
         }
 
         if batch.is_empty() {

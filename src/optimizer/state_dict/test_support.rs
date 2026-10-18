@@ -214,3 +214,91 @@ pub(crate) fn assert_step_is(state: &State, expected: f64) {
     assert_eq!(step.shape(), &[1]);
     assert_eq!(step.to_vec::<f64>(), vec![expected]);
 }
+
+/// Run the steps numbered by `steps`, with one `step_partial` per parameter.
+///
+/// Parameters go in name order, one gradient per call, as a bucketed caller does.
+pub(crate) fn run_partial<O: Optimizer<CpuRuntime>>(
+    opt: &mut O,
+    client: &CpuClient,
+    fx: &Fixture,
+    params: &mut Params,
+    steps: Range<usize>,
+) {
+    let mut order: Vec<(&String, &TensorId)> = fx.ids.iter().collect();
+    order.sort_by(|a, b| a.0.cmp(b.0));
+    for step in steps {
+        let grads = fx.grads(client, step);
+        opt.begin_step();
+        for (_, id) in &order {
+            let mut subset = GradStore::new();
+            subset.insert(**id, grads.get(**id).unwrap().clone());
+            opt.step_partial(client, params, &subset).unwrap();
+        }
+    }
+}
+
+/// Check that one `step_partial` per parameter gives the bits of one `step`.
+///
+/// Three bucketed steps must match three whole steps in parameters and state.
+/// A state exported after two bucketed steps must resume to the same bits.
+pub(crate) fn assert_partial_matches_step<O: Optimizer<CpuRuntime>>(
+    make: impl Fn(&Fixture) -> O,
+    narrow: bool,
+) {
+    let (client, device) = cpu_setup();
+    let fx = Fixture::new(&client, &device, narrow);
+
+    let mut whole = make(&fx);
+    let mut whole_params = deep(&fx.params);
+    run(&mut whole, &client, &fx, &mut whole_params, 0..3);
+    let whole_state = whole.state_dict(&fx.names).unwrap();
+
+    let mut split = make(&fx);
+    let mut split_params = deep(&fx.params);
+    run_partial(&mut split, &client, &fx, &mut split_params, 0..2);
+    let state = split.state_dict(&fx.names).unwrap();
+    let mut resumed_params = deep(&split_params);
+    run_partial(&mut split, &client, &fx, &mut split_params, 2..3);
+
+    assert_same_params(&whole_params, &split_params);
+    assert_same_state(&whole_state, &split.state_dict(&fx.names).unwrap());
+
+    let mut resumed = make(&fx);
+    resumed.load_state_dict(&fx.ids, &state).unwrap();
+    run_partial(&mut resumed, &client, &fx, &mut resumed_params, 2..3);
+
+    assert_same_params(&whole_params, &resumed_params);
+    assert_same_state(&whole_state, &resumed.state_dict(&fx.names).unwrap());
+}
+
+/// Check that `step_partial` refuses to run outside a begun step.
+///
+/// The cases are a new optimizer, one after `reset`, and one after `load_state_dict`.
+/// A refused call must leave the parameters unchanged.
+pub(crate) fn assert_partial_needs_begin<O: Optimizer<CpuRuntime>>(make: impl Fn() -> O) {
+    let (client, device) = cpu_setup();
+    let fx = Fixture::new(&client, &device, false);
+    let grads = fx.grads(&client, 0);
+    let mut params = deep(&fx.params);
+    let refused = |opt: &mut O, params: &mut Params| {
+        let err = opt
+            .step_partial(&client, params, &grads)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("begin_step"), "{err}");
+    };
+
+    let mut opt = make();
+    refused(&mut opt, &mut params);
+    assert_same_params(&params, &fx.params);
+
+    opt.step(&client, &mut params, &grads).unwrap();
+    let state = opt.state_dict(&fx.names).unwrap();
+    opt.reset();
+    refused(&mut opt, &mut params);
+
+    opt.load_state_dict(&fx.ids, &state).unwrap();
+    refused(&mut opt, &mut params);
+}

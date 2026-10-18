@@ -2,7 +2,7 @@
 //!
 //! Defines a common interface for all optimizers so trainers can be optimizer-agnostic.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::ops::FusedOptimizerOps;
 use numr::autograd::GradStore;
 use numr::dtype::DType;
@@ -20,6 +20,7 @@ pub trait Optimizer<R: Runtime<DType = DType>> {
     ///
     /// Updates all parameters in `params` using gradients from `grads`.
     /// Parameters without gradients are skipped.
+    /// For an optimizer with a step counter, `step` is `begin_step` plus one `step_partial`.
     ///
     /// `TypeConversionOps` is required because an optimizer that reads a scalar
     /// back to the host (LAMB's trust ratio) must cast it to F32 first: reading
@@ -38,6 +39,46 @@ pub trait Optimizer<R: Runtime<DType = DType>> {
             + ReduceOps<R>
             + TypeConversionOps<R>
             + FusedOptimizerOps<R>;
+
+    /// Start one optimization step without updating any parameter.
+    ///
+    /// Use it with [`Self::step_partial`] to update the parameters in subsets.
+    /// Call `begin_step` once per step, then `step_partial` once per subset.
+    /// An optimizer with a step counter increments it here.
+    /// It also fixes the rates of this step, so a later `set_lr` applies from the next step.
+    ///
+    /// The default does nothing. That is correct for an optimizer with no per-step state.
+    fn begin_step(&mut self) {}
+
+    /// Update the parameters of `params` that have a gradient in `grads`.
+    ///
+    /// The update belongs to the step that [`Self::begin_step`] started.
+    /// The step counter stays unchanged.
+    /// With each parameter in exactly one subset, the subsets give the same bits as one `step`.
+    ///
+    /// The default calls [`Self::step`]. That is correct for an optimizer with no per-step state.
+    /// An optimizer with a step counter must override `begin_step` and `step_partial`.
+    ///
+    /// # Errors
+    /// An optimizer with a step counter returns an error when no step has begun
+    /// since construction, `reset` or `load_state_dict`.
+    fn step_partial<C>(
+        &mut self,
+        client: &C,
+        params: &mut HashMap<TensorId, Tensor<R>>,
+        grads: &GradStore<R>,
+    ) -> Result<()>
+    where
+        C: RuntimeClient<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + TypeConversionOps<R>
+            + FusedOptimizerOps<R>,
+    {
+        self.step(client, params, grads)
+    }
 
     /// Set the learning rate.
     fn set_lr(&mut self, lr: f64);
@@ -77,4 +118,13 @@ pub trait Optimizer<R: Runtime<DType = DType>> {
         ids: &HashMap<String, TensorId>,
         state: &HashMap<String, Tensor<R>>,
     ) -> Result<()>;
+}
+
+/// The error of a `step_partial` call with no step begun.
+pub(crate) fn step_not_begun(optimizer: &str) -> Error {
+    Error::TrainingError {
+        reason: format!(
+            "{optimizer}::step_partial: no step has begun; call begin_step once per step before step_partial"
+        ),
+    }
 }

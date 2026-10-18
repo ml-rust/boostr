@@ -93,6 +93,7 @@ impl<R: Runtime<DType = DType>> FusedDistributedOptimizer<R> {
     ///
     /// All-reduces gradients across ranks and applies AdamW in a pipelined fashion.
     /// Parameters without gradients are skipped entirely.
+    /// The AdamW timestep advances by one per call, whatever the bucket count.
     pub fn step<C>(
         &mut self,
         client: &C,
@@ -108,6 +109,9 @@ impl<R: Runtime<DType = DType>> FusedDistributedOptimizer<R> {
         if world_size <= 1 {
             return self.optimizer.step(client, params, grads);
         }
+
+        // One step for every bucket: the timestep and the bias corrections advance once.
+        self.optimizer.begin_step();
 
         // Collect param IDs that have gradients
         let param_ids_with_grads: Vec<TensorId> = params
@@ -142,7 +146,8 @@ impl<R: Runtime<DType = DType>> FusedDistributedOptimizer<R> {
 
             // Apply optimizer to previous bucket
             let prev_grad_store = self.extract_bucket_grads(&buckets[i - 1], grads);
-            self.optimizer.step(client, params, &prev_grad_store)?;
+            self.optimizer
+                .step_partial(client, params, &prev_grad_store)?;
 
             // Kick off all-reduce for current bucket
             self.all_reduce_bucket(&buckets[i], grads)?;
@@ -157,7 +162,8 @@ impl<R: Runtime<DType = DType>> FusedDistributedOptimizer<R> {
         self.average_bucket(client, &buckets[last], grads, world_size)?;
 
         let last_grad_store = self.extract_bucket_grads(&buckets[last], grads);
-        self.optimizer.step(client, params, &last_grad_store)?;
+        self.optimizer
+            .step_partial(client, params, &last_grad_store)?;
 
         Ok(())
     }
@@ -252,9 +258,12 @@ impl<R: Runtime<DType = DType>> FusedDistributedOptimizer<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::optimizer::state_dict::test_support::{
+        Params, assert_same_params, assert_same_state, assert_step_is, deep,
+    };
     use crate::test_utils::cpu_setup;
     use numr::runtime::NoOpCommunicator;
-    use numr::runtime::cpu::CpuRuntime;
+    use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 
     #[test]
     fn test_fused_optimizer_state_round_trip() {
@@ -321,7 +330,7 @@ mod tests {
         let mut grads = GradStore::new();
 
         opt.step(&client, &mut params, &mut grads).unwrap();
-        // AdamW increments timestep even with no matching grads
+        // One call is one step, with or without gradients.
         assert_eq!(opt.timestep(), 1);
     }
 
@@ -358,5 +367,240 @@ mod tests {
             FusedDistributedOptimizer::<CpuRuntime>::new(FusedOptimizerConfig::default(), comm);
         opt.set_lr(0.01);
         assert_eq!(opt.optimizer.config().lr, 0.01);
+    }
+
+    /// Two ranks whose collectives leave every buffer unchanged.
+    ///
+    /// The all-reduce sum is the local gradient, so the averaged gradient is half of it.
+    struct EchoTwoRanks;
+
+    impl Communicator for EchoTwoRanks {
+        fn world_size(&self) -> usize {
+            2
+        }
+
+        fn rank(&self) -> usize {
+            0
+        }
+
+        unsafe fn all_reduce(
+            &self,
+            _ptr: u64,
+            _count: usize,
+            _dtype: DType,
+            _op: ReduceOp,
+        ) -> numr::error::Result<()> {
+            Ok(())
+        }
+
+        unsafe fn broadcast(
+            &self,
+            _ptr: u64,
+            _count: usize,
+            _dtype: DType,
+            _root: usize,
+        ) -> numr::error::Result<()> {
+            Ok(())
+        }
+
+        unsafe fn all_gather(
+            &self,
+            _send_ptr: u64,
+            _recv_ptr: u64,
+            _count: usize,
+            _dtype: DType,
+        ) -> numr::error::Result<()> {
+            Ok(())
+        }
+
+        unsafe fn reduce_scatter(
+            &self,
+            _send_ptr: u64,
+            _recv_ptr: u64,
+            _count: usize,
+            _dtype: DType,
+            _op: ReduceOp,
+        ) -> numr::error::Result<()> {
+            Ok(())
+        }
+
+        unsafe fn send(
+            &self,
+            _ptr: u64,
+            _count: usize,
+            _dtype: DType,
+            _dest: usize,
+            _tag: u32,
+        ) -> numr::error::Result<()> {
+            Ok(())
+        }
+
+        unsafe fn recv(
+            &self,
+            _ptr: u64,
+            _count: usize,
+            _dtype: DType,
+            _src: usize,
+            _tag: u32,
+        ) -> numr::error::Result<()> {
+            Ok(())
+        }
+
+        fn sync(&self) -> numr::error::Result<()> {
+            Ok(())
+        }
+
+        fn barrier(&self) -> numr::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// One 4-element F32 gradient fills one bucket.
+    const BUCKET_BYTES: usize = 16;
+
+    fn bucketed() -> FusedDistributedOptimizer<CpuRuntime> {
+        let config = FusedOptimizerConfig {
+            bucket_size_bytes: BUCKET_BYTES,
+            ..Default::default()
+        };
+        FusedDistributedOptimizer::new(config, Arc::new(EchoTwoRanks))
+    }
+
+    /// Three 4-element parameters and their names `p0`, `p1`, `p2`.
+    fn three_params(device: &CpuDevice) -> (Vec<TensorId>, Params) {
+        let mut ids = Vec::new();
+        let mut params = HashMap::new();
+        for p in 0..3 {
+            let values: Vec<f32> = (0..4).map(|i| 0.25 * (p * 4 + i) as f32 - 1.0).collect();
+            let t = Tensor::<CpuRuntime>::from_slice(&values, &[4], device).unwrap();
+            ids.push(t.id());
+            params.insert(t.id(), t);
+        }
+        (ids, params)
+    }
+
+    fn names(ids: &[TensorId]) -> HashMap<TensorId, String> {
+        ids.iter()
+            .enumerate()
+            .map(|(i, id)| (*id, format!("p{i}")))
+            .collect()
+    }
+
+    fn grads_at(ids: &[TensorId], step: usize, device: &CpuDevice) -> GradStore<CpuRuntime> {
+        let mut grads = GradStore::new();
+        for (p, id) in ids.iter().enumerate() {
+            let values: Vec<f32> = (0..4)
+                .map(|i| ((step * 13 + p * 4 + i) as f32).sin() * 0.1)
+                .collect();
+            grads.insert(
+                *id,
+                Tensor::<CpuRuntime>::from_slice(&values, &[4], device).unwrap(),
+            );
+        }
+        grads
+    }
+
+    /// The gradients the bucketed path averages to: each one times `1 / world_size`.
+    fn halved(
+        client: &CpuClient,
+        ids: &[TensorId],
+        grads: &GradStore<CpuRuntime>,
+    ) -> GradStore<CpuRuntime> {
+        let mut out = GradStore::new();
+        for id in ids {
+            out.insert(
+                *id,
+                client.mul_scalar(grads.get(*id).unwrap(), 0.5).unwrap(),
+            );
+        }
+        out
+    }
+
+    fn run_bucketed(
+        opt: &mut FusedDistributedOptimizer<CpuRuntime>,
+        client: &CpuClient,
+        device: &CpuDevice,
+        ids: &[TensorId],
+        params: &mut Params,
+        steps: std::ops::Range<usize>,
+    ) {
+        for step in steps {
+            let mut grads = grads_at(ids, step, device);
+            opt.step(client, params, &mut grads).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_bucketed_steps_match_whole_adamw_steps() {
+        let (client, device) = cpu_setup();
+        let (ids, init) = three_params(&device);
+        let names = names(&ids);
+        let mut fused = bucketed();
+        let mut reference = AdamW::<CpuRuntime>::new(FusedOptimizerConfig::default().adamw);
+        let mut fused_params = deep(&init);
+        let mut reference_params = deep(&init);
+
+        for step in 0..3 {
+            let mut grads = grads_at(&ids, step, &device);
+            assert_eq!(fused.build_buckets(&ids, &grads).len(), 3);
+            let averaged = halved(&client, &ids, &grads);
+            fused.step(&client, &mut fused_params, &mut grads).unwrap();
+            reference
+                .step(&client, &mut reference_params, &averaged)
+                .unwrap();
+        }
+
+        // Three buckets per step must not advance the timestep three times.
+        assert_eq!(fused.timestep(), 3);
+        assert_same_params(&fused_params, &reference_params);
+        assert_same_state(
+            &fused.state_dict(&names).unwrap(),
+            &reference.state_dict(&names).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_bucketed_resume_matches_uninterrupted_run() {
+        let (client, device) = cpu_setup();
+        let (ids, init) = three_params(&device);
+        let names = names(&ids);
+        let by_name: HashMap<String, TensorId> =
+            names.iter().map(|(id, name)| (name.clone(), *id)).collect();
+
+        let mut opt = bucketed();
+        let mut params = deep(&init);
+        run_bucketed(&mut opt, &client, &device, &ids, &mut params, 0..2);
+        let state = opt.state_dict(&names).unwrap();
+        assert_step_is(&state, 2.0);
+        let mut resumed_params = deep(&params);
+        run_bucketed(&mut opt, &client, &device, &ids, &mut params, 2..4);
+
+        let mut resumed = bucketed();
+        resumed.load_state_dict(&by_name, &state).unwrap();
+        run_bucketed(
+            &mut resumed,
+            &client,
+            &device,
+            &ids,
+            &mut resumed_params,
+            2..4,
+        );
+
+        assert_eq!(resumed.timestep(), 4);
+        assert_same_params(&params, &resumed_params);
+        assert_same_state(
+            &opt.state_dict(&names).unwrap(),
+            &resumed.state_dict(&names).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_bucketed_step_without_grads_advances_timestep_once() {
+        let (client, _device) = cpu_setup();
+        let mut opt = bucketed();
+        let mut params = HashMap::new();
+        let mut grads = GradStore::new();
+        opt.step(&client, &mut params, &mut grads).unwrap();
+        assert_eq!(opt.timestep(), 1);
     }
 }

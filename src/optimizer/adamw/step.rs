@@ -3,10 +3,11 @@
 //! The per-parameter update math (multi-tensor fast path and the widened,
 //! master-copy path) lives in `super::apply`.
 
+use super::groups::StepRates;
 use super::types::AdamW;
 use crate::error::Result;
 use crate::ops::FusedOptimizerOps;
-use crate::optimizer::traits::Optimizer;
+use crate::optimizer::traits::{Optimizer, step_not_begun};
 use numr::autograd::GradStore;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ReduceOps, ScalarOps, TypeConversionOps, UnaryOps};
@@ -19,6 +20,7 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
     ///
     /// Updates all parameters in `params` using gradients from `grads`.
     /// Parameters without gradients are skipped.
+    /// It is [`Self::begin_step`] plus one [`Self::step_partial`] over all of `params`.
     ///
     /// Parameters narrower than F32 (BF16/F16/FP8) are updated through an F32
     /// master copy held in optimizer state; the caller's map receives a cast of
@@ -45,19 +47,72 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
             + TypeConversionOps<R>
             + FusedOptimizerOps<R>,
     {
-        self.timestep += 1;
-        let t = self.timestep;
+        self.begin_step();
+        self.step_partial(client, params, grads)
+    }
 
+    /// Start one step: increment the timestep and fix the rates of every group.
+    ///
+    /// The rates use `config.lr`, the group scales and the bias corrections at the new timestep.
+    /// A `set_lr` or group change after this call applies from the next step.
+    pub fn begin_step(&mut self) {
+        self.timestep += 1;
+        let t = self.timestep as i32;
+        let bc1 = 1.0 - self.config.beta1.powi(t);
+        let bc2 = 1.0 - self.config.beta2.powi(t);
+        // Per group: lr, weight decay and lr * sqrt(1 - beta2^t) / (1 - beta1^t)
+        self.rates = Some(self.step_rates(bc1, bc2));
+    }
+
+    /// Update the parameters of `params` that have a gradient, within the current step.
+    ///
+    /// The timestep stays unchanged. With each parameter in exactly one call,
+    /// the calls of one step give the same bits as one [`Self::step`].
+    ///
+    /// # Errors
+    /// Returns an error when no step has begun since `new`, `reset` or `load_state_dict`.
+    #[allow(clippy::type_complexity)]
+    pub fn step_partial<C>(
+        &mut self,
+        client: &C,
+        params: &mut HashMap<TensorId, Tensor<R>>,
+        grads: &GradStore<R>,
+    ) -> Result<()>
+    where
+        C: RuntimeClient<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + TypeConversionOps<R>
+            + FusedOptimizerOps<R>,
+    {
+        // `take` frees `self` for the `&mut self` update calls. The rates go back on every path.
+        let rates = self.rates.take().ok_or_else(|| step_not_begun("AdamW"))?;
+        let result = self.apply_step(client, params, grads, &rates);
+        self.rates = Some(rates);
+        result
+    }
+
+    fn apply_step<C>(
+        &mut self,
+        client: &C,
+        params: &mut HashMap<TensorId, Tensor<R>>,
+        grads: &GradStore<R>,
+        rates: &StepRates,
+    ) -> Result<()>
+    where
+        C: RuntimeClient<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + TypeConversionOps<R>
+            + FusedOptimizerOps<R>,
+    {
         let beta1 = self.config.beta1;
         let beta2 = self.config.beta2;
         let eps = self.config.eps;
-
-        // Bias correction factors
-        let bc1 = 1.0 - beta1.powi(t as i32);
-        let bc2 = 1.0 - beta2.powi(t as i32);
-
-        // Per bucket: lr, weight decay and lr * sqrt(1 - beta2^t) / (1 - beta1^t)
-        let rates = self.step_rates(bc1, bc2);
 
         // Collect params that have gradients, lazily initializing state (and
         // the F32 master copy for narrow-dtype params), and split them:
@@ -70,8 +125,8 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
         //   would hold an F32 copy of EVERY gradient at once.
         let (direct, widened) = self.collect_and_init_state(client, params, grads)?;
 
-        self.apply_direct(client, params, grads, &direct, beta1, beta2, eps, &rates)?;
-        self.apply_widened(client, params, grads, widened, beta1, beta2, eps, &rates)?;
+        self.apply_direct(client, params, grads, &direct, beta1, beta2, eps, rates)?;
+        self.apply_widened(client, params, grads, widened, beta1, beta2, eps, rates)?;
 
         Ok(())
     }
@@ -94,6 +149,28 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for AdamW<R> {
             + FusedOptimizerOps<R>,
     {
         AdamW::step(self, client, params, grads)
+    }
+
+    fn begin_step(&mut self) {
+        AdamW::begin_step(self);
+    }
+
+    fn step_partial<C>(
+        &mut self,
+        client: &C,
+        params: &mut HashMap<TensorId, Tensor<R>>,
+        grads: &GradStore<R>,
+    ) -> Result<()>
+    where
+        C: RuntimeClient<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + TypeConversionOps<R>
+            + FusedOptimizerOps<R>,
+    {
+        AdamW::step_partial(self, client, params, grads)
     }
 
     fn set_lr(&mut self, lr: f64) {
@@ -125,6 +202,10 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for AdamW<R> {
 mod tests {
     use super::super::types::AdamWConfig;
     use super::*;
+    use crate::optimizer::adamw::ParamGroup;
+    use crate::optimizer::state_dict::test_support::{
+        Fixture, assert_partial_matches_step, assert_partial_needs_begin,
+    };
     use crate::test_utils::cpu_setup;
     use numr::autograd::{Var, backward};
     use numr::autograd::{var_matmul, var_mean};
@@ -291,5 +372,52 @@ mod tests {
         // Param should be unchanged (no grad = no update)
         let updated = params.get(&w_id).unwrap().to_vec::<f32>();
         assert_eq!(updated, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_adamw_partial_steps_match_whole_step_bits() {
+        let make = |_: &Fixture| AdamW::<CpuRuntime>::new(AdamWConfig::default());
+        assert_partial_matches_step(make, false);
+        assert_partial_matches_step(make, true);
+    }
+
+    #[test]
+    fn test_adamw_partial_steps_match_whole_step_with_groups() {
+        let make = |fx: &Fixture| {
+            let group = ParamGroup {
+                ids: [fx.ids["layer.w"]].into_iter().collect(),
+                lr_scale: 0.5,
+                weight_decay: Some(0.0),
+            };
+            AdamW::<CpuRuntime>::with_param_groups(AdamWConfig::default(), vec![group]).unwrap()
+        };
+        assert_partial_matches_step(make, false);
+    }
+
+    #[test]
+    fn test_adamw_partial_steps_advance_timestep_once() {
+        let (client, device) = cpu_setup();
+        let a = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+        let b = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device).unwrap();
+        let (ia, ib) = (a.id(), b.id());
+        let mut params = HashMap::from([(ia, a), (ib, b)]);
+        let mut opt = AdamW::<CpuRuntime>::new(AdamWConfig::default());
+        for _ in 0..2 {
+            opt.begin_step();
+            for id in [ia, ib] {
+                let mut grads = GradStore::new();
+                grads.insert(
+                    id,
+                    Tensor::<CpuRuntime>::from_slice(&[0.1f32, -0.2], &[2], &device).unwrap(),
+                );
+                opt.step_partial(&client, &mut params, &grads).unwrap();
+            }
+        }
+        assert_eq!(opt.timestep(), 2);
+    }
+
+    #[test]
+    fn test_adamw_partial_step_needs_begin() {
+        assert_partial_needs_begin(|| AdamW::<CpuRuntime>::new(AdamWConfig::default()));
     }
 }

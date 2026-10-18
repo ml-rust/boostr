@@ -54,6 +54,7 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
         }
         self.state = loaded;
         self.timestep = timestep;
+        self.rates = None;
         Ok(())
     }
 }

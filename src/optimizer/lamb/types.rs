@@ -87,6 +87,16 @@ pub struct Lamb<R: Runtime> {
     pub(super) config: LambConfig,
     pub(super) state: HashMap<TensorId, LambState<R>>,
     pub(super) timestep: u64,
+    /// Rates of the step that `begin_step` started. `None` before the first step.
+    pub(super) rates: Option<LambRates>,
+}
+
+/// Learning rate and bias corrections of one step.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct LambRates {
+    pub(super) lr: f64,
+    pub(super) bc1: f64,
+    pub(super) bc2: f64,
 }
 
 impl<R: Runtime<DType = DType>> Lamb<R> {
@@ -95,6 +105,7 @@ impl<R: Runtime<DType = DType>> Lamb<R> {
             config,
             state: HashMap::new(),
             timestep: 0,
+            rates: None,
         }
     }
 

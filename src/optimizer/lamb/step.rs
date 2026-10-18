@@ -3,10 +3,10 @@
 //! The per-parameter update math (the trust-ratio loop and its L2 norm)
 //! lives in `super::apply`.
 
-use super::types::Lamb;
+use super::types::{Lamb, LambRates};
 use crate::error::Result;
 use crate::ops::FusedOptimizerOps;
-use crate::optimizer::traits::Optimizer;
+use crate::optimizer::traits::{Optimizer, step_not_begun};
 use numr::autograd::GradStore;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ReduceOps, ScalarOps, TypeConversionOps, UnaryOps};
@@ -30,25 +30,50 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for Lamb<R> {
             + TypeConversionOps<R>
             + FusedOptimizerOps<R>,
     {
-        self.timestep += 1;
-        let t = self.timestep;
-        let beta1 = self.config.beta1;
-        let beta2 = self.config.beta2;
-        let lr = self.config.lr;
-        let eps = self.config.eps;
-        let wd = self.config.weight_decay;
+        self.begin_step();
+        self.step_partial(client, params, grads)
+    }
 
-        let bc1 = 1.0 - beta1.powi(t as i32);
+    fn begin_step(&mut self) {
+        self.timestep += 1;
+        let t = self.timestep as i32;
+        let bc1 = 1.0 - self.config.beta1.powi(t);
         let bc2 = if self.config.use_adam {
-            1.0 - beta2.powi(t as i32)
+            1.0 - self.config.beta2.powi(t)
         } else {
             1.0
         };
+        self.rates = Some(LambRates {
+            lr: self.config.lr,
+            bc1,
+            bc2,
+        });
+    }
 
+    fn step_partial<C>(
+        &mut self,
+        client: &C,
+        params: &mut HashMap<TensorId, Tensor<R>>,
+        grads: &GradStore<R>,
+    ) -> Result<()>
+    where
+        C: RuntimeClient<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + TypeConversionOps<R>
+            + FusedOptimizerOps<R>,
+    {
+        let rates = self.rates.ok_or_else(|| step_not_begun("Lamb"))?;
+        let beta1 = self.config.beta1;
+        let beta2 = self.config.beta2;
+        let eps = self.config.eps;
+        let wd = self.config.weight_decay;
         let param_ids: Vec<TensorId> = params.keys().copied().collect();
 
         self.apply_updates(
-            client, params, grads, param_ids, beta1, beta2, lr, eps, wd, bc1, bc2,
+            client, params, grads, param_ids, beta1, beta2, rates.lr, eps, wd, rates.bc1, rates.bc2,
         )
     }
 
@@ -63,6 +88,7 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for Lamb<R> {
     fn reset(&mut self) {
         self.state.clear();
         self.timestep = 0;
+        self.rates = None;
     }
 
     fn state_dict(&self, names: &HashMap<TensorId, String>) -> Result<HashMap<String, Tensor<R>>> {
@@ -82,6 +108,9 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for Lamb<R> {
 mod tests {
     use super::super::types::LambConfig;
     use super::*;
+    use crate::optimizer::state_dict::test_support::{
+        Fixture, assert_partial_matches_step, assert_partial_needs_begin,
+    };
     use crate::test_utils::cpu_setup;
     use numr::autograd::{Var, backward, var_mean, var_mul, var_sub};
     use numr::runtime::cpu::CpuRuntime;
@@ -233,5 +262,19 @@ mod tests {
 
         let updated = params.get(&w_id).unwrap().to_vec::<f32>();
         assert_eq!(updated, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_lamb_partial_steps_match_whole_step_bits() {
+        let lamb = |_: &Fixture| Lamb::<CpuRuntime>::new(LambConfig::default());
+        assert_partial_matches_step(lamb, false);
+        assert_partial_matches_step(lamb, true);
+        let lars = |_: &Fixture| Lamb::<CpuRuntime>::new(LambConfig::lars());
+        assert_partial_matches_step(lars, false);
+    }
+
+    #[test]
+    fn test_lamb_partial_step_needs_begin() {
+        assert_partial_needs_begin(|| Lamb::<CpuRuntime>::new(LambConfig::default()));
     }
 }

@@ -71,6 +71,7 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for Sgd<R> {
 mod tests {
     use super::super::types::SgdConfig;
     use super::*;
+    use crate::optimizer::state_dict::test_support::{Fixture, assert_partial_matches_step};
     use crate::test_utils::cpu_setup;
     use numr::autograd::{Var, backward, var_mean, var_mul, var_sub};
     use numr::runtime::cpu::CpuRuntime;
@@ -253,5 +254,17 @@ mod tests {
 
         let updated = params.get(&w_id).unwrap().to_vec::<f32>();
         assert_eq!(updated, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_sgd_partial_steps_match_whole_step_bits() {
+        let make = |_: &Fixture| {
+            Sgd::<CpuRuntime>::new(SgdConfig {
+                momentum: 0.9,
+                ..Default::default()
+            })
+        };
+        assert_partial_matches_step(make, false);
+        assert_partial_matches_step(make, true);
     }
 }

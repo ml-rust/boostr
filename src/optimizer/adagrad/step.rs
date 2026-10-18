@@ -114,6 +114,7 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for AdaGrad<R> {
 mod tests {
     use super::super::types::AdaGradConfig;
     use super::*;
+    use crate::optimizer::state_dict::test_support::{Fixture, assert_partial_matches_step};
     use crate::test_utils::cpu_setup;
     use numr::autograd::{Var, backward, var_mean, var_mul, var_sub};
     use numr::runtime::cpu::CpuRuntime;
@@ -451,5 +452,12 @@ mod tests {
             "an F32 parameter must not get a master copy"
         );
         assert_eq!(state.acc.dtype(), DType::F32);
+    }
+
+    #[test]
+    fn test_adagrad_partial_steps_match_whole_step_bits() {
+        let make = |_: &Fixture| AdaGrad::<CpuRuntime>::new(AdaGradConfig::default());
+        assert_partial_matches_step(make, false);
+        assert_partial_matches_step(make, true);
     }
 }

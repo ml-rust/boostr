@@ -1,7 +1,7 @@
 //! `AdamWConfig`, per-parameter state, and the `AdamW` struct's bookkeeping
 //! methods. The `step` algorithm itself lives in `super::step`.
 
-use super::groups::ParamGroup;
+use super::groups::{ParamGroup, StepRates};
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::{Tensor, TensorId};
@@ -68,6 +68,8 @@ pub struct AdamW<R: Runtime> {
     pub(super) groups: Vec<ParamGroup>,
     /// Index into `groups` for every id that is in a group.
     pub(super) group_of: HashMap<TensorId, usize>,
+    /// Rates of the step that `begin_step` started. `None` before the first step.
+    pub(super) rates: Option<StepRates>,
 }
 
 impl<R: Runtime<DType = DType>> AdamW<R> {
@@ -78,6 +80,7 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
             timestep: 0,
             groups: Vec::new(),
             group_of: HashMap::new(),
+            rates: None,
         }
     }
 
@@ -107,6 +110,7 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
     pub fn reset(&mut self) {
         self.state.clear();
         self.timestep = 0;
+        self.rates = None;
     }
 
     pub fn set_lr(&mut self, lr: f64) {

@@ -1,6 +1,10 @@
 //! A tiny synthetic `qwen35` hybrid model on any runtime, built from the
-//! public constructors. Deterministic weights from a seed; every linear
-//! carries a Hadamard rotation, layers that share an input share one.
+//! public constructors. Deterministic weights from a seed.
+//!
+//! - [`tiny_model`]: every linear carries a Hadamard rotation, and layers
+//!   that share an input share one.
+//! - [`tiny_lora_model`]: the same draws without rotations, with trainable
+//!   LoRA factors on a frozen base, so `forward_train` accepts it.
 //!
 //! Head dim is 32, the smallest the CUDA graph decode kernel accepts, so
 //! the same model serves eager and graph-mode tests.
@@ -8,16 +12,22 @@
 use std::collections::HashMap;
 
 use boostr::model::config::{GdnConfig, HybridConfig, Qwen35AttentionConfig, UniversalConfig};
-use boostr::model::hybrid::{GdnBlock, GdnWeights, Qwen35AttentionBlock, Qwen35AttentionWeights};
+use boostr::model::hybrid::{
+    GdnBlock, GdnProjection, GdnWeights, Qwen35AttentionBlock, Qwen35AttentionProjection,
+    Qwen35AttentionWeights,
+};
 use boostr::model::qwen35::{Qwen35AttentionLayer, Qwen35Block, Qwen35GdnLayer, Qwen35Model};
 use boostr::nn::{
-    Embedding, HadamardRotation, Linear, MaybeQuantEmbedding, MaybeQuantLinear,
-    MaybeRotatedEmbedding, MaybeRotatedLinear, RmsNorm, RotatedLinear, RotatedMlp,
+    Embedding, HadamardRotation, Linear, LoraFactors, MaybeQuantEmbedding, MaybeQuantLinear,
+    MaybeRotatedEmbedding, MaybeRotatedLinear, MlpProjection, RmsNorm, RotatedLinear, RotatedMlp,
 };
 use numr::dtype::DType;
-use numr::ops::ShapeOps;
+use numr::ops::{ShapeOps, TypeConversionOps};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
+
+/// LoRA rank of [`tiny_lora_model`].
+pub const LORA_RANK: usize = 2;
 
 pub const HIDDEN: usize = 8;
 pub const VOCAB: usize = 16;
@@ -109,6 +119,8 @@ pub fn tiny_config() -> UniversalConfig {
 struct Builder<'a, R: Runtime<DType = DType>> {
     device: &'a R::Device,
     rng: Lcg,
+    /// `false` builds every linear plain. The weight draws stay the same.
+    rotated: bool,
     rotations: HashMap<usize, HadamardRotation<R>>,
 }
 
@@ -136,6 +148,9 @@ where
 
     fn linear(&mut self, out: usize, inp: usize) -> MaybeRotatedLinear<R> {
         let base = self.plain(out, inp);
+        if !self.rotated {
+            return MaybeRotatedLinear::Plain(base);
+        }
         let rotation = self.rotation(inp);
         MaybeRotatedLinear::Rotated(Box::new(RotatedLinear::new(base, rotation).unwrap()))
     }
@@ -192,6 +207,77 @@ pub fn tiny_model<R: Runtime<DType = DType>>(device: &R::Device, seed: u64) -> Q
 where
     R::Client: ShapeOps<R>,
 {
+    assemble(device, seed, true, |_| {})
+}
+
+/// [`tiny_model`]'s weight draws with plain linears, every base frozen,
+/// and trainable F32 LoRA factors drawn from `lora_seed`.
+///
+/// Adapters sit on each GDN `ssm_out`, each attention `attn_k` and
+/// `attn_output`, and each `mlp.down`. Every `lora_b` is non-zero, so every
+/// factor gets a non-zero gradient on the first backward.
+pub fn tiny_lora_model<R: Runtime<DType = DType>>(
+    client: &R::Client,
+    device: &R::Device,
+    seed: u64,
+    lora_seed: u64,
+) -> Qwen35Model<R>
+where
+    R::Client: ShapeOps<R> + TypeConversionOps<R>,
+{
+    let mut rng = Lcg(lora_seed);
+    let mut factors = |out: usize, inp: usize| LoraFactors {
+        lora_a: rng.tensor::<R>(device, &[LORA_RANK, inp], 0.3),
+        lora_b: rng.tensor::<R>(device, &[out, LORA_RANK], 0.3),
+        scaling: 0.5,
+    };
+    assemble(device, seed, false, |block| {
+        let dt = DType::F32;
+        let mlp = match block {
+            Qwen35Block::Gdn(layer) => {
+                let f = factors(HIDDEN, layer.mixer.config().value_dim());
+                layer
+                    .mixer
+                    .attach_adapter_trainable(client, GdnProjection::SsmOut, f, dt, true)
+                    .unwrap();
+                &mut layer.mlp
+            }
+            Qwen35Block::Attention(layer) => {
+                let cfg = tiny_config().qwen35_attention.unwrap();
+                let k = factors(cfg.kv_dim(), HIDDEN);
+                let o = factors(HIDDEN, cfg.q_dim());
+                let mixer = &mut layer.mixer;
+                mixer
+                    .attach_adapter_trainable(client, Qwen35AttentionProjection::K, k, dt, true)
+                    .unwrap();
+                mixer
+                    .attach_adapter_trainable(
+                        client,
+                        Qwen35AttentionProjection::Output,
+                        o,
+                        dt,
+                        true,
+                    )
+                    .unwrap();
+                &mut layer.mlp
+            }
+        };
+        let down = factors(HIDDEN, INTER);
+        mlp.attach_adapter_trainable(client, MlpProjection::Down, down, dt, true)
+            .unwrap();
+    })
+}
+
+/// Draw every weight from `seed`, run `adapt` on each block, and assemble.
+fn assemble<R: Runtime<DType = DType>>(
+    device: &R::Device,
+    seed: u64,
+    rotated: bool,
+    mut adapt: impl FnMut(&mut Qwen35Block<R>),
+) -> Qwen35Model<R>
+where
+    R::Client: ShapeOps<R>,
+{
     let config = tiny_config();
     let gdn_cfg = config.gdn.clone().unwrap();
     let attn_cfg = config.qwen35_attention.clone().unwrap();
@@ -199,6 +285,7 @@ where
     let mut b = Builder::<R> {
         device,
         rng: Lcg(seed),
+        rotated,
         rotations: HashMap::new(),
     };
     let table = b.rng.tensor::<R>(device, &[VOCAB, HIDDEN], 1.0);
@@ -223,6 +310,9 @@ where
                 post_attention_norm,
                 mlp,
             })));
+        }
+        if let Some(block) = blocks.last_mut() {
+            adapt(block);
         }
     }
     let norm = b.norm();

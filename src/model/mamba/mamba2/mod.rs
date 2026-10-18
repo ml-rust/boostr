@@ -1,3 +1,4 @@
+mod alias;
 pub mod config;
 pub mod conv;
 pub mod forward;

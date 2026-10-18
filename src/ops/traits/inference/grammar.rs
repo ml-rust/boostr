@@ -19,7 +19,13 @@ pub trait GrammarDfaOps<R: Runtime> {
     /// - A non-EOS token with zero bytes is never allowed.
     ///
     /// Allowed logits keep their value. The input tensor stays unchanged.
-    /// Logits that are not F32, not contiguous, or shorter than the vocabulary are an error.
+    /// The result has the dtype of `logits`. Masked entries are -inf in that dtype.
+    ///
+    /// `logits` can be F32, F16 or BF16. F16 and BF16 need the `f16` feature.
+    /// F16 and BF16 cast to F32 on the device, take the F32 kernel, and cast back.
+    /// The round trip is exact, so allowed values keep their bits.
+    /// WebGPU holds F32 only, so F16 and BF16 are an error there.
+    /// Any other dtype, non-contiguous logits, or logits shorter than the vocabulary are an error.
     ///
     /// One thread per vocabulary token. Each walks its token's bytes in the table.
     fn grammar_dfa_mask_logits(

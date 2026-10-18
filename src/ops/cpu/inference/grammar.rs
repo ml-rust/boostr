@@ -1,10 +1,10 @@
 //! CPU implementation of GrammarDfaOps.
 //!
 //! Each vocabulary token walks the DFA from the current state over its bytes.
-//! The rules match the CUDA and WebGPU kernels.
+//! The rules match the CUDA and WebGPU kernels. F16 and BF16 logits cast through F32.
 
 use crate::error::Result;
-use crate::inference::grammar::device::check_logits;
+use crate::ops::impl_generic::inference::{HalfLogits, grammar_mask_any_float_impl};
 use crate::ops::traits::inference::grammar::{DeviceGrammarDfa, GrammarDfaOps};
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;
@@ -15,21 +15,34 @@ impl GrammarDfaOps<CpuRuntime> for CpuClient {
         logits: &Tensor<CpuRuntime>,
         grammar: &DeviceGrammarDfa<CpuRuntime>,
     ) -> Result<Tensor<CpuRuntime>> {
-        let vocab_size = grammar.vocab_size();
-        check_logits(logits, vocab_size)?;
-        let mut data: Vec<f32> = logits.try_to_vec()?;
-        let start = data.len().saturating_sub(vocab_size);
-        let view = DfaView::new(grammar);
-        let state = grammar.current_state();
-        if let Some(row) = data.get_mut(start..) {
-            for (token, logit) in row.iter_mut().enumerate() {
-                if !view.allows(state, token) {
-                    *logit = f32::NEG_INFINITY;
-                }
+        grammar_mask_any_float_impl(
+            self,
+            logits,
+            grammar.vocab_size(),
+            HalfLogits::Cast,
+            |wide| mask_f32(wide, grammar),
+        )
+    }
+}
+
+/// Mask F32 `logits` into a new tensor.
+fn mask_f32(
+    logits: &Tensor<CpuRuntime>,
+    grammar: &DeviceGrammarDfa<CpuRuntime>,
+) -> Result<Tensor<CpuRuntime>> {
+    let vocab_size = grammar.vocab_size();
+    let mut data: Vec<f32> = logits.try_to_vec()?;
+    let start = data.len().saturating_sub(vocab_size);
+    let view = DfaView::new(grammar);
+    let state = grammar.current_state();
+    if let Some(row) = data.get_mut(start..) {
+        for (token, logit) in row.iter_mut().enumerate() {
+            if !view.allows(state, token) {
+                *logit = f32::NEG_INFINITY;
             }
         }
-        Ok(Tensor::from_slice(&data, logits.shape(), logits.device())?)
     }
+    Ok(Tensor::from_slice(&data, logits.shape(), logits.device())?)
 }
 
 /// Host views of the grammar tables. Every value is an F32 integer.
@@ -291,6 +304,118 @@ mod tests {
         assert_eq!(&out[..3], &data[..3]);
         assert_eq!(out[3], f32::NEG_INFINITY);
         assert_eq!(t.to_vec::<f32>(), data);
+    }
+
+    /// Logits that probe the half formats: zeros, subnormals, extremes and an inexact F32.
+    #[cfg(feature = "f16")]
+    const HALF_PROBES: [f32; 12] = [
+        0.0, -0.0, 1.0e-7, -3.0e-6, 0.1, -0.3, 1.5, 100.25, 6.0e4, -6.0e4, 7.0, -1.0e-3,
+    ];
+
+    /// Check a half-precision mask against the F32 mask of the same rounded values.
+    ///
+    /// `build` makes the device tensor, and `read` returns its values as `(bits, f32)`.
+    #[cfg(feature = "f16")]
+    fn check_half(
+        dtype: numr::dtype::DType,
+        build: impl Fn(&[f32], &CpuDevice) -> Tensor<CpuRuntime>,
+        read: impl Fn(&Tensor<CpuRuntime>) -> Vec<(u16, f32)>,
+    ) {
+        let d = dfa("root ::= [12][34][56]");
+        let tokens: [&[u8]; 12] = [
+            b"1",
+            b"2",
+            b"3",
+            b"5",
+            b"13",
+            b"1356",
+            b"35",
+            &[0xFF],
+            b"",
+            b"1",
+            b"7",
+            b"246",
+        ];
+        let vocab = VocabBytes::new(tokens).unwrap();
+        let mut g = grammar(&d, &vocab, &[9]);
+        let device = CpuDevice::new();
+        let client = CpuClient::new(device.clone());
+        let input = build(&HALF_PROBES, &device);
+        let before = read(&input);
+        let wide: Vec<f32> = before.iter().map(|&(_, v)| v).collect();
+        for prefix in [&b""[..], b"1", b"13", b"135"] {
+            g.set_current_state(at(&d, prefix)).unwrap();
+            let out = client.grammar_dfa_mask_logits(&input, &g).unwrap();
+            assert_eq!(out.dtype(), dtype, "after {prefix:?}");
+            assert_eq!(out.shape(), input.shape());
+            let got = read(&out);
+            let f32_in = Tensor::<CpuRuntime>::from_slice(&wide, &[wide.len()], &device).unwrap();
+            let want: Vec<f32> = client
+                .grammar_dfa_mask_logits(&f32_in, &g)
+                .unwrap()
+                .to_vec();
+            for (i, ((bits, value), (orig, _))) in got.iter().zip(&before).enumerate() {
+                if want[i] == f32::NEG_INFINITY {
+                    assert_eq!(*value, f32::NEG_INFINITY, "token {i} after {prefix:?}");
+                } else {
+                    assert_eq!(bits, orig, "token {i} bits after {prefix:?}");
+                }
+            }
+            assert_eq!(read(&input), before, "the input stays unchanged");
+        }
+    }
+
+    #[cfg(feature = "f16")]
+    #[test]
+    fn f16_logits_keep_dtype_and_unmasked_bits() {
+        use half::f16;
+        check_half(
+            numr::dtype::DType::F16,
+            |v, device| {
+                let h: Vec<f16> = v.iter().map(|&x| f16::from_f32(x)).collect();
+                Tensor::from_slice(&h, &[h.len()], device).unwrap()
+            },
+            |t| {
+                t.to_vec::<f16>()
+                    .iter()
+                    .map(|x| (x.to_bits(), x.to_f32()))
+                    .collect()
+            },
+        );
+    }
+
+    #[cfg(feature = "f16")]
+    #[test]
+    fn bf16_logits_keep_dtype_and_unmasked_bits() {
+        use half::bf16;
+        check_half(
+            numr::dtype::DType::BF16,
+            |v, device| {
+                let h: Vec<bf16> = v.iter().map(|&x| bf16::from_f32(x)).collect();
+                Tensor::from_slice(&h, &[h.len()], device).unwrap()
+            },
+            |t| {
+                t.to_vec::<bf16>()
+                    .iter()
+                    .map(|x| (x.to_bits(), x.to_f32()))
+                    .collect()
+            },
+        );
+    }
+
+    #[test]
+    fn non_float_logits_are_an_error_that_names_the_dtype() {
+        let d = dfa("root ::= \"a\"");
+        let vocab = VocabBytes::new([&b"a"[..], b"b"]).unwrap();
+        let g = grammar(&d, &vocab, &[]);
+        let device = CpuDevice::new();
+        let client = CpuClient::new(device.clone());
+        let wide = Tensor::<CpuRuntime>::from_slice(&[0.0f64; 2], &[2], &device).unwrap();
+        let err = client.grammar_dfa_mask_logits(&wide, &g).unwrap_err();
+        assert!(err.to_string().contains("F64"), "{err}");
+        let ints = Tensor::<CpuRuntime>::from_slice(&[0i32; 2], &[2], &device).unwrap();
+        let err = client.grammar_dfa_mask_logits(&ints, &g).unwrap_err();
+        assert!(err.to_string().contains("I32"), "{err}");
     }
 
     /// Greedy decoding over logits that prefer EOS, then invalid tokens.

@@ -256,3 +256,152 @@ fn test_grammar_dfa_mask_parity() {
         });
     }
 }
+
+/// A half-precision logits dtype.
+#[cfg(feature = "f16")]
+#[derive(Clone, Copy, Debug)]
+enum Half {
+    F16,
+    Bf16,
+}
+
+#[cfg(feature = "f16")]
+impl Half {
+    const ALL: [Half; 2] = [Half::F16, Half::Bf16];
+
+    fn dtype(self) -> numr::dtype::DType {
+        match self {
+            Half::F16 => numr::dtype::DType::F16,
+            Half::Bf16 => numr::dtype::DType::BF16,
+        }
+    }
+
+    fn tensor<R: Runtime<DType = numr::dtype::DType>>(
+        self,
+        data: &[f32],
+        shape: &[usize],
+        device: &R::Device,
+    ) -> Tensor<R> {
+        match self {
+            Half::F16 => {
+                let h: Vec<half::f16> = data.iter().map(|&x| half::f16::from_f32(x)).collect();
+                Tensor::<R>::from_slice(&h, shape, device).unwrap()
+            }
+            Half::Bf16 => {
+                let h: Vec<half::bf16> = data.iter().map(|&x| half::bf16::from_f32(x)).collect();
+                Tensor::<R>::from_slice(&h, shape, device).unwrap()
+            }
+        }
+    }
+
+    fn bits<R: Runtime<DType = numr::dtype::DType>>(self, t: &Tensor<R>) -> Vec<u16> {
+        match self {
+            Half::F16 => t
+                .to_vec::<half::f16>()
+                .iter()
+                .map(|x| x.to_bits())
+                .collect(),
+            Half::Bf16 => t
+                .to_vec::<half::bf16>()
+                .iter()
+                .map(|x| x.to_bits())
+                .collect(),
+        }
+    }
+}
+
+/// The half-precision mask bits of `[2, vocab]` logits on one backend, per state.
+///
+/// Each mask keeps the input dtype, and the input logits stay unchanged.
+#[cfg(feature = "f16")]
+fn half_masks_on<R: Runtime<DType = numr::dtype::DType>>(
+    client: &R::Client,
+    device: &R::Device,
+    case: &Case,
+    half: Half,
+) -> Vec<Vec<u16>>
+where
+    R::Client: GrammarDfaOps<R>,
+{
+    let vocab_size = case.vocab.len();
+    let data = logits_data(2 * vocab_size);
+    let logits = half.tensor::<R>(&data, &[2, vocab_size], device);
+    let before = half.bits(&logits);
+    let mut grammar =
+        DeviceGrammarDfa::<R>::from_byte_dfa(&case.dfa, &case.vocab, &case.eos, device).unwrap();
+    let masks = case
+        .states
+        .iter()
+        .map(|&state| {
+            grammar.set_current_state(state).unwrap();
+            let out = client.grammar_dfa_mask_logits(&logits, &grammar).unwrap();
+            assert_eq!(out.dtype(), half.dtype(), "{} {half:?}", case.name);
+            half.bits(&out)
+        })
+        .collect();
+    assert_eq!(half.bits(&logits), before, "{}: input unchanged", case.name);
+    masks
+}
+
+#[cfg(feature = "f16")]
+#[test]
+fn test_grammar_dfa_mask_half_parity() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    for case in cases() {
+        let vocab_size = case.vocab.len();
+        let data = logits_data(2 * vocab_size);
+        for half in Half::ALL {
+            let cpu = half_masks_on::<CpuRuntime>(&cpu_client, &cpu_device, &case, half);
+            let input = half.tensor::<CpuRuntime>(&data, &[2, vocab_size], &cpu_device);
+            let input_bits = half.bits(&input);
+            let infinity = half.tensor::<CpuRuntime>(&[f32::NEG_INFINITY], &[1], &cpu_device);
+            let neg_inf = half.bits(&infinity)[0];
+            for (mask, &state) in cpu.iter().zip(&case.states) {
+                let row = &mask[vocab_size..];
+                let allowed: Vec<usize> = (0..vocab_size).filter(|&i| row[i] != neg_inf).collect();
+                let want = expected(&case, state);
+                assert_eq!(allowed, want, "{} {half:?} from state {state}", case.name);
+                for i in 0..vocab_size {
+                    if want.contains(&i) {
+                        assert_eq!(row[i], input_bits[vocab_size + i], "{} bits", case.name);
+                    }
+                }
+                assert_eq!(&mask[..vocab_size], &input_bits[..vocab_size]);
+            }
+
+            #[cfg(feature = "cuda")]
+            with_cuda_backend(|client, device| {
+                let gpu = half_masks_on::<numr::runtime::cuda::CudaRuntime>(
+                    &client, &device, &case, half,
+                );
+                for ((g, c), state) in gpu.iter().zip(&cpu).zip(&case.states) {
+                    assert_eq!(g, c, "cuda {} {half:?} from state {state}", case.name);
+                }
+            });
+        }
+    }
+}
+
+#[test]
+fn test_grammar_dfa_mask_refuses_f64_and_i32_logits() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let case = small_case();
+    let grammar = DeviceGrammarDfa::<CpuRuntime>::from_byte_dfa(
+        &case.dfa,
+        &case.vocab,
+        &case.eos,
+        &cpu_device,
+    )
+    .unwrap();
+    let n = case.vocab.len();
+    let wide = Tensor::<CpuRuntime>::from_slice(&vec![0.0f64; n], &[n], &cpu_device).unwrap();
+    let err = cpu_client
+        .grammar_dfa_mask_logits(&wide, &grammar)
+        .unwrap_err();
+    assert!(err.to_string().contains("F64"), "{err}");
+    let ints = Tensor::<CpuRuntime>::from_slice(&vec![0i32; n], &[n], &cpu_device).unwrap();
+    let err = cpu_client
+        .grammar_dfa_mask_logits(&ints, &grammar)
+        .unwrap_err();
+    assert!(err.to_string().contains("I32"), "{err}");
+}

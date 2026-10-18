@@ -215,21 +215,34 @@ fn eos_list(ids: &[u32], vocab_size: usize) -> Result<Vec<u32>> {
     Ok(eos)
 }
 
-/// Check that `logits` fit the mask: F32, contiguous, and at least `vocab_size` values.
+/// Check that `logits` fit the mask: F32, F16 or BF16, contiguous, and at least `vocab_size` values.
 ///
+/// F16 and BF16 need the `f16` feature. Any other dtype is an error that names it.
 /// The mask covers the last `vocab_size` values.
 pub(crate) fn check_logits<R: Runtime<DType = DType>>(
     logits: &Tensor<R>,
     vocab_size: usize,
 ) -> Result<()> {
-    if logits.dtype() != DType::F32 {
-        return Err(Error::InvalidArgument {
-            arg: "logits",
-            reason: format!(
-                "grammar_dfa_mask_logits: logits must be F32, got {:?}",
-                logits.dtype()
-            ),
-        });
+    match logits.dtype() {
+        DType::F32 => {}
+        DType::F16 | DType::BF16 if cfg!(feature = "f16") => {}
+        dtype @ (DType::F16 | DType::BF16) => {
+            return Err(Error::InvalidArgument {
+                arg: "logits",
+                reason: format!(
+                    "grammar_dfa_mask_logits: {dtype:?} logits need the `f16` feature. Build \
+                     boostr with `f16` or pass F32 logits"
+                ),
+            });
+        }
+        dtype => {
+            return Err(Error::InvalidArgument {
+                arg: "logits",
+                reason: format!(
+                    "grammar_dfa_mask_logits: logits must be F32, F16 or BF16, got {dtype:?}"
+                ),
+            });
+        }
     }
     if !logits.is_contiguous() {
         return Err(Error::InvalidArgument {
@@ -350,12 +363,16 @@ mod tests {
     }
 
     #[test]
-    fn check_logits_refuses_short_and_non_f32_logits() {
+    fn check_logits_refuses_short_and_non_float_logits() {
         let device = CpuDevice::new();
         let short = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 2], &[2], &device).unwrap();
         assert!(check_logits(&short, 3).is_err());
         assert!(check_logits(&short, 2).is_ok());
         let ints = Tensor::<CpuRuntime>::from_slice(&[0i32; 4], &[4], &device).unwrap();
-        assert!(check_logits(&ints, 2).is_err());
+        let err = check_logits(&ints, 2).unwrap_err().to_string();
+        assert!(err.contains("I32"), "{err}");
+        let wide = Tensor::<CpuRuntime>::from_slice(&[0f64; 4], &[4], &device).unwrap();
+        let err = check_logits(&wide, 2).unwrap_err().to_string();
+        assert!(err.contains("F64"), "{err}");
     }
 }

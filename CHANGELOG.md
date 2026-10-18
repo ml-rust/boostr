@@ -15,7 +15,7 @@ Adds exact-resume optimizer state export and import, keyed by parameter name. Ad
 
 - **`Optimizer`** — the trait gains two required methods, `state_dict` and `load_state_dict`. Every implementation must provide both. `AdamW`, `Lamb`, `AdaGrad` and `Sgd` implement them.
 - **`DeviceGrammarDfa`** — moves to `inference::grammar`, and `ops::traits::inference::grammar` re-exports it with `INVALID_STATE`. Its fields are private, so a struct literal no longer builds one. Build it with `DeviceGrammarDfa::from_byte_dfa`. Read the state with `current_state()` and write it with `set_current_state(state)`, which refuses a state outside the table. Accessors give the tables and counts.
-- **`GrammarDfaOps::grammar_dfa_mask_logits`** — a non-EOS token with zero bytes is never allowed, in any state. It makes no progress, so generation could loop on it. An EOS token is allowed iff the current state accepts. On every backend the op returns a masked copy, and the input logits stay unchanged. CUDA used to mask the input in place. Logits that are not F32, not contiguous or shorter than the vocabulary are an error on every backend.
+- **`GrammarDfaOps::grammar_dfa_mask_logits`** — a non-EOS token with zero bytes is never allowed, in any state. It makes no progress, so generation could loop on it. An EOS token is allowed iff the current state accepts. On every backend the op returns a masked copy, and the input logits stay unchanged. CUDA used to mask the input in place. Logits that are not F32, F16 or BF16, not contiguous or shorter than the vocabulary are an error on every backend.
 
 ### Added
 
@@ -44,6 +44,7 @@ Adds exact-resume optimizer state export and import, keyed by parameter name. Ad
 
 ### Fixed
 
+- **`GrammarDfaOps::grammar_dfa_mask_logits`** — accepts F16 and BF16 logits and returns the input dtype. It failed with an error on half-precision logits. Half dtypes cast to F32 on the device, take the F32 kernel, and cast back, so unmasked values keep their bits. They need the `f16` feature. WebGPU holds F32 only, so half logits stay an error there.
 - **CUDA and CPU grammar masks** — logits shorter than the grammar vocabulary are an error. CUDA wrote past the logits buffer, and CPU panicked. Each kernel bounds-checks every table read, and a byte range past the vocabulary buffer masks the token.
 - **`save_safetensors`, `save_checkpoint`, `save_distributed_checkpoint`, imatrix `write_to_path`** — writes are atomic. Each write goes to a sibling `.<file_name>.tmp-<pid>-<n>` file, which is synced and renamed over the target. A failed save no longer truncates or corrupts an existing file. `save_safetensors` encodes every tensor and the header before it touches the filesystem, so an unsupported dtype leaves the target unchanged. The output bytes are unchanged.
 

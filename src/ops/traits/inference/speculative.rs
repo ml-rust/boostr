@@ -28,8 +28,8 @@ pub struct VerificationResult {
 /// draft tokens, then samples a bonus token from the residual or next-position
 /// distribution.
 ///
-/// This is the core verification kernel — model orchestration (draft generation,
-/// target scoring, adaptive depth) lives in `boostr::inference::speculative`.
+/// This is a sampled-verification kernel set over probabilities. The greedy
+/// `boostr::inference::speculative::SpeculativeGenerator` does not call it.
 pub trait SpeculativeOps<R: Runtime> {
     /// Verify draft tokens against target model probabilities.
     ///

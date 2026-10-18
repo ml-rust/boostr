@@ -1,7 +1,7 @@
-//! Speculative decoding executor
+//! The speculative generator: start, step and the generation loop.
 
-mod generate;
-mod sampling;
-mod verify;
+pub mod generate;
+pub mod step;
 
-pub use generate::SpeculativeExecutor;
+pub use generate::SpeculativeGenerator;
+pub use step::StepOutput;

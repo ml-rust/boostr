@@ -1,107 +1,190 @@
-//! Speculative decoding types, configuration, and model trait
+//! Speculative generation config, statistics and finish reason.
 
-use crate::error::Result;
-use numr::runtime::Runtime;
+use crate::error::{Error, Result};
 
-/// Token ID type
-pub type TokenId = u32;
+/// Drafts per step when the caller sets no other count.
+pub const DEFAULT_NUM_DRAFT_TOKENS: usize = 5;
 
-/// Speculative decoding configuration
-#[derive(Debug, Clone)]
+/// Largest accepted draft count per step.
+pub const MAX_NUM_DRAFT_TOKENS: usize = 32;
+
+/// Config of one speculative generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpeculativeConfig {
-    pub num_speculative_tokens: usize,
-    pub draft_temperature: f32,
-    pub target_temperature: f32,
-    pub draft_top_p: f32,
-    pub target_top_p: f32,
-    pub min_acceptance_rate: f32,
-    pub adaptive_depth: bool,
-    pub seed: Option<u64>,
+    /// Drafts proposed per step, `k`. Must be in `1..=MAX_NUM_DRAFT_TOKENS`.
+    pub num_draft_tokens: usize,
+    /// Tokens to emit at most, the prompt not counted. Must be at least 1.
+    pub max_tokens: usize,
+    /// Tokens that end generation. The EOS token is part of the output.
+    pub eos_token_ids: Vec<u32>,
 }
 
-impl Default for SpeculativeConfig {
-    fn default() -> Self {
+impl SpeculativeConfig {
+    /// A config with `max_tokens`, the default draft count and no EOS ids.
+    pub fn new(max_tokens: usize) -> Self {
         Self {
-            num_speculative_tokens: 4,
-            draft_temperature: 0.7,
-            target_temperature: 0.7,
-            draft_top_p: 0.9,
-            target_top_p: 0.9,
-            min_acceptance_rate: 0.3,
-            adaptive_depth: true,
-            seed: None,
+            num_draft_tokens: DEFAULT_NUM_DRAFT_TOKENS,
+            max_tokens,
+            eos_token_ids: Vec::new(),
         }
+    }
+
+    /// Check every field against a model with `vocab_size` tokens.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] naming the first field out of range.
+    pub fn check(&self, vocab_size: usize) -> Result<()> {
+        if !(1..=MAX_NUM_DRAFT_TOKENS).contains(&self.num_draft_tokens) {
+            return Err(Error::InvalidArgument {
+                arg: "num_draft_tokens",
+                reason: format!(
+                    "got {}; pass a draft count in 1..={MAX_NUM_DRAFT_TOKENS}",
+                    self.num_draft_tokens
+                ),
+            });
+        }
+        if self.max_tokens == 0 {
+            return Err(Error::InvalidArgument {
+                arg: "max_tokens",
+                reason: "got 0; pass a token limit of at least 1".into(),
+            });
+        }
+        if let Some(&id) = self
+            .eos_token_ids
+            .iter()
+            .find(|&&id| id as usize >= vocab_size)
+        {
+            return Err(Error::InvalidArgument {
+                arg: "eos_token_ids",
+                reason: format!(
+                    "EOS id {id} is outside the model vocabulary of {vocab_size} tokens; pass \
+                     ids below {vocab_size}"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// `token` ends generation.
+    pub fn is_eos(&self, token: u32) -> bool {
+        self.eos_token_ids.contains(&token)
     }
 }
 
-/// Statistics for speculative decoding performance
-#[derive(Debug, Clone, Copy, Default)]
+/// Why generation stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FinishReason {
+    /// The last emitted token is an EOS id.
+    Eos,
+    /// The output reached `max_tokens`.
+    Length,
+}
+
+/// Counters of one generation. Prefill is not counted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SpeculativeStats {
-    pub total_tokens: usize,
-    pub accepted_tokens: usize,
-    pub rejected_tokens: usize,
-    pub bonus_tokens: usize,
-    pub iterations: usize,
-    pub draft_forward_passes: usize,
-    pub target_forward_passes: usize,
+    /// Steps run.
+    pub steps: usize,
+    /// Drafts fed to the target, after the clamp and the vocabulary cut.
+    pub drafted: usize,
+    /// Drafts equal to the target's own choice, before the EOS cut.
+    pub accepted: usize,
+    /// Tokens emitted to the caller.
+    pub emitted: usize,
+    /// Calls of [`SpeculativeModel::extend_greedy`](super::SpeculativeModel::extend_greedy)
+    /// during steps. Each step makes exactly one.
+    pub target_forwards: usize,
 }
 
 impl SpeculativeStats {
-    pub fn acceptance_rate(&self) -> f32 {
-        if self.accepted_tokens + self.rejected_tokens == 0 {
-            1.0
-        } else {
-            self.accepted_tokens as f32 / (self.accepted_tokens + self.rejected_tokens) as f32
-        }
-    }
-
-    pub fn tokens_per_forward(&self) -> f32 {
-        if self.target_forward_passes == 0 {
+    /// `accepted / drafted`, or 0.0 when nothing was drafted.
+    pub fn acceptance_rate(&self) -> f64 {
+        if self.drafted == 0 {
             0.0
         } else {
-            self.total_tokens as f32 / self.target_forward_passes as f32
+            self.accepted as f64 / self.drafted as f64
         }
     }
 
-    pub fn estimated_speedup(&self) -> f32 {
-        if self.target_forward_passes == 0 {
-            1.0
+    /// `emitted / target_forwards`, or 0.0 before the first step.
+    pub fn tokens_per_forward(&self) -> f64 {
+        if self.target_forwards == 0 {
+            0.0
         } else {
-            let draft_cost = self.draft_forward_passes as f32 / 10.0;
-            let total_cost = self.target_forward_passes as f32 + draft_cost;
-            self.total_tokens as f32 / total_cost
+            self.emitted as f64 / self.target_forwards as f64
         }
     }
 }
 
-/// Result of token verification
-#[derive(Debug, Clone)]
-pub struct VerificationResult {
-    pub num_accepted: usize,
-    pub accepted_tokens: Vec<TokenId>,
-    pub bonus_token: Option<TokenId>,
-    pub first_rejection_pos: i32,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Draft model output for a single speculative step
-#[derive(Debug, Clone)]
-pub struct DraftOutput {
-    pub tokens: Vec<TokenId>,
-    pub log_probs: Vec<f32>,
-    pub vocab_size: usize,
-}
+    fn arg_of(err: Error) -> &'static str {
+        match err {
+            Error::InvalidArgument { arg, .. } => arg,
+            other => panic!("expected InvalidArgument, got {other}"),
+        }
+    }
 
-/// Target model output for verification
-#[derive(Debug, Clone)]
-pub struct TargetOutput {
-    pub log_probs: Vec<f32>,
-    pub vocab_size: usize,
-}
+    #[test]
+    fn default_config_passes() {
+        let config = SpeculativeConfig::new(16);
+        assert_eq!(config.num_draft_tokens, DEFAULT_NUM_DRAFT_TOKENS);
+        config.check(10).expect("valid");
+    }
 
-/// Trait for models that can be used as draft or target in speculative decoding
-pub trait SpeculativeModel<R: Runtime>: Send + Sync {
-    fn forward(&mut self, input_tokens: &[TokenId], position: usize) -> Result<Vec<f32>>;
-    fn vocab_size(&self) -> usize;
-    fn reset(&mut self) -> Result<()>;
-    fn name(&self) -> &str;
+    #[test]
+    fn draft_count_outside_range_names_the_field() {
+        for k in [0, MAX_NUM_DRAFT_TOKENS + 1] {
+            let config = SpeculativeConfig {
+                num_draft_tokens: k,
+                ..SpeculativeConfig::new(4)
+            };
+            assert_eq!(
+                arg_of(config.check(10).expect_err("bad k")),
+                "num_draft_tokens"
+            );
+        }
+        let config = SpeculativeConfig {
+            num_draft_tokens: MAX_NUM_DRAFT_TOKENS,
+            ..SpeculativeConfig::new(4)
+        };
+        config.check(10).expect("k = 32 is valid");
+    }
+
+    #[test]
+    fn zero_max_tokens_names_the_field() {
+        let err = SpeculativeConfig::new(0).check(10).expect_err("zero");
+        assert_eq!(arg_of(err), "max_tokens");
+    }
+
+    #[test]
+    fn eos_outside_vocab_names_the_field() {
+        let config = SpeculativeConfig {
+            eos_token_ids: vec![3, 10],
+            ..SpeculativeConfig::new(4)
+        };
+        let err = config.check(10).expect_err("10 is outside");
+        assert!(err.to_string().contains("10"), "{err}");
+        assert_eq!(arg_of(err), "eos_token_ids");
+        config.check(11).expect("valid with a larger vocab");
+    }
+
+    #[test]
+    fn rates_handle_zero_counts() {
+        let stats = SpeculativeStats::default();
+        assert_eq!(stats.acceptance_rate(), 0.0);
+        assert_eq!(stats.tokens_per_forward(), 0.0);
+        let stats = SpeculativeStats {
+            steps: 2,
+            drafted: 4,
+            accepted: 3,
+            emitted: 5,
+            target_forwards: 2,
+        };
+        assert_eq!(stats.acceptance_rate(), 0.75);
+        assert_eq!(stats.tokens_per_forward(), 2.5);
+    }
 }

@@ -25,6 +25,7 @@ Adds exact-resume optimizer state export and import, keyed by parameter name. Ad
 - **`SequenceScheduler::add_request`** — an empty prompt is an error. A prefix cache whose `block_size` differs from the scheduler's is an error.
 - **`SequenceScheduler::finish_sequence`, `abort_sequence`** — a release error from the prefix cache returns as an error. It used to be dropped.
 - **`SequenceScheduler::finish_sequence`** — a Waiting or Preempted sequence is an error, and nothing changes. It used to return Ok and corrupt the counters. A Finished sequence returns Ok and changes nothing. Use `abort_sequence` to end a Waiting or Preempted sequence.
+- **`inference::speculative`** — the old API is removed: `SpeculativeExecutor`, the `SpeculativeModel<R>` trait with `forward`/`reset`/`name`, the old `SpeculativeConfig` and `SpeculativeStats`, `VerificationResult`, `DraftOutput`, `TargetOutput` and `TokenId`. `crate::inference::VerificationResult` is gone with it. `ops::traits::inference::speculative::VerificationResult` and `SpeculativeOps` stay. Use `SpeculativeGenerator` over the new `SpeculativeModel` and a `Drafter`.
 
 ### Added
 
@@ -55,9 +56,15 @@ Adds exact-resume optimizer state export and import, keyed by parameter name. Ad
 - **`PrefixCache::allocate`** — allocates private blocks, such as decode blocks, and evicts idle cached blocks when the pool is short. The scheduler takes decode and resume blocks through it.
 - **`PrefixCache::available_blocks`, `idle_block_count`, `registered_block_count`, `block_ref_count`, `shareable_blocks`** — read the pool split: free blocks, idle cached blocks, registered blocks, and the reference count of a shared block.
 - **`SequenceScheduler::prefix_cache`, `prefix_cache_mut`** — access the scheduler's prefix cache.
+- **`SpeculativeGenerator`** — greedy-exact speculative generation. Its output equals plain greedy decoding token for token. Each step feeds the last committed token and up to `k` drafts in one target forward. It keeps the longest draft prefix the target agrees with, plus the target's next token, then truncates the cache to the committed tokens. `start` prefills the prompt, `step` returns a `StepOutput` for streaming, and `generate` loops to the end. The output ends after the first EOS token or at `max_tokens`. Pure synchronous code, with no thread.
+- **`SpeculativeModel`** — the target contract: `vocab_size`, `len`, `truncate` and `extend_greedy`. `extend_greedy` appends the fed tokens and returns one greedy id per fed token. The argmax runs where the logits live, and ties break to the lowest id. A wrong id count or cache length is an error.
+- **`SpeculativeConfig`** — `num_draft_tokens` (default 5, `1..=32`), `max_tokens` (at least 1) and `eos_token_ids` (each below the vocabulary). `check` names the first field out of range.
+- **`SpeculativeStats`** — `steps`, `drafted`, `accepted`, `emitted` and `target_forwards`, with `acceptance_rate` and `tokens_per_forward`. **`FinishReason`** — `Eos` or `Length`.
+- **`Drafter`, `PromptLookup`** — model-free drafting. `PromptLookup` finds the most recent earlier occurrence of the context's trailing n-gram, for `n` from `max_ngram` (default 3) down to `min_ngram` (default 1), and proposes the tokens that followed it. It scans the last `window` tokens (default 4096). Drafts past `k` or at the first id outside the vocabulary are dropped.
 
 ### Fixed
 
+- **Speculative decoding** — the old implementation produced incorrect tokens. Each draft and verify forward re-sent the whole context, so the KV cache held the context twice. It ignored the request sampling, hard-coded EOS as token 0 or 2, biased the acceptance, never checked the draft vocabulary, and its RNG stuck at seed 0. `SpeculativeGenerator` replaces it.
 - **`SequenceScheduler`** — a scheduler operation on a sequence in the wrong state returns an error instead of corrupting the counters. Every transition checks the current state and moves the counter of the state it leaves. A `finish_sequence` on a non-running sequence used to underflow `running_count`, which panics in debug builds and wraps in release builds.
 - **Prefix cache** — blocks no longer leak when the prefix cache is on. A finished, aborted or preempted sequence returns every block to the allocator, except the full prefix blocks the cache keeps. The cache used to keep each sequence's decode blocks forever.
 - **Prefix cache** — shared prefix blocks never include a partially filled block. Decode wrote into the cached partial block, so a second request with the same prompt read and overwrote the first request's decode KV.

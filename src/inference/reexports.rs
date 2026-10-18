@@ -27,6 +27,7 @@ pub use super::scheduler::{
     SequenceRequest, SequenceScheduler, SequenceState,
 };
 pub use super::speculative::{
-    SpeculativeConfig, SpeculativeExecutor, SpeculativeModel, SpeculativeStats, VerificationResult,
+    Drafter, FinishReason, PromptLookup, SpeculativeConfig, SpeculativeGenerator, SpeculativeModel,
+    SpeculativeStats, StepOutput,
 };
 pub use super::ssm_state::{LayeredSsmState, SsmState};

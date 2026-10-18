@@ -71,7 +71,7 @@ For the feature flags, see the [README](../README.md#feature-flags).
 - **Paged KV cache** with a block allocator (`memory/`).
 - **Request scheduler** with continuous batching (`scheduler/`).
 - **Prefix caching** for prompt reuse (`prefix_cache/`).
-- **Speculative decoding** with adaptive draft depth and verification kernels (`speculative/`).
+- **Greedy-exact speculative decoding** with a model-free drafter (`speculative/`). The output equals plain greedy decoding. `SpeculativeOps` adds device kernels for sampled verification.
 - **Flash decoding** for single-token decode on CUDA, selected when `S_q == 1`.
 
 ## Training

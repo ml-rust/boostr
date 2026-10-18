@@ -1,6 +1,9 @@
 pub mod core;
+mod evict;
 pub mod gpu_cache;
 pub mod gpu_radix;
+mod lookup;
+mod release;
 pub mod types;
 
 pub use core::PrefixCache;

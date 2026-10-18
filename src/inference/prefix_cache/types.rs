@@ -3,7 +3,6 @@
 pub use crate::inference::scheduler::SequenceId;
 
 use crate::inference::memory::BlockId;
-use std::time::Instant;
 
 /// 64-bit hash of a token sequence (block content)
 pub type BlockHash = u64;
@@ -33,11 +32,14 @@ pub(super) struct CachedBlockInfo {
     pub(super) block_id: BlockId,
     pub(super) ref_count: usize,
     pub(super) owners: Vec<SequenceId>,
-    pub(super) last_access: Instant,
     pub(super) tokens: Vec<u32>,
 }
 
-/// Result of a cache lookup/allocation
+/// Result of a cache lookup/allocation.
+///
+/// `blocks` covers the whole prompt. Its first `cached_blocks` entries are
+/// shared full blocks that already hold KV. `cached_blocks * block_size` is
+/// always below the prompt length, so prefill computes at least one token.
 #[derive(Debug)]
 pub enum CacheResult {
     Hit {

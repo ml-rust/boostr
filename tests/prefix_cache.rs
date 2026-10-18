@@ -1,4 +1,4 @@
-use boostr::inference::memory::CpuBlockAllocator;
+use boostr::inference::memory::{BlockAllocator, CpuBlockAllocator};
 use boostr::inference::prefix_cache::{
     CacheResult, PrefixCache, PrefixCacheConfig, SequencePrefixState,
 };
@@ -46,14 +46,17 @@ fn test_cache_hit() {
 
     let result2 = cache.get_or_allocate_blocks(2, &tokens).unwrap();
     assert!(result2.is_hit());
-    assert_eq!(result2.cached_count(), 2);
+    // The block of the last prompt token is never shared, so prefill
+    // computes at least one token.
+    assert_eq!(result2.cached_count(), 1);
 
-    assert_eq!(result1.blocks(), result2.blocks());
+    assert_eq!(result1.blocks()[0], result2.blocks()[0]);
+    assert_ne!(result1.blocks()[1], result2.blocks()[1]);
 
     let stats = cache.stats();
     assert_eq!(stats.cache_hits, 1);
     assert_eq!(stats.cache_misses, 1);
-    assert_eq!(stats.blocks_from_cache, 2);
+    assert_eq!(stats.blocks_from_cache, 1);
 }
 
 #[test]
@@ -135,7 +138,7 @@ fn test_cached_block_count() {
 
     assert_eq!(cache.cached_block_count(&tokens), 0);
     cache.get_or_allocate_blocks(1, &tokens).unwrap();
-    assert_eq!(cache.cached_block_count(&tokens), 2);
+    assert_eq!(cache.cached_block_count(&tokens), 1);
 
     let longer: Vec<u32> = (0..48).collect();
     assert_eq!(cache.cached_block_count(&longer), 2);
@@ -203,8 +206,8 @@ fn test_stats() {
     assert_eq!(stats.total_lookups, 3);
     assert_eq!(stats.cache_hits, 2);
     assert_eq!(stats.cache_misses, 1);
-    assert_eq!(stats.blocks_from_cache, 4);
-    assert_eq!(stats.blocks_allocated, 2);
+    assert_eq!(stats.blocks_from_cache, 2);
+    assert_eq!(stats.blocks_allocated, 4);
     assert!(stats.hit_rate > 0.6);
 }
 
@@ -235,8 +238,8 @@ fn test_sequence_prefix_state() {
 
     let result2 = cache.get_or_allocate_blocks(2, &tokens).unwrap();
     let state2 = SequencePrefixState::from_cache_result(&result2, tokens.len());
-    assert_eq!(state2.cached_count(), 2);
-    assert_eq!(state2.new_count(), 0);
+    assert_eq!(state2.cached_count(), 1);
+    assert_eq!(state2.new_count(), 1);
 }
 
 #[test]
@@ -245,19 +248,24 @@ fn test_refcount_tracking() {
     let tokens: Vec<u32> = (0..32).collect();
 
     let result1 = cache.get_or_allocate_blocks(1, &tokens).unwrap();
-    cache.get_or_allocate_blocks(2, &tokens).unwrap();
-    cache.get_or_allocate_blocks(3, &tokens).unwrap();
+    let result2 = cache.get_or_allocate_blocks(2, &tokens).unwrap();
+    let result3 = cache.get_or_allocate_blocks(3, &tokens).unwrap();
+    let shared = result1.blocks()[0];
+    assert_eq!(cache.block_ref_count(shared), Some(3));
 
-    let blocks = result1.blocks().to_vec();
-
-    cache.release_blocks(1, &blocks).unwrap();
+    cache.release_blocks(1, result1.blocks()).unwrap();
+    assert_eq!(cache.block_ref_count(shared), Some(2));
     assert!(cache.has_cached_prefix(&tokens));
 
-    cache.release_blocks(2, &blocks).unwrap();
+    cache.release_blocks(2, result2.blocks()).unwrap();
+    assert_eq!(cache.block_ref_count(shared), Some(1));
+
+    cache.release_blocks(3, result3.blocks()).unwrap();
+    assert_eq!(cache.block_ref_count(shared), Some(0));
     assert!(cache.has_cached_prefix(&tokens));
 
-    cache.release_blocks(3, &blocks).unwrap();
-    assert!(cache.has_cached_prefix(&tokens));
+    // Only the two registered full blocks stay allocated.
+    assert_eq!(cache.allocator().free_block_count(), 100 - 2);
 }
 
 /// max_cached_blocks must be enforced: once sequences release their blocks
@@ -305,8 +313,8 @@ fn test_max_cached_blocks_enforced() {
     );
 }
 
-/// has_cached_prefix and cached_block_count must validate token content,
-/// not just hash presence, to guard against hash collisions.
+/// `has_cached_prefix` and `cached_block_count` check token content,
+/// not only hash presence, to guard against hash collisions.
 #[test]
 fn test_cached_block_count_validates_tokens() {
     let block_size = 4;
@@ -319,20 +327,17 @@ fn test_cached_block_count_validates_tokens() {
     };
     let mut cache = PrefixCache::new(allocator, config);
 
-    let tokens: Vec<u32> = vec![1, 2, 3, 4];
+    // One full shareable block plus the private block of the last token.
+    let tokens: Vec<u32> = vec![1, 2, 3, 4, 5];
     cache.get_or_allocate_blocks(1, &tokens).unwrap();
 
-    // Correct tokens → should find the cached block.
+    // The same tokens find the cached block.
     assert!(cache.has_cached_prefix(&tokens));
     assert_eq!(cache.cached_block_count(&tokens), 1);
 
-    // Different tokens with the same prefix length → should NOT hit.
-    let different: Vec<u32> = vec![9, 9, 9, 9];
-    // (These are very unlikely to collide; the test verifies the token check.)
-    if !cache.has_cached_prefix(&different) {
-        assert_eq!(cache.cached_block_count(&different), 0);
-    }
-    // If by extreme chance hashes collide, the token check must still return 0.
-    // We can't force a collision in a unit test, but we verify the path compiles
-    // and the non-colliding case is correct.
+    // Different tokens of the same length miss.
+    // A test cannot force a hash collision, so this covers the non-colliding case.
+    let different: Vec<u32> = vec![9, 9, 9, 9, 9];
+    assert!(!cache.has_cached_prefix(&different));
+    assert_eq!(cache.cached_block_count(&different), 0);
 }

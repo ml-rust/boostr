@@ -1,25 +1,51 @@
-//! Prefix cache core implementation
+//! Prefix cache state, block ownership rules, hashing and read accessors.
+//!
+//! # Block ownership
+//!
+//! Three parties own the blocks of one pool, and each block has one owner:
+//!
+//! - **Allocator** — owns every free block.
+//! - **Prefix cache** — owns every registered block: a full prompt block with
+//!   a prefix hash and a reference count. Sequences share it read-only.
+//!   An idle registered block (count 0) stays cached until eviction frees it.
+//!   A block that [`PrefixCache::reset`] detaches while in use stays shared
+//!   until its last release frees it.
+//! - **Sequence** — owns its private blocks: the partial last prompt block,
+//!   decode blocks, and every block of a lookup that skips the cache.
+//!
+//! [`PrefixCache::release_blocks`] takes a sequence's whole block table. It
+//! drops one reference per registered block and frees every private block.
 
 use crate::error::Result;
 use crate::inference::memory::{BlockAllocator, BlockId};
 use std::collections::{HashMap, VecDeque};
-use std::time::Instant;
 
-use super::types::{
-    BlockHash, CacheResult, CachedBlockInfo, PrefixCacheConfig, PrefixCacheStats, SequenceId,
-};
+use super::types::{BlockHash, CachedBlockInfo, PrefixCacheConfig, PrefixCacheStats};
 
-/// Prefix cache for KV cache block reuse
+const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
+
+/// Prefix cache for KV cache block reuse.
+///
+/// The cache shares only full prompt blocks. Decode never writes into one,
+/// because decode positions start after the prompt.
 pub struct PrefixCache<A: BlockAllocator> {
-    allocator: A,
-    config: PrefixCacheConfig,
-    hash_to_block: HashMap<BlockHash, CachedBlockInfo>,
-    block_to_hash: HashMap<BlockId, BlockHash>,
-    lru_queue: VecDeque<BlockId>,
-    stats: PrefixCacheStats,
+    pub(super) allocator: A,
+    pub(super) config: PrefixCacheConfig,
+    pub(super) hash_to_block: HashMap<BlockHash, CachedBlockInfo>,
+    pub(super) block_to_hash: HashMap<BlockId, BlockHash>,
+    /// Every registered block, least recently used first.
+    pub(super) lru_queue: VecDeque<BlockId>,
+    /// Registered blocks with a reference count of 0.
+    pub(super) idle_blocks: usize,
+    /// In-use blocks that [`Self::reset`] unregistered. The last release frees each.
+    pub(super) detached: HashMap<BlockId, CachedBlockInfo>,
+    pub(super) stats: PrefixCacheStats,
 }
 
 impl<A: BlockAllocator> PrefixCache<A> {
+    /// A cache over `allocator`. A scheduler that uses the cache must hold a
+    /// clone of the same allocator, so both see one pool.
     pub fn new(allocator: A, config: PrefixCacheConfig) -> Self {
         Self {
             allocator,
@@ -27,18 +53,21 @@ impl<A: BlockAllocator> PrefixCache<A> {
             hash_to_block: HashMap::new(),
             block_to_hash: HashMap::new(),
             lru_queue: VecDeque::new(),
+            idle_blocks: 0,
+            detached: HashMap::new(),
             stats: PrefixCacheStats::default(),
         }
     }
 
-    fn compute_hash(tokens: &[u32]) -> BlockHash {
-        const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-        const FNV_PRIME: u64 = 0x100000001b3;
+    /// FNV-1a hash of `tokens`.
+    #[cfg(test)]
+    pub(super) fn compute_hash(tokens: &[u32]) -> BlockHash {
+        Self::extend_hash(FNV_OFFSET, tokens)
+    }
 
-        let mut hash = FNV_OFFSET;
+    fn extend_hash(mut hash: BlockHash, tokens: &[u32]) -> BlockHash {
         for &token in tokens {
-            let bytes = token.to_le_bytes();
-            for byte in bytes {
+            for byte in token.to_le_bytes() {
                 hash ^= byte as u64;
                 hash = hash.wrapping_mul(FNV_PRIME);
             }
@@ -46,262 +75,57 @@ impl<A: BlockAllocator> PrefixCache<A> {
         hash
     }
 
-    fn compute_block_hashes(&self, tokens: &[u32]) -> Vec<BlockHash> {
+    /// Prefix hashes of the first `count` full blocks of `tokens`.
+    ///
+    /// Entry `i` hashes `tokens[..(i + 1) * block_size]`, so a hit on block
+    /// `i` matches the whole prefix up to it.
+    pub(super) fn prefix_hashes(&self, tokens: &[u32], count: usize) -> Vec<BlockHash> {
         let block_size = self.config.block_size;
-        let num_blocks = tokens.len().div_ceil(block_size);
-
-        let mut hashes = Vec::with_capacity(num_blocks);
-        for block_idx in 0..num_blocks {
-            let end = ((block_idx + 1) * block_size).min(tokens.len());
-            let prefix = &tokens[..end];
-            hashes.push(Self::compute_hash(prefix));
+        let mut hashes = Vec::with_capacity(count);
+        if block_size == 0 {
+            return hashes;
+        }
+        let mut hash = FNV_OFFSET;
+        for chunk in tokens.chunks_exact(block_size).take(count) {
+            hash = Self::extend_hash(hash, chunk);
+            hashes.push(hash);
         }
         hashes
-    }
-
-    pub fn get_or_allocate_blocks(
-        &mut self,
-        seq_id: SequenceId,
-        tokens: &[u32],
-    ) -> Result<CacheResult> {
-        if !self.config.enabled || tokens.len() < self.config.min_prefix_tokens {
-            let num_blocks = tokens.len().div_ceil(self.config.block_size);
-            let blocks = self.allocator.allocate(num_blocks)?;
-            self.stats.blocks_allocated += blocks.len();
-            self.stats.cache_misses += 1;
-            self.stats.total_lookups += 1;
-            self.update_rates();
-            return Ok(CacheResult::Miss { blocks });
-        }
-
-        let block_hashes = self.compute_block_hashes(tokens);
-        let mut result_blocks = Vec::with_capacity(block_hashes.len());
-        let mut cached_count = 0;
-        let mut new_count = 0;
-
-        self.stats.total_lookups += 1;
-
-        for (block_idx, &hash) in block_hashes.iter().enumerate() {
-            let block_start = block_idx * self.config.block_size;
-            let block_end = ((block_idx + 1) * self.config.block_size).min(tokens.len());
-            let block_tokens = &tokens[block_start..block_end];
-
-            let cache_hit = if let Some(cached) = self.hash_to_block.get(&hash) {
-                if cached.tokens == block_tokens {
-                    Some(cached.block_id)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            if let Some(block_id) = cache_hit {
-                if let Some(cached) = self.hash_to_block.get_mut(&hash) {
-                    cached.ref_count += 1;
-                    cached.owners.push(seq_id);
-                    cached.last_access = Instant::now();
-                }
-                result_blocks.push(block_id);
-                cached_count += 1;
-                self.touch_lru(block_id);
-                continue;
-            }
-
-            let new_blocks = self.allocate_with_eviction(1)?;
-            let block_id = new_blocks[0];
-
-            let info = CachedBlockInfo {
-                block_id,
-                ref_count: 1,
-                owners: vec![seq_id],
-                last_access: Instant::now(),
-                tokens: block_tokens.to_vec(),
-            };
-
-            self.hash_to_block.insert(hash, info);
-            self.block_to_hash.insert(block_id, hash);
-            self.lru_queue.push_back(block_id);
-
-            result_blocks.push(block_id);
-            new_count += 1;
-        }
-
-        self.stats.blocks_from_cache += cached_count;
-        self.stats.blocks_allocated += new_count;
-        self.stats.cached_blocks = self.hash_to_block.len();
-
-        if cached_count > 0 {
-            self.stats.cache_hits += 1;
-            self.update_rates();
-            Ok(CacheResult::Hit {
-                blocks: result_blocks,
-                cached_blocks: cached_count,
-                new_blocks: new_count,
-            })
-        } else {
-            self.stats.cache_misses += 1;
-            self.update_rates();
-            Ok(CacheResult::Miss {
-                blocks: result_blocks,
-            })
-        }
-    }
-
-    fn allocate_with_eviction(&mut self, count: usize) -> Result<Vec<BlockId>> {
-        // Enforce max_cached_blocks: evict LRU entries to stay within the cap.
-        if self.config.max_cached_blocks > 0
-            && self.hash_to_block.len() + count > self.config.max_cached_blocks
-        {
-            let to_evict =
-                (self.hash_to_block.len() + count).saturating_sub(self.config.max_cached_blocks);
-            self.evict_lru(to_evict)?;
-        }
-
-        if self.allocator.can_allocate(count) {
-            return self.allocator.allocate(count);
-        }
-
-        // Evict from cache to free physical blocks for the allocator.
-        // Track consecutive skips to detect a full rotation of in-use blocks
-        // and avoid spinning forever when all cached blocks have ref_count > 0.
-        let mut consecutive_skips = 0;
-        while !self.allocator.can_allocate(count) {
-            if self.lru_queue.is_empty() {
-                break;
-            }
-            // Full rotation without eviction: all remaining blocks are in-use.
-            if consecutive_skips >= self.lru_queue.len() {
-                break;
-            }
-
-            if let Some(block_id) = self.lru_queue.pop_front() {
-                if let Some(&hash) = self.block_to_hash.get(&block_id)
-                    && let Some(info) = self.hash_to_block.get(&hash)
-                    && info.ref_count == 0
-                {
-                    self.allocator.free(&[block_id])?;
-                    self.hash_to_block.remove(&hash);
-                    self.block_to_hash.remove(&block_id);
-                    consecutive_skips = 0;
-                    self.stats.blocks_evicted += 1;
-                    continue;
-                }
-                self.lru_queue.push_back(block_id);
-                consecutive_skips += 1;
-            }
-        }
-
-        self.stats.cached_blocks = self.hash_to_block.len();
-        self.allocator.allocate(count)
-    }
-
-    /// Evict up to `count` LRU blocks that have no active references.
-    fn evict_lru(&mut self, count: usize) -> Result<()> {
-        let mut evicted = 0;
-        let mut consecutive_skips = 0;
-
-        while evicted < count {
-            if self.lru_queue.is_empty() || consecutive_skips >= self.lru_queue.len() {
-                break;
-            }
-
-            if let Some(block_id) = self.lru_queue.pop_front() {
-                if let Some(&hash) = self.block_to_hash.get(&block_id)
-                    && let Some(info) = self.hash_to_block.get(&hash)
-                    && info.ref_count == 0
-                {
-                    self.allocator.free(&[block_id])?;
-                    self.hash_to_block.remove(&hash);
-                    self.block_to_hash.remove(&block_id);
-                    consecutive_skips = 0;
-                    evicted += 1;
-                    self.stats.blocks_evicted += 1;
-                    continue;
-                }
-                self.lru_queue.push_back(block_id);
-                consecutive_skips += 1;
-            }
-        }
-
-        self.stats.cached_blocks = self.hash_to_block.len();
-        Ok(())
-    }
-
-    fn touch_lru(&mut self, block_id: BlockId) {
-        self.lru_queue.retain(|&id| id != block_id);
-        self.lru_queue.push_back(block_id);
-    }
-
-    pub fn release_blocks(&mut self, seq_id: SequenceId, blocks: &[BlockId]) -> Result<()> {
-        for &block_id in blocks {
-            if let Some(&hash) = self.block_to_hash.get(&block_id)
-                && let Some(info) = self.hash_to_block.get_mut(&hash)
-            {
-                info.ref_count = info.ref_count.saturating_sub(1);
-                info.owners.retain(|&id| id != seq_id);
-            }
-        }
-        Ok(())
-    }
-
-    pub fn force_free_blocks(&mut self, blocks: &[BlockId]) -> Result<()> {
-        for &block_id in blocks {
-            if let Some(hash) = self.block_to_hash.remove(&block_id) {
-                self.hash_to_block.remove(&hash);
-                self.lru_queue.retain(|&id| id != block_id);
-            }
-            self.allocator.free(&[block_id])?;
-        }
-        self.stats.cached_blocks = self.hash_to_block.len();
-        Ok(())
-    }
-
-    pub fn has_cached_prefix(&self, tokens: &[u32]) -> bool {
-        if !self.config.enabled || tokens.len() < self.config.min_prefix_tokens {
-            return false;
-        }
-
-        let block_size = self.config.block_size;
-        let block_hashes = self.compute_block_hashes(tokens);
-        if let Some(&hash) = block_hashes.first()
-            && let Some(info) = self.hash_to_block.get(&hash)
-        {
-            // Verify the stored tokens to guard against hash collisions.
-            let first_block_end = block_size.min(tokens.len());
-            return info.tokens == tokens[..first_block_end];
-        }
-        false
-    }
-
-    pub fn cached_block_count(&self, tokens: &[u32]) -> usize {
-        if !self.config.enabled {
-            return 0;
-        }
-
-        let block_size = self.config.block_size;
-        let block_hashes = self.compute_block_hashes(tokens);
-        block_hashes
-            .iter()
-            .enumerate()
-            .take_while(|(block_idx, hash)| {
-                if let Some(info) = self.hash_to_block.get(hash) {
-                    let block_start = block_idx * block_size;
-                    let block_end = ((block_idx + 1) * block_size).min(tokens.len());
-                    // Validate tokens to guard against hash collisions.
-                    info.tokens == tokens[block_start..block_end]
-                } else {
-                    false
-                }
-            })
-            .count()
     }
 
     pub fn stats(&self) -> PrefixCacheStats {
         self.stats
     }
 
-    fn update_rates(&mut self) {
+    /// Registered blocks, in use or idle.
+    pub fn registered_block_count(&self) -> usize {
+        self.hash_to_block.len()
+    }
+
+    /// Registered blocks that no sequence references. Eviction can free them.
+    pub fn idle_block_count(&self) -> usize {
+        self.idle_blocks
+    }
+
+    /// The reference count of a shared block, or `None` for a private or free block.
+    ///
+    /// A shared block is registered, or detached by [`Self::reset`] while in use.
+    pub fn block_ref_count(&self, block_id: BlockId) -> Option<usize> {
+        self.block_to_hash
+            .get(&block_id)
+            .and_then(|hash| self.hash_to_block.get(hash))
+            .or_else(|| self.detached.get(&block_id))
+            .map(|info| info.ref_count)
+    }
+
+    /// Blocks an allocation can get: free blocks plus idle registered blocks.
+    pub fn available_blocks(&self) -> usize {
+        self.allocator
+            .free_block_count()
+            .saturating_add(self.idle_blocks)
+    }
+
+    pub(super) fn update_rates(&mut self) {
         if self.stats.total_lookups > 0 {
             self.stats.hit_rate = self.stats.cache_hits as f64 / self.stats.total_lookups as f64;
         }
@@ -312,18 +136,27 @@ impl<A: BlockAllocator> PrefixCache<A> {
         }
     }
 
+    /// Drop every registration and reset the stats.
+    ///
+    /// Idle blocks return to the allocator. A block still in use leaves the
+    /// lookup but keeps its references. The last holder's release frees it.
     pub fn reset(&mut self) -> Result<()> {
-        let blocks: Vec<BlockId> = self.block_to_hash.keys().copied().collect();
-        for block_id in blocks {
-            if let Some(hash) = self.block_to_hash.remove(&block_id)
-                && let Some(info) = self.hash_to_block.remove(&hash)
-                && info.ref_count == 0
-            {
-                self.allocator.free(&[block_id])?;
+        let idle: Vec<BlockId> = self
+            .hash_to_block
+            .values()
+            .filter(|info| info.ref_count == 0)
+            .map(|info| info.block_id)
+            .collect();
+        self.allocator.free(&idle)?;
+
+        for (_, info) in self.hash_to_block.drain() {
+            if info.ref_count > 0 {
+                self.detached.insert(info.block_id, info);
             }
         }
-
+        self.block_to_hash.clear();
         self.lru_queue.clear();
+        self.idle_blocks = 0;
         self.stats = PrefixCacheStats::default();
         Ok(())
     }
@@ -341,11 +174,21 @@ impl<A: BlockAllocator> PrefixCache<A> {
     }
 }
 
-// Public API tests live in tests/inference/prefix_cache.rs
+// Public API tests live in tests/prefix_cache.rs
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::inference::memory::CpuBlockAllocator;
+
+    fn cache(total: usize) -> PrefixCache<CpuBlockAllocator> {
+        let config = PrefixCacheConfig {
+            enabled: true,
+            max_cached_blocks: 0,
+            min_prefix_tokens: 1,
+            block_size: 4,
+        };
+        PrefixCache::new(CpuBlockAllocator::new(total, 4), config)
+    }
 
     #[test]
     fn test_compute_hash() {
@@ -355,5 +198,51 @@ mod tests {
 
         assert_eq!(hash1, hash2);
         assert_ne!(hash1, hash3);
+    }
+
+    #[test]
+    fn prefix_hashes_match_whole_prefix_hashes() {
+        let c = cache(8);
+        let tokens: Vec<u32> = (0..10).collect();
+        let hashes = c.prefix_hashes(&tokens, 2);
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(
+            hashes[0],
+            PrefixCache::<CpuBlockAllocator>::compute_hash(&tokens[..4])
+        );
+        assert_eq!(
+            hashes[1],
+            PrefixCache::<CpuBlockAllocator>::compute_hash(&tokens[..8])
+        );
+    }
+
+    #[test]
+    fn reset_frees_idle_blocks_and_detaches_held_ones() {
+        let mut c = cache(8);
+        let held: Vec<u32> = (0..9).collect();
+        let idle: Vec<u32> = (100..109).collect();
+        let held_blocks = c
+            .get_or_allocate_blocks(1, &held)
+            .expect("held")
+            .into_blocks();
+        let idle_blocks = c
+            .get_or_allocate_blocks(2, &idle)
+            .expect("idle")
+            .into_blocks();
+        c.release_blocks(2, &idle_blocks).expect("release idle");
+        // Each prompt holds two registered full blocks and one private block.
+        assert_eq!(c.allocator().free_block_count(), 8 - 3 - 2);
+        assert_eq!(c.idle_block_count(), 2);
+
+        c.reset().expect("reset");
+        assert_eq!(c.registered_block_count(), 0);
+        assert_eq!(c.allocator().free_block_count(), 8 - 3);
+        assert_eq!(c.cached_block_count(&held), 0, "a reset block never hits");
+        assert_eq!(c.block_ref_count(held_blocks[0]), Some(1));
+
+        // The last release frees the detached and the private blocks.
+        c.release_blocks(1, &held_blocks).expect("release held");
+        assert_eq!(c.allocator().free_block_count(), 8);
+        assert_eq!(c.block_ref_count(held_blocks[0]), None);
     }
 }

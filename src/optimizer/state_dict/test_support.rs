@@ -246,6 +246,10 @@ pub(crate) fn assert_partial_matches_step<O: Optimizer<CpuRuntime>>(
     make: impl Fn(&Fixture) -> O,
     narrow: bool,
 ) {
+    // The BF16 case needs the CPU cast kernel, which exists only with `f16`.
+    if narrow && !cfg!(feature = "f16") {
+        return;
+    }
     let (client, device) = cpu_setup();
     let fx = Fixture::new(&client, &device, narrow);
 

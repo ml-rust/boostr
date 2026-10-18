@@ -13,6 +13,7 @@ Adds exact-resume optimizer state export and import, keyed by parameter name. Ad
 
 ### ⚠️ Breaking changes
 
+- **`GatedDeltaNetOps`** — the trait gains a required method, `gdn_chunk_backward`. Every implementation must provide it. The CPU, CUDA and WebGPU clients implement it.
 - **`Optimizer`** — the trait gains two required methods, `state_dict` and `load_state_dict`. Every implementation must provide both. `AdamW`, `Lamb`, `AdaGrad` and `Sgd` implement them.
 - **`DeviceGrammarDfa`** — moves to `inference::grammar`, and `ops::traits::inference::grammar` re-exports it with `INVALID_STATE`. Its fields are private, so a struct literal no longer builds one. Build it with `DeviceGrammarDfa::from_byte_dfa`. Read the state with `current_state()` and write it with `set_current_state(state)`, which refuses a state outside the table. Accessors give the tables and counts.
 - **`GrammarDfaOps::grammar_dfa_mask_logits`** — a non-EOS token with zero bytes is never allowed, in any state. It makes no progress, so generation could loop on it. An EOS token is allowed iff the current state accepts. On every backend the op returns a masked copy, and the input logits stay unchanged. CUDA used to mask the input in place. Logits that are not F32, F16 or BF16, not contiguous or shorter than the vocabulary are an error on every backend.
@@ -29,6 +30,9 @@ Adds exact-resume optimizer state export and import, keyed by parameter name. Ad
 
 ### Added
 
+- **`GatedDeltaNetOps::gdn_chunk_backward`** — the gradients of `gdn_chunk_prefill` for `q`, `k`, `v`, `g`, `beta` and the initial state, returned as `GdnGrads`. `dq` is the gradient of the unscaled `q`, so it includes the `1 / sqrt(S_k)` factor. A `d_state_final` of `None` means a zero gradient on the final state.
+- **`var_gdn_chunk`** — the chunked GDN prefill as an autograd op. It returns the tracked output and the final state as a detached tensor. The final state's gradient is not propagated, so training through consecutive segments truncates backpropagation at each segment boundary. An input that does not require grad gets no gradient.
+- **`gdn_recurrent_backward`** — the sequential GDN gradient, one token at a time. It is the reference for faster backward paths.
 - **`KvCache::truncate`, `LayeredKvCache::truncate`** — rollback of the contiguous KV cache. They cut the logical length back to `len`, and the next write overwrites the cut slots. Every lane longer than `len` ends at `len`. Memory is not zeroed, and capacity and device addresses are unchanged. A `len` past `seq_len()` is an error, and nothing changes. `LayeredKvCache::truncate` checks every layer before it modifies one.
 - **`KvCache::truncate_lane`, `LayeredKvCache::truncate_lane`** — cut one lane of a lane-at-a-time cache back to `len` and leave `seq_len()` and every other lane unchanged. A lane outside the batch, or a `len` past the lane's end, is an error, and nothing changes.
 - **`format::write_atomic`** — public crash-safe file replacement. It writes a sibling temp file, syncs it, renames it over the target and syncs the directory. An error leaves an existing file unchanged.

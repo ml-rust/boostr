@@ -3,8 +3,9 @@
 //! The linear-attention recurrence used by Qwen3-Next style hybrid models:
 //! a per-head `[S_k, S_v]` state updated by a gated delta rule. Two entry
 //! points: a single-token step for decode and a chunked prefill (chunk 64,
-//! UT transform) for prompts. Both compose numr primitives and run on every
-//! backend without device transfers.
+//! UT transform) for prompts. `gdn_chunk_backward` gives the gradients of the
+//! chunked prefill. All compose numr primitives and run on every backend
+//! without device transfers.
 //!
 //! The math ports `build_delta_net_autoregressive` and
 //! `build_delta_net_chunking` from llama.cpp
@@ -41,6 +42,22 @@
 use crate::error::Result;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
+
+/// Gradients of one GDN call. Each field has the shape and dtype of its input.
+pub struct GdnGrads<R: Runtime> {
+    /// `dL/dq` for the unscaled `q`: `[batch, seq, H, S_k]`.
+    pub dq: Tensor<R>,
+    /// `dL/dk`: `[batch, seq, H, S_k]`.
+    pub dk: Tensor<R>,
+    /// `dL/dv`: `[batch, seq, H, S_v]`.
+    pub dv: Tensor<R>,
+    /// `dL/dg`: `[batch, seq, H]`.
+    pub dg: Tensor<R>,
+    /// `dL/dbeta`: `[batch, seq, H]`.
+    pub dbeta: Tensor<R>,
+    /// `dL/dstate` for the initial state: `[batch, H, S_k, S_v]`.
+    pub dstate: Tensor<R>,
+}
 
 /// Gated DeltaNet recurrence.
 ///
@@ -100,6 +117,32 @@ pub trait GatedDeltaNetOps<R: Runtime> {
         state: &Tensor<R>,
         chunk_size: usize,
     ) -> Result<(Tensor<R>, Tensor<R>)>;
+
+    /// Backward of [`gdn_chunk_prefill`](Self::gdn_chunk_prefill).
+    ///
+    /// - `q` .. `state`, `chunk_size`: the forward arguments.
+    /// - `d_o`: `dL/do`, `[batch, seq, H, S_v]`.
+    /// - `d_state_final`: `dL/dstate` of the returned state, `[batch, H, S_k, S_v]`.
+    ///   `None` means zero.
+    ///
+    /// `dq` is the gradient of the unscaled `q`, so it includes the `1 / sqrt(S_k)` factor.
+    /// A wrong `d_o` or `d_state_final` shape, or `chunk_size == 0`, is an error.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "six forward inputs, two output gradients and the chunk size"
+    )]
+    fn gdn_chunk_backward(
+        &self,
+        q: &Tensor<R>,
+        k: &Tensor<R>,
+        v: &Tensor<R>,
+        g: &Tensor<R>,
+        beta: &Tensor<R>,
+        state: &Tensor<R>,
+        d_o: &Tensor<R>,
+        d_state_final: Option<&Tensor<R>>,
+        chunk_size: usize,
+    ) -> Result<GdnGrads<R>>;
 
     /// Single-token recurrence from the post-SiLU conv output and the raw
     /// gate projections. `seq` must be 1.

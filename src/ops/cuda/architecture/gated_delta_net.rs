@@ -4,9 +4,9 @@
 //! (F32, one token, `S_k` in {32, 64, 128}) and delegates to impl_generic
 //! otherwise. `gdn_step_from_conv` does the same with the kernel in
 //! `gdn_step_from_conv`, which also absorbs the split, L2 norm, head tiling
-//! and gate chain. `gdn_chunk_prefill` delegates to impl_generic: batched
-//! matmul, elementwise ops and numr's batched triangular solve, all native
-//! on this backend.
+//! and gate chain. `gdn_chunk_prefill` and `gdn_chunk_backward` delegate to
+//! impl_generic: batched matmul, elementwise ops and numr's batched
+//! triangular solve, all native on this backend.
 
 use crate::error::Result;
 use crate::ops::cuda::architecture::gdn_step::{gdn_step_fused, supports};
@@ -14,10 +14,10 @@ use crate::ops::cuda::architecture::gdn_step_from_conv::{
     gdn_step_from_conv_fused, supports_from_conv,
 };
 use crate::ops::impl_generic::architecture::gated_delta_net::{
-    check_gdn_conv_shapes, check_gdn_shapes, gdn_chunk_prefill_impl, gdn_step_from_conv_impl,
-    gdn_step_impl,
+    check_gdn_conv_shapes, check_gdn_shapes, gdn_chunk_backward_impl, gdn_chunk_prefill_impl,
+    gdn_step_from_conv_impl, gdn_step_impl,
 };
-use crate::ops::traits::architecture::gated_delta_net::GatedDeltaNetOps;
+use crate::ops::traits::architecture::gated_delta_net::{GatedDeltaNetOps, GdnGrads};
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
@@ -52,6 +52,32 @@ impl GatedDeltaNetOps<CudaRuntime> for CudaClient {
         chunk_size: usize,
     ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
         gdn_chunk_prefill_impl(self, q, k, v, g, beta, state, chunk_size)
+    }
+
+    fn gdn_chunk_backward(
+        &self,
+        q: &Tensor<CudaRuntime>,
+        k: &Tensor<CudaRuntime>,
+        v: &Tensor<CudaRuntime>,
+        g: &Tensor<CudaRuntime>,
+        beta: &Tensor<CudaRuntime>,
+        state: &Tensor<CudaRuntime>,
+        d_o: &Tensor<CudaRuntime>,
+        d_state_final: Option<&Tensor<CudaRuntime>>,
+        chunk_size: usize,
+    ) -> Result<GdnGrads<CudaRuntime>> {
+        gdn_chunk_backward_impl(
+            self,
+            q,
+            k,
+            v,
+            g,
+            beta,
+            state,
+            d_o,
+            d_state_final,
+            chunk_size,
+        )
     }
 
     fn gdn_step_from_conv(

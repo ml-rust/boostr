@@ -81,6 +81,7 @@ For the feature flags, see the [README](../README.md#feature-flags).
 - **Mixed precision** (AMP) with automatic loss scaling (`trainer/amp.rs`, `optimizer/grad_scaler.rs`).
 - **Gradient accumulation** and checkpointing, with an asynchronous checkpoint writer.
 - **Learning rate schedules**: constant, linear warmup, cosine annealing, Warmup-Stable-Decay, and step decay.
+- **Gated DeltaNet training**: `var_gdn_chunk` (`ops/autograd_gated_delta_net.rs`) runs the chunked prefill in autograd. The final state's gradient is not propagated.
 - **Distributed training** (`src/distributed/`):
   - ZeRO stages 1, 2, and 3 for parameter, gradient, and optimizer sharding
   - Tensor parallelism with communicators

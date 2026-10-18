@@ -6,7 +6,7 @@ pub mod position;
 pub mod quantization;
 pub mod training;
 
-pub use architecture::{GatedDeltaNetOps, MoEOps};
+pub use architecture::{GatedDeltaNetOps, GdnGrads, MoEOps};
 pub use attention::{
     AttentionOps, AttnOutLayout, FlashAlibiOps, FlashAttentionOps, FusedQkvOps, KvSeqLen, MlaOps,
     PagedAttentionOps, VarLenAttentionOps,

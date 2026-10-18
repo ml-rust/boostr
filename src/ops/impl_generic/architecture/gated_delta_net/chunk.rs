@@ -5,9 +5,10 @@
 //! state orientation documented on the trait. Every tensor below is
 //! row-major; llama.cpp's `ne[0]` is the last axis here.
 
+use super::chunk_layout::{chunk_of, from_chunks};
+use super::chunk_terms::{ChunkTerms, Chunked, advance_state, chunk_inputs};
 use super::common::check_gdn_shapes;
-use super::ut_transform::ut_transform;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use numr::algorithm::linalg::LinearAlgebraAlgorithms;
 use numr::dtype::DType;
 use numr::ops::{
@@ -16,53 +17,6 @@ use numr::ops::{
 };
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
-
-/// Zero-pad `t` along `dim` 1 from `seq` to `padded` tokens.
-fn pad_seq<R, C>(client: &C, t: &Tensor<R>, seq: usize, padded: usize) -> Result<Tensor<R>>
-where
-    R: Runtime<DType = DType>,
-    C: ShapeOps<R>,
-{
-    if padded == seq {
-        return Ok(t.clone());
-    }
-    let mut pad_shape = t.shape().to_vec();
-    pad_shape[1] = padded - seq;
-    let pad = Tensor::<R>::zeros(&pad_shape, t.dtype(), t.device())?;
-    Ok(client.cat(&[t, &pad], 1)?)
-}
-
-/// `[batch, seq, H, S]` -> `[batch * H, n_chunks, chunk, S]`.
-fn to_chunks<R: Runtime>(
-    t: &Tensor<R>,
-    n: usize,
-    n_chunks: usize,
-    chunk: usize,
-) -> Result<Tensor<R>> {
-    let s = t.shape()[3];
-    Ok(t.permute(&[0, 2, 1, 3])?
-        .contiguous()?
-        .reshape(&[n, n_chunks, chunk, s])?)
-}
-
-/// `[batch, seq, H]` -> `[batch * H, n_chunks, chunk]`.
-fn gate_to_chunks<R: Runtime>(
-    t: &Tensor<R>,
-    n: usize,
-    n_chunks: usize,
-    chunk: usize,
-) -> Result<Tensor<R>> {
-    Ok(t.permute(&[0, 2, 1])?
-        .contiguous()?
-        .reshape(&[n, n_chunks, chunk])?)
-}
-
-/// Chunk `c` of a `[N, n_chunks, ..]` tensor as a contiguous `[N, ..]` tensor.
-fn chunk_of<R: Runtime>(t: &Tensor<R>, c: usize) -> Result<Tensor<R>> {
-    let mut shape = t.shape().to_vec();
-    shape.remove(1);
-    Ok(t.narrow(1, c, 1)?.contiguous()?.reshape(&shape)?)
-}
 
 /// Chunked gated delta rule over a whole sequence.
 ///
@@ -111,65 +65,23 @@ where
         + TensorOps<R>,
 {
     let dims = check_gdn_shapes(q, k, v, g, beta, state)?;
-    if chunk_size == 0 {
-        return Err(Error::InvalidArgument {
-            arg: "chunk_size",
-            reason: "must be >= 1".into(),
-        });
-    }
-    let (batch, seq, heads, s_k, s_v) = (dims.batch, dims.seq, dims.heads, dims.s_k, dims.s_v);
-    let n = batch * heads;
-    let n_chunks = seq.div_ceil(chunk_size);
-    let padded = n_chunks * chunk_size;
-    let cs = chunk_size;
-    let dtype = q.dtype();
-    let device = q.device();
-
-    // Pad to a chunk multiple. Padded tokens carry beta = 0 and g = 0, so
-    // their rows of A, U and W vanish and the final state is untouched.
-    let q = to_chunks(&pad_seq(client, q, seq, padded)?, n, n_chunks, cs)?;
-    let q = client.mul_scalar(&q, 1.0 / (s_k as f64).sqrt())?;
-    let k = to_chunks(&pad_seq(client, k, seq, padded)?, n, n_chunks, cs)?;
-    let v = to_chunks(&pad_seq(client, v, seq, padded)?, n, n_chunks, cs)?;
-    let g = gate_to_chunks(&pad_seq(client, g, seq, padded)?, n, n_chunks, cs)?;
-    let beta = gate_to_chunks(&pad_seq(client, beta, seq, padded)?, n, n_chunks, cs)?
-        .reshape(&[n, n_chunks, cs, 1])?;
-
-    let k_b = client.mul(&k, &beta)?;
-    let v_b = client.mul(&v, &beta)?;
-
-    // Masks: [1, 1, cs, cs], broadcast over (N, n_chunks).
-    let ones = Tensor::<R>::ones(&[cs, cs], dtype, device)?;
-    let mask_lower = LinalgOps::tril(client, &ones, 0)?.reshape(&[1, 1, cs, cs])?;
-    let mask_strict = LinalgOps::tril(client, &ones, -1)?.reshape(&[1, 1, cs, cs])?;
-
-    // decay[j][i] = exp(g_cs[j] - g_cs[i]) for i <= j. The difference is
-    // zeroed above the diagonal before exp (as ggml_tri does) so no
-    // positive exponent is ever evaluated; A and KQ mask it out again.
-    let g_cs = client.cumsum(&g, 2)?; // [N, n_chunks, cs]
-    let g_j = g_cs.unsqueeze(3)?; // [N, n_chunks, cs, 1]
-    let g_i = g_cs.unsqueeze(2)?; // [N, n_chunks, 1, cs]
-    let diff = client.sub(&g_j, &g_i)?;
-    let diff = client.mul(&diff, &mask_lower)?;
-    let decay = client.exp(&diff)?;
-
-    let k_t = k.transpose(2, 3)?;
-    let a = client.matmul(&k_b, &k_t)?; // A[j][i] = beta_j k_j . k_i
-    let a = client.mul(&client.mul(&a, &decay)?, &mask_strict)?;
-    let kq = client.matmul(&q, &k_t)?; // KQ[j][i] = q_j . k_i
-    let kq = client.mul(&client.mul(&kq, &decay)?, &mask_lower)?;
-
-    let t = ut_transform(client, &a, n, n_chunks, cs)?; // [N, n_chunks, cs, cs]
-
-    let u = client.matmul(&t, &v_b)?; // [N, n_chunks, cs, S_v]
-    let g_exp = client.exp(&g_cs)?.unsqueeze(3)?; // [N, n_chunks, cs, 1]
-    let w = client.matmul(&t, &client.mul(&k_b, &g_exp)?)?; // [N, n_chunks, cs, S_k]
-    let q_g = client.mul(&q, &g_exp)?;
-
-    let g_last = g_cs.narrow(2, cs - 1, 1)?.contiguous()?; // [N, n_chunks, 1]
-    let g_last_exp = client.exp(&g_last)?;
-    let g_diff_exp = client.exp(&client.sub(&g_last, &g_cs)?)?.unsqueeze(3)?;
-    let k_g_t = client.mul(&k, &g_diff_exp)?.transpose(2, 3)?; // [N, n_chunks, S_k, cs]
+    let (batch, heads, s_k, s_v) = (dims.batch, dims.heads, dims.s_k, dims.s_v);
+    let Chunked {
+        n,
+        n_chunks,
+        padded,
+        terms,
+        ..
+    } = chunk_inputs(client, q, k, v, g, beta, dims, chunk_size)?;
+    let ChunkTerms {
+        u,
+        w,
+        kq,
+        q_g,
+        k_g_t,
+        g_last_exp,
+        ..
+    } = terms;
 
     let mut s = state.contiguous()?.reshape(&[n, s_k, s_v])?;
     let mut outs: Vec<Tensor<R>> = Vec::with_capacity(n_chunks);
@@ -179,25 +91,18 @@ where
         let kq_c = chunk_of(&kq, c)?;
         let q_g_c = chunk_of(&q_g, c)?;
         let k_g_t_c = chunk_of(&k_g_t, c)?;
-
-        let v_prime = client.matmul(&w_c, &s)?; // [N, cs, S_v]
-        let v_new = client.sub(&u_c, &v_prime)?;
-        let o_intra = client.matmul(&kq_c, &v_new)?;
-        let o_inter = client.matmul(&q_g_c, &s)?;
-        outs.push(client.add(&o_inter, &o_intra)?);
-
-        let ds = client.matmul(&k_g_t_c, &v_new)?; // [N, S_k, S_v]
         let gl = chunk_of(&g_last_exp, c)?.reshape(&[n, 1, 1])?;
-        s = client.add(&client.mul(&s, &gl)?, &ds)?;
+
+        let o_inter = client.matmul(&q_g_c, &s)?;
+        let (v_new, s_next) = advance_state(client, &s, &w_c, &u_c, &k_g_t_c, &gl)?;
+        let o_intra = client.matmul(&kq_c, &v_new)?;
+        outs.push(client.add(&o_inter, &o_intra)?);
+        s = s_next;
     }
 
     let out_refs: Vec<&Tensor<R>> = outs.iter().collect();
     let o = client.cat(&out_refs, 1)?; // [N, padded, S_v]
-    let o = o
-        .reshape(&[batch, heads, padded, s_v])?
-        .narrow(2, 0, seq)?
-        .permute(&[0, 2, 1, 3])?
-        .contiguous()?;
+    let o = from_chunks(&o, dims, padded)?;
     let s = s.reshape(&[batch, heads, s_k, s_v])?;
     Ok((o, s))
 }

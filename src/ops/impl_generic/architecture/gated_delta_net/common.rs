@@ -1,4 +1,4 @@
-//! Shape checks shared by the GDN step and chunk paths.
+//! Shape checks shared by the GDN step, chunk and backward paths.
 
 use crate::error::{Error, Result};
 use numr::runtime::Runtime;
@@ -29,7 +29,12 @@ fn expect_rank<R: Runtime>(t: &Tensor<R>, arg: &'static str, rank: usize) -> Res
     Ok(())
 }
 
-fn expect_shape<R: Runtime>(t: &Tensor<R>, arg: &'static str, want: &[usize]) -> Result<()> {
+/// Error unless `t` has exactly the shape `want`.
+pub(super) fn expect_shape<R: Runtime>(
+    t: &Tensor<R>,
+    arg: &'static str,
+    want: &[usize],
+) -> Result<()> {
     if t.shape() != want {
         return Err(Error::InvalidArgument {
             arg,

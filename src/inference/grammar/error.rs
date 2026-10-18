@@ -1,4 +1,4 @@
-//! Errors from parsing and expanding a GBNF grammar.
+//! Errors from parsing, expanding and compiling a GBNF grammar.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -20,8 +20,10 @@ pub enum GrammarErrorKind {
     Cycle,
     /// The text uses GBNF syntax outside the accepted subset.
     Unsupported,
-    /// The grammar exceeds a node, depth or repeat limit.
+    /// The grammar exceeds a node, depth, repeat or automaton limit.
     LimitExceeded,
+    /// The grammar matches no string, so no automaton exists for it.
+    EmptyLanguage,
 }
 
 /// An error in a GBNF grammar, with its source position when known.
@@ -103,6 +105,15 @@ impl GrammarError {
                  Write repetition with `*`, `+` or `{{n,m}}`.",
                 cycle_path(chain)
             ),
+        )
+    }
+
+    /// An automaton size invariant broke. The grammar must be reported.
+    pub(crate) fn internal(detail: &str) -> Self {
+        Self::new(
+            GrammarErrorKind::LimitExceeded,
+            None,
+            format!("internal automaton error: {detail}. Report this grammar as a bug."),
         )
     }
 

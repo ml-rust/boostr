@@ -9,7 +9,7 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Adds exact-resume optimizer state export and import, keyed by parameter name. Adds a GBNF grammar front end.
+Adds exact-resume optimizer state export and import, keyed by parameter name. Adds a GBNF grammar front end and a compiler from a grammar to a minimal byte-level DFA.
 
 ### ⚠️ Breaking changes
 
@@ -26,6 +26,10 @@ Adds exact-resume optimizer state export and import, keyed by parameter name. Ad
 - **`Grammar::expand`** — inlines every rule reference from `root` and returns one `Expr`. A rule expands once, and each later use clones it.
 - **`ExpandLimits`** — bounds memory and work for untrusted grammar text. `max_input_bytes` (default 1 MiB) rejects longer text before parsing allocates. `max_nodes` (default 500 000) caps the payload-weighted node count of the expanded tree: a node weighs 1, a literal adds 1 per started 16 bytes, and a class adds 1 per range. Every clone of a rule counts again. `max_repeat_product` (default 100 000) caps the in-context unrolled size of each repeat: the product of its factor and every enclosing factor, times the unrolled size of its body. `{n,m}` has factor `m`, `{n,}` has factor `n`, and `*`, `+`, `?` have factor 1. `max_repeat`, `max_group_depth` and `max_expand_depth` cap one repeat count, group nesting and expansion depth. A caller must still cap its request body.
 - **`GrammarError`** — every parse and expansion error carries a `GrammarErrorKind`, a message and a `line:column` position. A missing `root`, an undefined or duplicate rule, a rule cycle such as `a -> b -> a`, a token reference and an exceeded limit are errors. Any input returns an error or a grammar, never a panic or a hang. A message quotes at most 64 characters of any rule name, and a cycle lists its first 16 rules then `... (N more)`. It converts to `Error::InvalidArgument`.
+- **`GrammarErrorKind::EmptyLanguage`** — a grammar that matches no string, such as `root ::= [^\x00-\U0010FFFF]`, is an error at compile time.
+- **`Grammar::compile`, `grammar::compile`** — lower the expanded root to a minimal `ByteDfa`. The language is the UTF-8 encoding of every string the grammar matches. Classes and `.` cover Unicode scalar values, so overlong forms, surrogates and bytes above `F4 8F BF BF` never match. The pipeline builds a byte NFA and runs subset construction over byte classes. It then minimizes with Hopcroft's algorithm and trims every state that reaches no accepting state. No step recurses on tree depth. `ByteDfa::from_expr` lowers an expanded `Expr` directly, and a rule reference left in it is an `Unsupported` error.
+- **`ByteDfa`** — state 0 is the start, and every state reaches an accepting state. `transitions()` is the dense table, 256 `u32` entries per state, with `ByteDfa::NO_TRANSITION` (`u32::MAX`) for a forbidden byte. `accepting()` holds one flag per state. `step`, `walk` and `accepts` run the DFA, and `step` returns `None` for a forbidden byte.
+- **`CompileLimits`, `AutomatonLimits`** — `CompileLimits` pairs `ExpandLimits` with `AutomatonLimits`. `max_nfa_states` (default 200 000), `max_nfa_edges` (default 2 000 000, byte-range and epsilon edges), `max_dfa_states` (default 16 384, before minimization) and `max_subset_work` (default 10 000 000 NFA states and edges visited) stop construction as soon as a count passes its limit. The error names the count and the limit. `AutomatonLimits::check` rejects a `max_dfa_states` above 16 777 214 with a `LimitExceeded` error, before any work starts. `ByteDfa::from_expr`, `Grammar::compile` and `compile` call it. An internal size error in minimization is a `LimitExceeded` error that starts with `internal automaton error`, never a wrong DFA.
 
 ### Fixed
 

@@ -28,6 +28,8 @@ Adds exact-resume optimizer state export and import, keyed by parameter name. Ad
 
 ### Added
 
+- **`KvCache::truncate`, `LayeredKvCache::truncate`** — rollback of the contiguous KV cache. They cut the logical length back to `len`, and the next write overwrites the cut slots. Every lane longer than `len` ends at `len`. Memory is not zeroed, and capacity and device addresses are unchanged. A `len` past `seq_len()` is an error, and nothing changes. `LayeredKvCache::truncate` checks every layer before it modifies one.
+- **`KvCache::truncate_lane`, `LayeredKvCache::truncate_lane`** — cut one lane of a lane-at-a-time cache back to `len` and leave `seq_len()` and every other lane unchanged. A lane outside the batch, or a `len` past the lane's end, is an error, and nothing changes.
 - **`format::write_atomic`** — public crash-safe file replacement. It writes a sibling temp file, syncs it, renames it over the target and syncs the directory. An error leaves an existing file unchanged.
 - **`Optimizer::state_dict`** — exports the optimizer state as `HashMap<String, Tensor<R>>`. The caller passes each parameter's name by `TensorId`. Tensors keep their dtype and are deep copies on the optimizer's device. A parameter with no state writes no key. A parameter with state and no name is an error.
 - **`Optimizer::load_state_dict`** — replaces the optimizer state from a state dictionary. The caller passes each parameter's id by name. The load checks every key before it modifies the optimizer, so an error leaves it unchanged. An unknown parameter name, an unknown field, a shape or dtype mismatch, a partial set of keys and a missing `__step` are errors that name the key. The first step after a load continues from the loaded state.

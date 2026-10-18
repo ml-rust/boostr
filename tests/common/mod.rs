@@ -12,7 +12,6 @@ mod fixtures;
 pub mod kv_start;
 #[cfg(feature = "cuda")]
 pub mod llama_graph;
-#[cfg(feature = "cuda")]
 pub mod llama_tiny;
 mod params;
 mod q8_0;

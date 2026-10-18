@@ -4,6 +4,7 @@ mod grow_batch;
 pub mod lanes;
 pub mod layered;
 pub mod paged;
+mod truncate;
 
 pub use basic::KvCache;
 pub use frozen::FrozenLayeredKvCache;

@@ -1,16 +1,19 @@
-//! A tiny synthetic Llama on the CUDA runtime, loaded through the same
+//! A tiny synthetic Llama on any runtime, loaded through the same
 //! `VarMap` -> `VarBuilder` -> `LoadedModel::load` path a checkpoint takes.
 //! Deterministic weights from a seed; every weight is cast to one dtype so
 //! the model's activations, its RoPE tables and its KV cache share it.
 //!
 //! Head dim is 32, the smallest the CUDA graph decode kernel accepts.
+//! The attention is GQA: 4 query heads share 2 KV heads.
 
+use boostr::DequantOps;
 use boostr::model::LoadedModel;
 use boostr::model::config::{AttentionConfig, ModelConfig};
 use boostr::nn::{VarBuilder, VarMap};
 use numr::dtype::DType;
-use numr::ops::TypeConversionOps;
+use numr::ops::{IndexingOps, ReduceOps, ShapeOps, TypeConversionOps};
 use numr::runtime::Runtime;
+#[cfg(feature = "cuda")]
 use numr::runtime::cuda::{CudaDevice, CudaRuntime};
 use numr::tensor::Tensor;
 
@@ -75,22 +78,25 @@ pub fn tiny_config() -> ModelConfig {
     }
 }
 
-struct Weights<'a> {
-    device: &'a CudaDevice,
+struct Weights<'a, R: Runtime> {
+    device: &'a R::Device,
     rng: Lcg,
     dtype: DType,
-    map: VarMap<CudaRuntime>,
+    map: VarMap<R>,
 }
 
-impl Weights<'_> {
+impl<R: Runtime<DType = DType>> Weights<'_, R>
+where
+    R::Client: TypeConversionOps<R>,
+{
     fn put(&mut self, name: &str, shape: &[usize], lo: f32, hi: f32) {
         let n: usize = shape.iter().product();
         let data: Vec<f32> = (0..n).map(|_| self.rng.uniform(lo, hi)).collect();
-        let t = Tensor::<CudaRuntime>::from_slice(&data, shape, self.device).unwrap();
+        let t = Tensor::<R>::from_slice(&data, shape, self.device).unwrap();
         let t = if self.dtype == DType::F32 {
             t
         } else {
-            let client = CudaRuntime::default_client(self.device);
+            let client = R::default_client(self.device);
             client.cast(&t, self.dtype).unwrap()
         };
         self.map.insert(name.to_string(), t);
@@ -106,9 +112,19 @@ impl Weights<'_> {
     }
 }
 
-/// Build the model at `dtype` from `seed`.
+/// Build the model on CUDA at `dtype` from `seed`.
+#[cfg(feature = "cuda")]
 pub fn tiny_llama(device: &CudaDevice, seed: u64, dtype: DType) -> LoadedModel<CudaRuntime> {
-    let mut w = Weights {
+    tiny_llama_on::<CudaRuntime>(device, seed, dtype)
+}
+
+/// Build the model on runtime `R` at `dtype` from `seed`.
+pub fn tiny_llama_on<R>(device: &R::Device, seed: u64, dtype: DType) -> LoadedModel<R>
+where
+    R: Runtime<DType = DType>,
+    R::Client: IndexingOps<R> + DequantOps<R> + TypeConversionOps<R> + ReduceOps<R> + ShapeOps<R>,
+{
+    let mut w = Weights::<R> {
         device,
         rng: Lcg(seed),
         dtype,
@@ -149,5 +165,5 @@ pub fn tiny_llama(device: &CudaDevice, seed: u64, dtype: DType) -> LoadedModel<C
     let config = tiny_config();
     let mut map = w.map;
     let mut vb = VarBuilder::new(&mut map, device);
-    LoadedModel::<CudaRuntime>::load(&config, &mut vb).unwrap()
+    LoadedModel::<R>::load(&config, &mut vb).unwrap()
 }

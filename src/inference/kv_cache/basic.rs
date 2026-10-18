@@ -288,14 +288,19 @@ where
         self.active_v.as_ref().unwrap_or(&self.v_cache)
     }
 
+    /// Logical length: the next fused write lands here. Every read stops at
+    /// it, so slots past it are never read, see [`truncate`](Self::truncate).
     pub fn seq_len(&self) -> usize {
         self.seq_len
     }
 
     /// One past each lane's last key, lane by lane.
     ///
-    /// [`seq_len`](Self::seq_len) is the maximum of these and moves only up.
-    /// It is the cursor a FUSED write appends at and says nothing about a
+    /// [`seq_len`](Self::seq_len) is at least the maximum of these. A write
+    /// never lowers it. Only [`reset`](Self::reset) and
+    /// [`truncate`](Self::truncate) do.
+    ///
+    /// `seq_len` is the cursor a FUSED write appends at and says nothing about a
     /// cache filled one lane at a time. A caller checking where a lane's next
     /// token belongs reads this instead.
     ///

@@ -63,6 +63,7 @@ For the feature flags, see the [README](../README.md#feature-flags).
 - **Conv1d** and **Conv2d**
 - **LoRA linear** layers (`maybe_lora.rs`)
 - **Quantized embedding** (`quant_embedding.rs`)
+- **Trainable LSTM** (`rnn/`): multi-layer and bidirectional, with `torch.nn.LSTM` parameter names, in autograd. The inference `Lstm` and `BiLstm` (`lstm.rs`) hold raw tensors.
 
 ## Inference
 

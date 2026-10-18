@@ -16,6 +16,7 @@ mod norm;
 pub mod quant_embedding;
 mod reexports;
 mod regularize;
+pub mod rnn;
 pub mod rope;
 mod rotated;
 pub mod timestep_embedding;

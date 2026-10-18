@@ -27,7 +27,7 @@ use numr::tensor::{Tensor, TensorId};
 /// # Usage
 ///
 /// ```ignore
-/// let comm = Arc::new(NcclCommunicator::new(...)?);
+/// let comm = Arc::new(NcclCommunicator::from_rank(stream, rank, world_size, id)?);
 /// let mut trainer = DistributedTrainer::new(config, comm.clone())?;
 ///
 /// // Sync initial parameters from rank 0

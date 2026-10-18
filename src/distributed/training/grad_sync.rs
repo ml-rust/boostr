@@ -15,6 +15,13 @@ use numr::tensor::{Tensor, TensorId};
 
 /// AllReduce all gradient tensors in a `GradStore` (in-place sum, then average by world_size).
 ///
+/// # Warning: single process only
+///
+/// This function walks the store in `HashMap` order. That order and the `TensorId`s differ
+/// across ranks, so ranks issue collectives in different orders. NCCL then hangs or sums
+/// the wrong tensors. It also reduces in place over the caller's gradient storage.
+/// Use [`all_reduce_flat_sum`](super::ordered::all_reduce_flat_sum) for multi-rank training.
+///
 /// Each gradient tensor is all-reduced with `ReduceOp::Sum` across all ranks,
 /// then divided by `world_size` to produce the average gradient.
 ///
@@ -66,6 +73,12 @@ where
 /// Broadcast all parameters from the root rank to all other ranks.
 ///
 /// Ensures all ranks start with identical parameters before training begins.
+///
+/// # Warning: single process only
+///
+/// This function walks `params` in `HashMap` order. That order differs across ranks, so
+/// ranks broadcast different tensors into each other. Use
+/// [`broadcast_params_ordered`](super::ordered::broadcast_params_ordered) for multi-rank training.
 ///
 /// # Errors
 ///

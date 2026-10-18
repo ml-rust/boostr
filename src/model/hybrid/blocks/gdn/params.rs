@@ -8,7 +8,9 @@
 //!
 //! The decay has two names. A frozen block reports the loaded `ssm_a` as
 //! `a_neg_exp`. A block made trainable reports `a_log` as `A_log`, the
-//! Hugging Face name, and no longer reports `a_neg_exp`.
+//! Hugging Face name, and no longer reports `a_neg_exp`. A block from
+//! `with_ids`, `init` or `load` reports `A_log` and a separate gate pair
+//! from the start.
 //!
 //! A fused gate pair reports its concatenated base as
 //! `alpha_beta_proj.weight`. That weight exists in no checkpoint and

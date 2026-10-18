@@ -187,7 +187,7 @@ pub(super) fn slice_heads<R: Runtime>(
         .map_err(Error::Numr)
 }
 
-fn check_linear<R: Runtime<DType = DType>>(
+pub(super) fn check_linear<R: Runtime<DType = DType>>(
     linear: &MaybeQuantLinear<R>,
     name: &str,
     out_features: usize,
@@ -204,7 +204,7 @@ fn check_linear<R: Runtime<DType = DType>>(
     Ok(())
 }
 
-fn check_shape<R: Runtime>(t: &Tensor<R>, name: &str, want: &[usize]) -> Result<()> {
+pub(super) fn check_shape<R: Runtime>(t: &Tensor<R>, name: &str, want: &[usize]) -> Result<()> {
     if t.shape() != want {
         return Err(Error::ModelError {
             reason: format!("gdn.{name}: expected shape {want:?}, got {:?}", t.shape()),
@@ -214,7 +214,11 @@ fn check_shape<R: Runtime>(t: &Tensor<R>, name: &str, want: &[usize]) -> Result<
 }
 
 /// Bring the conv kernel to `[qkv_dim, 1, conv_kernel]`.
-fn conv_weight_ncl<R: Runtime>(w: Tensor<R>, qkv_dim: usize, kernel: usize) -> Result<Tensor<R>> {
+pub(super) fn conv_weight_ncl<R: Runtime>(
+    w: Tensor<R>,
+    qkv_dim: usize,
+    kernel: usize,
+) -> Result<Tensor<R>> {
     let shape = w.shape();
     let ok = shape == [qkv_dim, kernel] || shape == [qkv_dim, 1, kernel];
     if !ok {

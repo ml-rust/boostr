@@ -69,18 +69,10 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
             + DequantOps<R>
             + GatedDeltaNetOps<R>,
     {
+        self.check_train_input(x)?;
         let cfg = &self.cfg;
         let shape = x.shape();
-        if shape.len() != 3 || shape[2] != cfg.hidden_size {
-            return Err(Error::ModelError {
-                reason: format!(
-                    "gdn: expected [batch, seq, {}], got {shape:?}",
-                    cfg.hidden_size
-                ),
-            });
-        }
         let (batch, seq) = (shape[0], shape[1]);
-        self.check_tracked()?;
         let (h_k, h_v, s) = (cfg.key_heads, cfg.value_heads, cfg.state_size);
         let key_dim = cfg.key_dim();
         let value_dim = cfg.value_dim();
@@ -134,6 +126,26 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
             o
         };
         tracked_forward(&self.ssm_out, "ssm_out", client, &o)
+    }
+
+    /// The checks [`Self::forward_train`] runs before any compute: `x` is
+    /// `[batch, seq, hidden_size]`, and every projection has a tracked path.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::forward_train`]: [`Error::ModelError`] for the shape,
+    /// [`Error::InvalidArgument`] for a projection.
+    pub(super) fn check_train_input(&self, x: &Var<R>) -> Result<()> {
+        let shape = x.shape();
+        if shape.len() != 3 || shape[2] != self.cfg.hidden_size {
+            return Err(Error::ModelError {
+                reason: format!(
+                    "gdn: expected [batch, seq, {}], got {shape:?}",
+                    self.cfg.hidden_size
+                ),
+            });
+        }
+        self.check_tracked()
     }
 
     /// Refuse every projection the tracked forward cannot carry a gradient

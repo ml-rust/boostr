@@ -15,7 +15,7 @@ pub use adagrad::{AdaGrad, AdaGradConfig};
 pub use adamw::{AdamW, AdamWConfig, ParamGroup};
 pub use grad_accumulator::GradAccumulator;
 pub use grad_clip::{clip_grad_norm, clip_grad_norm_per_param, clip_grad_value};
-pub use grad_scaler::GradScaler;
+pub use grad_scaler::{GradScaler, GradScalerConfig, GradScalerState, UnscaleResult};
 pub use lamb::{Lamb, LambConfig};
 pub use lr_schedule::{DecayShape, LrSchedule};
 pub(crate) use master_weight::{init_master, widen_grad, write_back};

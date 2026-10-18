@@ -101,7 +101,22 @@ impl<R: Runtime> MoeLayer<R> {
     pub fn shared_expert_scale(&self) -> f32 {
         self.shared_expert_scale
     }
+}
 
+impl<R: Runtime<DType = DType>> MoeLayer<R> {
+    /// Cheap duplicate that keeps every parameter's `TensorId`: router gate,
+    /// routed experts, and shared expert. Each part goes through its own `alias`.
+    pub fn alias(&self) -> Self {
+        Self {
+            router: self.router.alias(),
+            experts: self.experts.iter().map(Expert::alias).collect(),
+            shared_expert: self.shared_expert.as_ref().map(Expert::alias),
+            shared_expert_scale: self.shared_expert_scale,
+        }
+    }
+}
+
+impl<R: Runtime> MoeLayer<R> {
     /// Forward pass with auxiliary loss.
     ///
     /// Input: `[num_tokens, hidden_size]`
@@ -192,14 +207,9 @@ impl<R: Runtime> MoeLayer<R> {
                     .map_err(Error::Numr)?;
                 let mask_f32 = client.cast(&mask, DType::F32).map_err(Error::Numr)?;
 
-                // Check if any tokens are routed to this expert
-                let count = client.sum(&mask_f32, &[0, 1], false)?;
-                let count_val: Vec<f32> = count.to_vec();
-                if count_val[0] < 0.5 {
-                    continue;
-                }
-
-                // Run expert on ALL tokens, then mask out unrouted ones
+                // Run expert on ALL tokens, then mask out unrouted ones.
+                // An expert with no routed token adds only zeros, so the sum is
+                // unchanged except for the sign of a zero. No host read gates it.
                 let expert_out = expert.forward(client, x)?;
 
                 // Weight: expert_out * slot_weight * mask
@@ -365,6 +375,31 @@ mod tests {
                 half[i]
             );
         }
+    }
+
+    /// `alias()` must keep every gate, expert, and shared-expert `TensorId`.
+    #[test]
+    fn alias_preserves_parameter_ids() {
+        let (_client, device) = cpu_setup();
+        let gate_w = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 8], &[2, 4], &device).unwrap();
+        let router = MoeRouter::from_tensor(gate_w, MoeRouterConfig::new(2, 1), true);
+        let shared = experts(1, 4, 8, &device).pop();
+        let layer = MoeLayer::new(router, experts(2, 4, 8, &device), shared)
+            .with_shared_expert_scale(0.5)
+            .unwrap();
+
+        let aliased = layer.alias();
+
+        let ids = |l: &MoeLayer<CpuRuntime>| -> Vec<numr::tensor::TensorId> {
+            let mut ids: Vec<_> = l.router().gate().parameters().iter().map(|p| p.0).collect();
+            for expert in l.experts().iter().chain(l.shared_expert()) {
+                ids.extend(expert.parameters().iter().map(|p| p.0));
+            }
+            ids
+        };
+        assert_eq!(ids(&layer).len(), 1 + 3 * 3);
+        assert_eq!(ids(&layer), ids(&aliased));
+        assert_eq!(aliased.shared_expert_scale(), 0.5);
     }
 
     #[test]

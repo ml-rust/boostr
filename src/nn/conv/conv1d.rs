@@ -136,6 +136,20 @@ impl<R: Runtime> Conv1d<R> {
             .filter(|param| param.1.requires_grad())
             .collect()
     }
+
+    /// Cheap duplicate that keeps every parameter's `TensorId`, for capture in a
+    /// `'static` activation-checkpointing closure. Uses [`Var::alias`], not
+    /// [`Clone`]: a `clone` mints fresh ids and orphans the gradients.
+    pub fn alias(&self) -> Self {
+        Self {
+            weight: self.weight.alias(),
+            bias: self.bias.as_ref().map(Var::alias),
+            stride: self.stride,
+            padding: self.padding,
+            dilation: self.dilation,
+            groups: self.groups,
+        }
+    }
 }
 
 impl<R: Runtime> Module<R> for Conv1d<R> {
@@ -239,5 +253,22 @@ mod tests {
         // Verify weight gradient
         let d_weight: Vec<f32> = grads.get(conv.weight().id()).unwrap().to_vec();
         assert_eq!(d_weight.len(), 3);
+    }
+
+    /// `alias()` must keep each parameter's `TensorId`. A `clone` mints new ids.
+    #[test]
+    fn alias_preserves_parameter_ids() {
+        let (_client, device) = cpu_setup();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 12], &[4, 1, 3], &device).unwrap();
+        let bias = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[4], &device).unwrap();
+        let conv = Conv1d::new(weight, Some(bias), 1, PaddingMode::Same, 1, 1, true);
+
+        let aliased = conv.alias();
+
+        let ids = |c: &Conv1d<CpuRuntime>| -> Vec<TensorId> {
+            c.parameters().into_iter().map(|(id, _)| id).collect()
+        };
+        assert_eq!(ids(&conv).len(), 2);
+        assert_eq!(ids(&conv), ids(&aliased));
     }
 }

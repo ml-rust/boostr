@@ -123,6 +123,16 @@ impl<R: Runtime<DType = DType>> Expert<R> {
         params.extend(self.down_proj.parameters());
         params
     }
+
+    /// Cheap duplicate that keeps every parameter's `TensorId`, adapters included.
+    /// Each projection goes through [`MaybeLoraLinear::alias`], never [`Clone`].
+    pub fn alias(&self) -> Self {
+        Self {
+            gate_proj: self.gate_proj.alias(),
+            up_proj: self.up_proj.alias(),
+            down_proj: self.down_proj.alias(),
+        }
+    }
 }
 
 impl<R: Runtime<DType = DType>> Module<R> for Expert<R> {
@@ -305,6 +315,22 @@ mod tests {
             .expect("dense base has a Var weight")
             .id();
         assert!(params.iter().any(|(id, _)| *id == down_weight_id));
+    }
+
+    /// `alias()` must keep every base and adapter `TensorId`. A `clone` mints new ids.
+    #[test]
+    fn alias_preserves_parameter_ids() {
+        let (_client, device) = cpu_setup();
+        let (gate, up, down) = projections(&device, true);
+        let expert = Expert::new_adapted(adapt(gate, &device, 0.4), up.into(), down.into());
+
+        let aliased = expert.alias();
+
+        let ids = |e: &Expert<CpuRuntime>| -> Vec<TensorId> {
+            e.parameters().into_iter().map(|(id, _)| id).collect()
+        };
+        assert_eq!(ids(&expert).len(), 5);
+        assert_eq!(ids(&expert), ids(&aliased));
     }
 
     /// With frozen bases, only the adapter factors are trainable.

@@ -43,6 +43,15 @@ impl<R: Runtime> MoeRouter<R> {
         &self.gate
     }
 
+    /// Cheap duplicate that keeps the gate's `TensorId`. Uses [`Linear::alias`],
+    /// never [`Clone`]: a `clone` mints a fresh id and orphans the gradient.
+    pub fn alias(&self) -> Self {
+        Self {
+            gate: self.gate.alias(),
+            config: self.config,
+        }
+    }
+
     /// Route tokens to experts.
     ///
     /// Input: `[num_tokens, hidden_size]`
@@ -232,6 +241,22 @@ mod tests {
         assert_eq!(output.indices.shape(), &[3, top_k]);
         assert_eq!(output.logits.shape(), &[3, num_experts]);
         assert_eq!(output.aux_loss.tensor().numel(), 1);
+    }
+
+    /// `alias()` must keep the gate's `TensorId`. A `clone` mints a new id.
+    #[test]
+    fn alias_preserves_gate_id() {
+        let (_client, device) = cpu_setup();
+        let gate_w = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 8], &[2, 4], &device).unwrap();
+        let router = MoeRouter::from_tensor(gate_w, MoeRouterConfig::new(2, 1), true);
+
+        let aliased = router.alias();
+
+        assert_eq!(
+            router.gate().parameters()[0].0,
+            aliased.gate().parameters()[0].0
+        );
+        assert_eq!(aliased.config().top_k, 1);
     }
 
     /// Build a router whose gate is trainable, plus a batch of distinct inputs.

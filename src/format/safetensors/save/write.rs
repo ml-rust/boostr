@@ -62,10 +62,11 @@ fn encode_header(
         current_offset += byte_len;
     }
 
-    let header_str = serde_json::to_string(&serde_json::Value::Object(header)).map_err(|e| {
-        Error::ModelError {
-            reason: format!("JSON serialize error: {e}"),
-        }
+    // Sorted keys keep the header bytes fixed for any metadata map order.
+    let mut header = serde_json::Value::Object(header);
+    header.sort_all_objects();
+    let header_str = serde_json::to_string(&header).map_err(|e| Error::ModelError {
+        reason: format!("JSON serialize error: {e}"),
     })?;
     let mut out = Vec::with_capacity(8 + header_str.len());
     out.extend_from_slice(&(header_str.len() as u64).to_le_bytes());
@@ -195,7 +196,9 @@ mod tests {
             current_offset += byte_len;
         }
 
-        let header_str = serde_json::to_string(&serde_json::Value::Object(header)).unwrap();
+        let mut header = serde_json::Value::Object(header);
+        header.sort_all_objects();
+        let header_str = serde_json::to_string(&header).unwrap();
         let mut out = Vec::new();
         out.extend_from_slice(&(header_str.len() as u64).to_le_bytes());
         out.extend_from_slice(header_str.as_bytes());

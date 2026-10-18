@@ -2,7 +2,8 @@
 //!
 //! `Grammar::parse` reads GBNF text. `Grammar::expand` inlines every rule
 //! reference and returns the `root` expression. `Grammar::compile` lowers
-//! that expression to a minimal `ByteDfa`.
+//! that expression to a minimal `ByteDfa`. `json_schema` builds a grammar
+//! from a JSON Schema.
 
 pub mod ast;
 pub mod automaton_limits;
@@ -10,6 +11,7 @@ mod compile;
 mod dfa;
 pub mod error;
 mod expand;
+pub mod json_schema;
 mod lexer;
 pub mod limits;
 mod literal;

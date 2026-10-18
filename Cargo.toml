@@ -74,6 +74,8 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 regexr = { version = "0.6", default-features = false }
 
 [dev-dependencies]
+# Tests compare property order, so they need serde_json to keep insertion order.
+serde_json = { version = "1", features = ["preserve_order"] }
 bytemuck = { version = "1.25", features = ["derive"] }
 # Tests tokenize with cl100k_base. Declaring it here rather than on the main
 # dependency keeps the ~3 MB payload out of every downstream build: dev-dependency

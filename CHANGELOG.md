@@ -9,7 +9,7 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Adds exact-resume optimizer state export and import, keyed by parameter name.
+Adds exact-resume optimizer state export and import, keyed by parameter name. Adds a GBNF grammar front end.
 
 ### ⚠️ Breaking changes
 
@@ -22,6 +22,10 @@ Adds exact-resume optimizer state export and import, keyed by parameter name.
 - **`Optimizer::load_state_dict`** — replaces the optimizer state from a state dictionary. The caller passes each parameter's id by name. The load checks every key before it modifies the optimizer, so an error leaves it unchanged. An unknown parameter name, an unknown field, a shape or dtype mismatch, a partial set of keys and a missing `__step` are errors that name the key. The first step after a load continues from the loaded state.
 - **State keys** — `AdamW` and `Lamb` write `<name>.exp_avg`, `<name>.exp_avg_sq`, `<name>.master` and `__step`. `AdaGrad` writes `<name>.sum_sq` and `<name>.master`. `Sgd` writes `<name>.momentum_buffer` and `<name>.master`. `<name>.master` exists only for a parameter with an F32 master copy. `__step` is a 1-element F64 tensor. `AdaGrad` and `Sgd` have no step key and refuse one on load.
 - **`FusedDistributedOptimizer`, `ZeroStage1`, `ZeroStage2`, `ZeroStage3`** — gain `state_dict` and `load_state_dict`, which forward to the inner `AdamW`. A ZeRO stage holds the state of its owned parameters only, so each rank saves its own shard.
+- **`inference::grammar`** — GBNF front end for the regular subset. `Grammar::parse` reads literals, classes, `.`, rule references, groups, `|`, and `*`, `+`, `?`, `{n}`, `{n,}`, `{,m}`, `{n,m}` on any element. A rule body can span lines. Comments start with `#`. The result is an `Expr` tree over Unicode scalar values.
+- **`Grammar::expand`** — inlines every rule reference from `root` and returns one `Expr`. A rule expands once, and each later use clones it.
+- **`ExpandLimits`** — bounds memory and work for untrusted grammar text. `max_input_bytes` (default 1 MiB) rejects longer text before parsing allocates. `max_nodes` (default 500 000) caps the payload-weighted node count of the expanded tree: a node weighs 1, a literal adds 1 per started 16 bytes, and a class adds 1 per range. Every clone of a rule counts again. `max_repeat_product` (default 100 000) caps the in-context unrolled size of each repeat: the product of its factor and every enclosing factor, times the unrolled size of its body. `{n,m}` has factor `m`, `{n,}` has factor `n`, and `*`, `+`, `?` have factor 1. `max_repeat`, `max_group_depth` and `max_expand_depth` cap one repeat count, group nesting and expansion depth. A caller must still cap its request body.
+- **`GrammarError`** — every parse and expansion error carries a `GrammarErrorKind`, a message and a `line:column` position. A missing `root`, an undefined or duplicate rule, a rule cycle such as `a -> b -> a`, a token reference and an exceeded limit are errors. Any input returns an error or a grammar, never a panic or a hang. A message quotes at most 64 characters of any rule name, and a cycle lists its first 16 rules then `... (N more)`. It converts to `Error::InvalidArgument`.
 
 ### Fixed
 

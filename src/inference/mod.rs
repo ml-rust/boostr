@@ -2,6 +2,7 @@ pub mod decision;
 pub mod decode_graph;
 pub mod gdn_state;
 pub mod generate;
+pub mod grammar;
 pub mod kv_cache;
 pub mod lane_decode;
 pub mod lanes;

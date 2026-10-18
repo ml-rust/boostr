@@ -43,7 +43,8 @@ pub struct GdnConfig {
     pub chunk_size: usize,
     /// `ssm_out` columns are in grouped (training) head order rather than the
     /// tiled order the rest of the layer runs in. Set from the GGUF key
-    /// `prism.hadamard.gdn_v_grouped`. See `GdnBlock::group_heads`.
+    /// `prism.hadamard.gdn_v_grouped`. See `group_heads` in the `GdnBlock`
+    /// `heads` module.
     #[serde(default)]
     pub v_grouped: bool,
 }

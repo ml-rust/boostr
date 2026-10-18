@@ -40,12 +40,29 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
         factors: LoraFactors<R>,
         activation_dtype: DType,
     ) -> Result<()> {
+        self.attach_adapter_trainable(client, projection, factors, activation_dtype, false)
+    }
+
+    /// [`Self::attach_adapter`] with `requires_grad = trainable` on both
+    /// factors. The base projection keeps its own `requires_grad`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::attach_adapter`].
+    pub fn attach_adapter_trainable<C: TypeConversionOps<R>>(
+        &mut self,
+        client: &C,
+        projection: GdnProjection,
+        factors: LoraFactors<R>,
+        activation_dtype: DType,
+        trainable: bool,
+    ) -> Result<()> {
         let linear = match projection {
             GdnProjection::AttnQkv => &mut self.attn_qkv,
             GdnProjection::AttnGate => &mut self.attn_gate,
             GdnProjection::SsmOut => &mut self.ssm_out,
         };
-        linear.attach_factors(client, factors, activation_dtype)
+        linear.attach_factors_trainable(client, factors, activation_dtype, trainable)
     }
 
     /// Attach unmerged adapters to `ssm_alpha` (`alpha`) and `ssm_beta`
@@ -69,9 +86,35 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
     where
         C: RuntimeClient<R> + ScalarOps<R> + ShapeOps<R> + TypeConversionOps<R>,
     {
+        self.attach_gate_adapters_trainable(client, alpha, beta, activation_dtype, false)
+    }
+
+    /// [`Self::attach_gate_adapters`] with `requires_grad = trainable` on
+    /// the factors.
+    ///
+    /// A fused pair trains through its block-diagonal adapter only: the
+    /// concatenated `[2 * value_heads, hidden_size]` base stays frozen, so
+    /// no gradient lands on a weight that exists in no checkpoint. A
+    /// separate pair trains each adapter, and each dense base keeps the
+    /// `requires_grad` it was built with.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::attach_gate_adapters`].
+    pub fn attach_gate_adapters_trainable<C>(
+        &mut self,
+        client: &C,
+        alpha: Option<LoraFactors<R>>,
+        beta: Option<LoraFactors<R>>,
+        activation_dtype: DType,
+        trainable: bool,
+    ) -> Result<()>
+    where
+        C: RuntimeClient<R> + ScalarOps<R> + ShapeOps<R> + TypeConversionOps<R>,
+    {
         self.gates = self
             .gates
-            .with_adapters(client, alpha, beta, activation_dtype)?;
+            .with_adapters(client, alpha, beta, activation_dtype, trainable)?;
         Ok(())
     }
 }

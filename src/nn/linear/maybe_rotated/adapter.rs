@@ -27,6 +27,22 @@ impl<R: Runtime<DType = DType>> MaybeRotatedLinear<R> {
         lora_b: Tensor<R>,
         scaling: f32,
     ) -> Result<()> {
+        self.attach_adapter_trainable(lora_a, lora_b, scaling, false)
+    }
+
+    /// [`Self::attach_adapter`] with `requires_grad = trainable` on both
+    /// factors. The base keeps its own `requires_grad`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::attach_adapter`].
+    pub fn attach_adapter_trainable(
+        &mut self,
+        lora_a: Tensor<R>,
+        lora_b: Tensor<R>,
+        scaling: f32,
+        trainable: bool,
+    ) -> Result<()> {
         let base = match self {
             Self::Plain(base) => base.alias(),
             Self::Rotated(rotated) => {
@@ -49,7 +65,7 @@ impl<R: Runtime<DType = DType>> MaybeRotatedLinear<R> {
                 });
             }
         };
-        let lora = LoraLinear::from_scaled_weights(base, lora_a, lora_b, scaling, false)?;
+        let lora = LoraLinear::from_scaled_weights(base, lora_a, lora_b, scaling, trainable)?;
         *self = Self::Lora(Box::new(lora));
         Ok(())
     }
@@ -67,8 +83,24 @@ impl<R: Runtime<DType = DType>> MaybeRotatedLinear<R> {
         factors: LoraFactors<R>,
         activation_dtype: DType,
     ) -> Result<()> {
+        self.attach_factors_trainable(client, factors, activation_dtype, false)
+    }
+
+    /// [`Self::attach_factors`] with `requires_grad = trainable` on both
+    /// factors.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::attach_factors`].
+    pub fn attach_factors_trainable<C: TypeConversionOps<R>>(
+        &mut self,
+        client: &C,
+        factors: LoraFactors<R>,
+        activation_dtype: DType,
+        trainable: bool,
+    ) -> Result<()> {
         let factors = factors.cast_for(client, self.base(), activation_dtype)?;
-        self.attach_adapter(factors.lora_a, factors.lora_b, factors.scaling)
+        self.attach_adapter_trainable(factors.lora_a, factors.lora_b, factors.scaling, trainable)
     }
 }
 
@@ -206,5 +238,28 @@ mod tests {
         let adapter = layer.adapter().expect("adapted layer exposes its adapter");
         assert_eq!(adapter.scaling(), SCALING);
         assert_eq!(adapter.rank(), RANK);
+    }
+
+    /// A trainable attach leaves the frozen base out of the trainable set.
+    #[test]
+    fn trainable_attach_trains_the_factors_only() {
+        let (client, device) = cpu_setup();
+        let w = tensor(&device, &[OUT, IN], 0.05);
+        let mut layer: MaybeRotatedLinear<CpuRuntime> = dense(&w).into();
+        let factors = LoraFactors {
+            lora_a: tensor(&device, &[RANK, IN], 0.3),
+            lora_b: tensor(&device, &[OUT, RANK], 0.4),
+            scaling: SCALING,
+        };
+        layer
+            .attach_factors_trainable(&client, factors, DType::F32, true)
+            .unwrap();
+        let adapter = layer.adapter().expect("attached");
+        let ids: Vec<_> = layer
+            .trainable_parameters()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ids, [adapter.lora_a().id(), adapter.lora_b().id()]);
     }
 }

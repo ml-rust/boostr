@@ -1,6 +1,6 @@
 //! Prefill half of the GDN forward: the per-token chain from the post-SiLU
 //! conv output to the chunked recurrence, for `seq > 1`. The `seq == 1`
-//! twin is [`GatedDeltaNetOps::gdn_step_from_conv`], which a backend may
+//! twin is [`GatedDeltaNetOps::gdn_step_from_conv`], which a backend can
 //! fuse into one kernel.
 
 use super::layer::{GdnBlock, slice_heads};
@@ -15,7 +15,8 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
     /// Steps 4 to 8 of the block forward over `seq > 1` tokens: split
     /// `qkv` `[batch, seq, qkv_dim]`, L2-normalize q and k, tile the key
     /// heads, build the gates from the raw `alpha` and `beta_raw`
-    /// projections `[batch, seq, H_v]`, then `gdn_chunk_prefill`.
+    /// projections `[batch, seq, H_v]` and the decay `ssm_a` `[H_v]`, then
+    /// `gdn_chunk_prefill`.
     ///
     /// Returns `(o: [batch, seq, H_v, S], state: [batch, H_v, S, S])`.
     pub(super) fn prefill_recurrence<C>(
@@ -24,6 +25,7 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
         qkv: &Tensor<R>,
         alpha: &Tensor<R>,
         beta_raw: &Tensor<R>,
+        ssm_a: &Tensor<R>,
         ssm_state: &Tensor<R>,
     ) -> Result<(Tensor<R>, Tensor<R>)>
     where
@@ -67,9 +69,11 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
 
         // 7. Gates. `ssm_a` already holds `-exp(A_log)`.
         let beta = client.sigmoid(beta_raw).map_err(Error::Numr)?;
-        let g = client.add(alpha, &self.ssm_dt_bias).map_err(Error::Numr)?;
+        let g = client
+            .add(alpha, self.ssm_dt_bias.tensor())
+            .map_err(Error::Numr)?;
         let g = client.softplus(&g).map_err(Error::Numr)?;
-        let g = client.mul(&g, &self.ssm_a).map_err(Error::Numr)?;
+        let g = client.mul(&g, ssm_a).map_err(Error::Numr)?;
 
         // 8. Chunked recurrence.
         client.gdn_chunk_prefill(&q, &k, &v, &g, &beta, ssm_state, cfg.chunk_size)

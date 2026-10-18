@@ -1,5 +1,7 @@
-//! Gated DeltaNet block: weights, construction, and the head-order
-//! permutation `group_heads`. The forward is in `forward`.
+//! Gated DeltaNet block: weights and construction. The forward is in
+//! `forward`, the tracked training forward in `train`, the head-order
+//! permutation `group_heads` in `heads`, the trainable switch in
+//! `trainable` and parameter access in `params`.
 //!
 //! # Norm and residual ownership
 //!
@@ -26,6 +28,7 @@ use super::gate_proj::GateProjections;
 use crate::error::{Error, Result};
 use crate::model::config::GdnConfig;
 use crate::nn::{GateOrder, GatedRmsNorm, MaybeQuantLinear, MaybeRotatedLinear};
+use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::ShapeOps;
 use numr::runtime::Runtime;
@@ -45,12 +48,16 @@ pub struct GdnBlock<R: Runtime> {
     pub(super) ssm_out: MaybeRotatedLinear<R>,
     /// Depthwise conv kernel `[qkv_dim, 1, conv_kernel]`, the layout
     /// `nn::causal_conv1d` takes. No bias: the fork's `ggml_ssm_conv` has none.
-    pub(super) conv_weight: Tensor<R>,
-    /// `[value_heads]`. Holds `-exp(A_log)` as stored in the GGUF; the forward
-    /// multiplies it in as is.
-    pub(super) ssm_a: Tensor<R>,
+    pub(super) conv_weight: Var<R>,
+    /// `[value_heads]`. Holds `-exp(A_log)` as loaded, never trainable. A
+    /// block without `a_log` multiplies it in as is.
+    pub(super) ssm_a: Var<R>,
+    /// `[value_heads]`, `ln(-ssm_a)` in the stored dtype. `None` until
+    /// [`GdnBlock::with_trainable`] turns training on. When present it is
+    /// the decay's source: every forward uses `-exp(a_log)`.
+    pub(super) a_log: Option<Var<R>>,
     /// `[value_heads]`, added to `ssm_alpha(x)` before the softplus.
-    pub(super) ssm_dt_bias: Tensor<R>,
+    pub(super) ssm_dt_bias: Var<R>,
     /// `ssm_norm` `[state_size]` per head, `silu(z) * norm(o)`.
     pub(super) norm: GatedRmsNorm<R>,
 }
@@ -83,7 +90,9 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
     /// Build from a validated config and built modules.
     ///
     /// Dense `ssm_alpha` and `ssm_beta` are concatenated into one
-    /// `[2 * value_heads, hidden_size]` linear here; see `gate_proj`.
+    /// `[2 * value_heads, hidden_size]` linear here; see `gate_proj`. The
+    /// conv kernel, `ssm_a`, `ssm_dt_bias` and `ssm_norm` are frozen;
+    /// [`Self::with_trainable`] turns them trainable.
     ///
     /// # Errors
     ///
@@ -132,9 +141,10 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
             attn_gate: weights.attn_gate,
             gates,
             ssm_out: weights.ssm_out,
-            conv_weight,
-            ssm_a: weights.ssm_a,
-            ssm_dt_bias: weights.ssm_dt_bias,
+            conv_weight: Var::new(conv_weight, false),
+            ssm_a: Var::new(weights.ssm_a, false),
+            a_log: None,
+            ssm_dt_bias: Var::new(weights.ssm_dt_bias, false),
             norm,
         })
     }
@@ -154,9 +164,10 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
             attn_gate: self.attn_gate.alias(),
             gates: self.gates.alias(),
             ssm_out: self.ssm_out.alias(),
-            conv_weight: self.conv_weight.clone(),
-            ssm_a: self.ssm_a.clone(),
-            ssm_dt_bias: self.ssm_dt_bias.clone(),
+            conv_weight: self.conv_weight.alias(),
+            ssm_a: self.ssm_a.alias(),
+            a_log: self.a_log.as_ref().map(Var::alias),
+            ssm_dt_bias: self.ssm_dt_bias.alias(),
             norm: self.norm.alias(),
         }
     }
@@ -170,61 +181,6 @@ pub(super) fn slice_heads<R: Runtime>(
     shape: &[usize],
 ) -> Result<Tensor<R>> {
     qkv.narrow(2, start, len)
-        .map_err(Error::Numr)?
-        .contiguous()?
-        .reshape(shape)
-        .map_err(Error::Numr)
-}
-
-/// Reorder `o` `[.., value_dim]` from tiled to grouped value-head order,
-/// the input order a Hadamard-folded `ssm_out` expects.
-///
-/// Port of the `perm_rep` branch of `build_lora_mm` (`llama-graph.cpp`):
-///
-/// ```text
-/// // tiled [hd, nk, rep] -> grouped [hd, rep, nk] feature order
-/// x = ggml_reshape_4d(ctx0, x, t.perm_hd, t.perm_nk, t.perm_rep, ne1*ne2*ne3);
-/// x = ggml_cont(ctx0, ggml_permute(ctx0, x, 0, 2, 1, 3));
-/// cur_mm = ggml_reshape_4d(ctx0, x, t.perm_hd*t.perm_nk*t.perm_rep, ne1, ne2, ne3);
-/// ```
-///
-/// ggml lists `ne[0]` first, so `[hd, nk, rep]` is row-major
-/// `[rep, nk, hd]` and the permute swaps the two head axes. Tiled head
-/// `h = i_rep * H_k + i_k` lands at grouped head `h' = i_k * rep + i_rep`.
-pub(super) fn group_heads<R: Runtime>(
-    o: &Tensor<R>,
-    key_heads: usize,
-    rep: usize,
-    head_dim: usize,
-) -> Result<Tensor<R>> {
-    let shape = o.shape();
-    let Some((&last, lead)) = shape.split_last() else {
-        return Err(Error::InvalidArgument {
-            arg: "o",
-            reason: "expected at least one dim".into(),
-        });
-    };
-    if last != key_heads * rep * head_dim {
-        return Err(Error::InvalidArgument {
-            arg: "o",
-            reason: format!(
-                "last dim {last} != key_heads * rep * head_dim ({key_heads} * {rep} * {head_dim})"
-            ),
-        });
-    }
-    if rep == 1 {
-        return Ok(o.clone());
-    }
-    let mut tiled = lead.to_vec();
-    tiled.extend([rep, key_heads, head_dim]);
-    let n = lead.len();
-    let mut perm: Vec<usize> = (0..n).collect();
-    perm.extend([n + 1, n, n + 2]);
-
-    o.contiguous()?
-        .reshape(&tiled)
-        .map_err(Error::Numr)?
-        .permute(&perm)
         .map_err(Error::Numr)?
         .contiguous()?
         .reshape(shape)
@@ -271,46 +227,4 @@ fn conv_weight_ncl<R: Runtime>(w: Tensor<R>, qkv_dim: usize, kernel: usize) -> R
     w.contiguous()?
         .reshape(&[qkv_dim, 1, kernel])
         .map_err(Error::Numr)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use numr::runtime::cpu::{CpuDevice, CpuRuntime};
-
-    /// S=2, H_k=2, rep=2. Tiled head `h = i_rep * 2 + i_k` carries values
-    /// `[10h, 10h + 1]`. Grouped order lists `(k0, rep0), (k0, rep1),
-    /// (k1, rep0), (k1, rep1)` = old heads `0, 2, 1, 3`.
-    #[test]
-    fn group_heads_ports_the_fork_permutation() {
-        let device = CpuDevice::new();
-        let o = Tensor::<CpuRuntime>::from_slice(
-            &[0.0f32, 1.0, 10.0, 11.0, 20.0, 21.0, 30.0, 31.0],
-            &[1, 1, 8],
-            &device,
-        )
-        .unwrap();
-        let grouped = group_heads(&o, 2, 2, 2).unwrap();
-        assert_eq!(grouped.shape(), &[1, 1, 8]);
-        assert_eq!(
-            grouped.to_vec::<f32>(),
-            vec![0.0, 1.0, 20.0, 21.0, 10.0, 11.0, 30.0, 31.0]
-        );
-    }
-
-    #[test]
-    fn group_heads_is_identity_for_rep_one() {
-        let device = CpuDevice::new();
-        let o =
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[1, 4], &device).unwrap();
-        let same = group_heads(&o, 2, 1, 2).unwrap();
-        assert_eq!(same.to_vec::<f32>(), vec![1.0, 2.0, 3.0, 4.0]);
-    }
-
-    #[test]
-    fn group_heads_rejects_width_mismatch() {
-        let device = CpuDevice::new();
-        let o = Tensor::<CpuRuntime>::zeros(&[1, 6], DType::F32, &device).unwrap();
-        assert!(group_heads(&o, 2, 2, 2).is_err());
-    }
 }

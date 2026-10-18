@@ -17,7 +17,8 @@
 //! 9. `silu(z) * rms_norm(o)` with `ssm_norm`
 //! 10. optional `group_heads`, then `ssm_out`
 
-use super::layer::{GdnBlock, group_heads};
+use super::heads::group_heads;
+use super::layer::GdnBlock;
 use crate::error::{Error, Result};
 use crate::inference::GdnState;
 use crate::model::traits::ModelClient;
@@ -130,9 +131,10 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
         })?;
 
         // 2. Raw gate projections, one launch when both are dense; `alpha`
-        // and `beta_raw` are views into its output. `ssm_a` already holds
-        // `-exp(A_log)`.
+        // and `beta_raw` are views into its output. `ssm_a` holds
+        // `-exp(A_log)`: the loaded tensor, or `-exp(a_log)` once trainable.
         let (alpha, beta_raw) = self.gates.forward(client, x)?;
+        let ssm_a = self.decay(client)?;
 
         // 3. Causal conv with the carried window, then SiLU.
         let qkv_ncl = qkv
@@ -140,8 +142,13 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
             .transpose(1, 2)
             .map_err(Error::Numr)?
             .contiguous()?;
-        let (conv_out, window) =
-            causal_conv1d(client, &qkv_ncl, &self.conv_weight, None, conv_state)?;
+        let (conv_out, window) = causal_conv1d(
+            client,
+            &qkv_ncl,
+            self.conv_weight.tensor(),
+            None,
+            conv_state,
+        )?;
         let conv_out = client.silu(&conv_out).map_err(Error::Numr)?;
         let qkv = conv_out
             .transpose(1, 2)
@@ -154,8 +161,8 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
                 &qkv,
                 &alpha,
                 &beta_raw,
-                &self.ssm_dt_bias,
-                &self.ssm_a,
+                self.ssm_dt_bias.tensor(),
+                &ssm_a,
                 ssm_state,
                 h_k,
                 key_dim,
@@ -164,7 +171,7 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
             )?
         } else {
             // 4-8. The same chain as primitives, then the chunked recurrence.
-            self.prefill_recurrence(client, &qkv, &alpha, &beta_raw, ssm_state)?
+            self.prefill_recurrence(client, &qkv, &alpha, &beta_raw, &ssm_a, ssm_state)?
         };
 
         // 9. silu(z) * rms_norm(o), per head.
@@ -194,7 +201,7 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::layer::GdnWeights;
     use super::*;
     use crate::model::config::GdnConfig;
@@ -267,7 +274,9 @@ mod tests {
         RotatedLinear::new(plain(w), rotation).unwrap().into()
     }
 
-    fn block(device: &CpuDevice, seed: u64, v_grouped: bool) -> GdnBlock<CpuRuntime> {
+    /// A tiny dense block: `H_K = 2`, `H_V = 4`, `S = 4`, hidden 8. Every
+    /// projection is plain, so the gate pair fuses.
+    pub(crate) fn block(device: &CpuDevice, seed: u64, v_grouped: bool) -> GdnBlock<CpuRuntime> {
         let cfg = cfg(v_grouped);
         let mut rng = Lcg(seed);
         let in_scale = 0.5 / (HIDDEN as f32).sqrt();

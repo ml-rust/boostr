@@ -16,8 +16,8 @@ impl<R: Runtime<DType = DType>> GateProjections<R> {
     /// with [`LoraFactors::cast_for`]; `activation_dtype` is the dtype `x`
     /// arrives in. A fused pair becomes `FusedAdapted` through
     /// [`LoraLinear::fused_block_diagonal`]; a separate pair adapts each
-    /// projection on its own. `self` is unchanged; the caller swaps the
-    /// result in.
+    /// projection on its own. `trainable` sets `requires_grad` on the
+    /// factors. `self` is unchanged; the caller swaps the result in.
     ///
     /// # Errors
     ///
@@ -30,6 +30,7 @@ impl<R: Runtime<DType = DType>> GateProjections<R> {
         alpha: Option<LoraFactors<R>>,
         beta: Option<LoraFactors<R>>,
         activation_dtype: DType,
+        trainable: bool,
     ) -> Result<Self>
     where
         C: RuntimeClient<R> + ScalarOps<R> + ShapeOps<R> + TypeConversionOps<R>,
@@ -57,7 +58,7 @@ impl<R: Runtime<DType = DType>> GateProjections<R> {
                         factors,
                     });
                 }
-                let lora = LoraLinear::fused_block_diagonal(client, base, parts, false)?;
+                let lora = LoraLinear::fused_block_diagonal(client, base, parts, trainable)?;
                 Ok(Self::FusedAdapted {
                     lora: Box::new(lora),
                     heads: *heads,
@@ -69,19 +70,35 @@ impl<R: Runtime<DType = DType>> GateProjections<R> {
                 reason: "gdn gates: ssm_alpha/ssm_beta already carry an adapter".to_string(),
             }),
             Self::Separate(gates) => Ok(Self::Separate(Box::new(SeparateGates {
-                alpha: adapt_one(client, &gates.alpha, alpha, activation_dtype, "ssm_alpha")?,
-                beta: adapt_one(client, &gates.beta, beta, activation_dtype, "ssm_beta")?,
+                alpha: adapt_one(
+                    client,
+                    &gates.alpha,
+                    alpha,
+                    activation_dtype,
+                    trainable,
+                    "ssm_alpha",
+                )?,
+                beta: adapt_one(
+                    client,
+                    &gates.beta,
+                    beta,
+                    activation_dtype,
+                    trainable,
+                    "ssm_beta",
+                )?,
             }))),
         }
     }
 }
 
 /// `gate` with `factors` attached, or an alias of it for `None`.
+/// `trainable` sets `requires_grad` on the factors.
 fn adapt_one<R, C>(
     client: &C,
     gate: &MaybeLoraLinear<R>,
     factors: Option<LoraFactors<R>>,
     activation_dtype: DType,
+    trainable: bool,
     name: &str,
 ) -> Result<MaybeLoraLinear<R>>
 where
@@ -102,7 +119,7 @@ where
         factors.lora_a,
         factors.lora_b,
         factors.scaling,
-        false,
+        trainable,
     )?;
     Ok(MaybeLoraLinear::Lora(Box::new(lora)))
 }
@@ -194,7 +211,7 @@ mod tests {
 
             let fused = GateProjections::new(dense(wa.clone()), dense(wb.clone()))
                 .unwrap()
-                .with_adapters(&client, fa, fb, DType::F32)
+                .with_adapters(&client, fa, fb, DType::F32, false)
                 .unwrap();
             assert!(matches!(fused, GateProjections::FusedAdapted { .. }));
             let (a, b) = fused.forward(&client, &x).unwrap();
@@ -202,7 +219,13 @@ mod tests {
             assert_close(&b, &want_b);
             assert!(
                 fused
-                    .with_adapters(&client, Some(factors(40, 1.0, &device)), None, DType::F32)
+                    .with_adapters(
+                        &client,
+                        Some(factors(40, 1.0, &device)),
+                        None,
+                        DType::F32,
+                        false,
+                    )
                     .is_err(),
                 "a second adapter is refused"
             );
@@ -230,7 +253,7 @@ mod tests {
             Some(&fb),
         );
         let adapted = separate
-            .with_adapters(&client, None, Some(fb), DType::F32)
+            .with_adapters(&client, None, Some(fb), DType::F32, false)
             .unwrap();
         let (a, b) = adapted.forward(&client, &x32).unwrap();
         assert_eq!(
@@ -241,7 +264,7 @@ mod tests {
         assert_close(&b, &want_b);
         assert!(
             separate
-                .with_adapters(&client, None, None, DType::F32)
+                .with_adapters(&client, None, None, DType::F32, false)
                 .is_err()
         );
     }

@@ -1,13 +1,8 @@
-//! GBNF grammar front end and byte-level automaton compiler.
-//!
-//! `Grammar::parse` reads GBNF text. `Grammar::expand` inlines every rule
-//! reference and returns the `root` expression. `Grammar::compile` lowers
-//! that expression to a minimal `ByteDfa`. `json_schema` builds a grammar
-//! from a JSON Schema.
-
+//! GBNF grammar front end and byte-level DFA compiler, with device masking tables.
 pub mod ast;
 pub mod automaton_limits;
 mod compile;
+pub(crate) mod device;
 mod dfa;
 pub mod error;
 mod expand;
@@ -24,10 +19,12 @@ mod reference;
 mod repeat;
 mod subset;
 mod utf8;
-
+mod vocab;
 pub use ast::{Expr, Grammar, ROOT_RULE, Reference, Rule, Span};
 pub use automaton_limits::{AutomatonLimits, CompileLimits};
 pub use compile::compile;
+pub use device::{DeviceGrammarDfa, INVALID_STATE, MAX_EOS_TOKENS};
 pub use dfa::ByteDfa;
 pub use error::{GrammarError, GrammarErrorKind};
 pub use limits::ExpandLimits;
+pub use vocab::{DeviceVocab, F32_EXACT_LIMIT, VocabBytes};

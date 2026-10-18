@@ -9,11 +9,13 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Adds exact-resume optimizer state export and import, keyed by parameter name. Adds a GBNF grammar front end, a JSON-schema compiler to that grammar, and a compiler from a grammar to a minimal byte-level DFA.
+Adds exact-resume optimizer state export and import, keyed by parameter name. Adds a GBNF grammar front end, a JSON-schema compiler to that grammar, and a compiler from a grammar to a minimal byte-level DFA. A `ByteDfa` now goes to the device for logit masking over a vocabulary uploaded once, and grammar masks end generation at EOS.
 
 ### ⚠️ Breaking changes
 
 - **`Optimizer`** — the trait gains two required methods, `state_dict` and `load_state_dict`. Every implementation must provide both. `AdamW`, `Lamb`, `AdaGrad` and `Sgd` implement them.
+- **`DeviceGrammarDfa`** — moves to `inference::grammar`, and `ops::traits::inference::grammar` re-exports it with `INVALID_STATE`. Its fields are private, so a struct literal no longer builds one. Build it with `DeviceGrammarDfa::from_byte_dfa`. Read the state with `current_state()` and write it with `set_current_state(state)`, which refuses a state outside the table. Accessors give the tables and counts.
+- **`GrammarDfaOps::grammar_dfa_mask_logits`** — a non-EOS token with zero bytes is never allowed, in any state. It makes no progress, so generation could loop on it. An EOS token is allowed iff the current state accepts. On every backend the op returns a masked copy, and the input logits stay unchanged. CUDA used to mask the input in place. Logits that are not F32, not contiguous or shorter than the vocabulary are an error on every backend.
 
 ### Added
 
@@ -35,10 +37,14 @@ Adds exact-resume optimizer state export and import, keyed by parameter name. Ad
 - **`SchemaOptions`** — `max_depth` (default 6) caps the nesting of one recursive `$ref` target, and a deeper branch leaves the language. `max_value_depth` (default 4) caps container nesting at an any-value position and in `json_object_grammar`. `max_whitespace` (default 2) caps each whitespace run of space, `\t` and `\n`, and 0 gives compact JSON. `strict_keywords` (default true) makes an unenforceable keyword an error. `additional_properties_default` (default false) sets extra keys when `additionalProperties` is absent.
 - **Supported schema keywords** — `type` (a name or an array), `properties`, `required`, `additionalProperties`, `items`, `prefixItems`, a draft-7 `items` array with `additionalItems`, `minItems`, `maxItems`, `minLength`, `maxLength`, `enum`, `const`, `anyOf`, `oneOf`, single-member `allOf`, `nullable` and `$ref` to `#`, `#/$defs/...`, `#/definitions/...` or any JSON pointer in the same document. The annotations in `ANNOTATION_KEYWORDS` and unknown keywords are ignored.
 - **Unsupported schema keywords** — `UNSUPPORTED_KEYWORDS`: `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`, `pattern`, `uniqueItems`, `contains`, `minContains`, `maxContains`, `minProperties`, `maxProperties`, `patternProperties`, `propertyNames`, `not`, `if`, `then`, `else`, `dependentRequired`, `dependentSchemas`, `unevaluatedProperties` and `unevaluatedItems`. A multi-member `allOf`, an external or anchor `$ref`, and a combinator beside a type keyword follow the same policy. With `strict_keywords` each is an `Unsupported` error that names the keyword and its JSON pointer. Without it the compiler ignores them, and the language is a superset of the schema.
+- **`VocabBytes`** — the raw byte string of every token id, in id order. The caller builds it once from its own tokenizer with `VocabBytes::new`, and a clone shares it. Bytes stay raw, so a piece that is not valid UTF-8 keeps its bytes, and the DFA decides. `token_bytes(id)` gives a token's bytes for `ByteDfa::walk`, so the sampler can advance its host state. The first `DeviceGrammarDfa` per device uploads the vocabulary, and each later one on that device reuses the upload. A device copy lives until the last clone drops. An empty vocabulary and more than 2^24 tokens or bytes are errors.
+- **`DeviceGrammarDfa::from_byte_dfa`** — uploads a `ByteDfa`, a `VocabBytes` and the EOS token ids, and starts at the start state. `ByteDfa::NO_TRANSITION` becomes `INVALID_STATE`. The tables stay F32, which holds every state id exactly, so a DFA above 2^24 states is an error. The table is per grammar and takes 1 KiB per state, so 16 MiB at the default 16,384 states. EOS ids can repeat. An id outside the vocabulary and more than `MAX_EOS_TOKENS` (64) distinct ids are errors.
+- **Grammar EOS** — the mask allows an EOS token iff the current state accepts, and never walks its bytes. A grammar whose start state accepts allows EOS at once. CPU, CUDA and WebGPU apply the same rules, and parity tests hold them to the CPU.
 - **`serde_json` `preserve_order`** — boostr does not enable the feature outside its tests. Property order follows the key order of the input `serde_json::Value`. The application must enable `preserve_order` to keep declared order. Without it the order is alphabetical. The safetensors writer sorts its header keys, so its output bytes are unchanged.
 
 ### Fixed
 
+- **CUDA and CPU grammar masks** — logits shorter than the grammar vocabulary are an error. CUDA wrote past the logits buffer, and CPU panicked. Each kernel bounds-checks every table read, and a byte range past the vocabulary buffer masks the token.
 - **`save_safetensors`, `save_checkpoint`, `save_distributed_checkpoint`, imatrix `write_to_path`** — writes are atomic. Each write goes to a sibling `.<file_name>.tmp-<pid>-<n>` file, which is synced and renamed over the target. A failed save no longer truncates or corrupts an existing file. `save_safetensors` encodes every tensor and the header before it touches the filesystem, so an unsupported dtype leaves the target unchanged. The output bytes are unchanged.
 
 ## [0.9.0] - 2026-10-13

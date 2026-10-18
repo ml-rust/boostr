@@ -1,4 +1,4 @@
-//! Backend parity tests for SamplingOps and GrammarDfaOps.
+//! Backend parity tests for SamplingOps.
 //!
 //! The CPU result is the reference. The stochastic chain draws a random
 //! value per backend, so those cases pin the draw with `top_k = 1` or a
@@ -10,7 +10,6 @@
 )]
 
 use super::helpers::*;
-use boostr::ops::traits::inference::grammar::{DeviceGrammarDfa, GrammarDfaOps, INVALID_STATE};
 use boostr::ops::traits::inference::sampling::SamplingOps;
 use numr::runtime::Runtime;
 use numr::runtime::cpu::CpuRuntime;
@@ -76,36 +75,6 @@ where
         )
         .unwrap();
     out.to_vec::<i64>()[0]
-}
-
-/// One grammar case: 2 states, `a` leads to the accepting state 1.
-fn grammar_case<R: Runtime<DType = numr::dtype::DType>>(
-    device: &R::Device,
-    current_state: u32,
-) -> DeviceGrammarDfa<R> {
-    let num_states = 2;
-    let mut table = vec![INVALID_STATE as f32; num_states * 256];
-    table[b'a' as usize] = 1.0;
-    table[256 + b'b' as usize] = 0.0;
-    let accepting = [0.0f32, 1.0];
-    // Tokens: "a", "b", "ab", "", "ba", "aa".
-    let tokens: [&[u8]; 6] = [b"a", b"b", b"ab", b"", b"ba", b"aa"];
-    let mut bytes = Vec::new();
-    let mut offsets = Vec::new();
-    for t in tokens {
-        offsets.push(bytes.len() as f32);
-        bytes.extend(t.iter().map(|&b| b as f32));
-    }
-    offsets.push(bytes.len() as f32);
-    DeviceGrammarDfa {
-        transition_table: Tensor::<R>::from_slice(&table, &[table.len()], device).unwrap(),
-        accepting_mask: Tensor::<R>::from_slice(&accepting, &[2], device).unwrap(),
-        vocab_bytes: Tensor::<R>::from_slice(&bytes, &[bytes.len()], device).unwrap(),
-        vocab_offsets: Tensor::<R>::from_slice(&offsets, &[offsets.len()], device).unwrap(),
-        current_state,
-        num_states,
-        vocab_size: tokens.len(),
-    }
 }
 
 #[test]
@@ -307,45 +276,4 @@ fn test_apply_sampling_penalties_parity() {
             .unwrap();
         assert_parity_f32(&logits.to_vec::<f32>(), &cpu, "apply_sampling_penalties");
     });
-}
-
-#[test]
-fn test_grammar_dfa_mask_parity() {
-    let (cpu_client, cpu_device) = setup_cpu();
-    for state in [0u32, 1] {
-        let data = logits_data(2 * 6, 0.5);
-        let cpu_logits = Tensor::<CpuRuntime>::from_slice(&data, &[1, 2, 6], &cpu_device).unwrap();
-        let cpu = cpu_client
-            .grammar_dfa_mask_logits(&cpu_logits, &grammar_case::<CpuRuntime>(&cpu_device, state))
-            .unwrap()
-            .to_vec::<f32>();
-
-        #[cfg(feature = "cuda")]
-        with_cuda_backend(|client, device| {
-            let logits = Tensor::from_slice(&data, &[1, 2, 6], &device).unwrap();
-            let grammar = grammar_case::<numr::runtime::cuda::CudaRuntime>(&device, state);
-            let gpu = client
-                .grammar_dfa_mask_logits(&logits, &grammar)
-                .unwrap()
-                .to_vec::<f32>();
-            assert_eq!(gpu, cpu, "cuda grammar mask from state {state}");
-        });
-
-        #[cfg(feature = "wgpu")]
-        with_wgpu_backend(|client, device| {
-            let logits = Tensor::from_slice(&data, &[1, 2, 6], &device).unwrap();
-            let grammar = grammar_case::<numr::runtime::wgpu::WgpuRuntime>(&device, state);
-            let gpu = client
-                .grammar_dfa_mask_logits(&logits, &grammar)
-                .unwrap()
-                .to_vec::<f32>();
-            assert_eq!(gpu, cpu, "wgpu grammar mask from state {state}");
-            assert_eq!(
-                logits.to_vec::<f32>(),
-                data,
-                "the input logits stay unchanged"
-            );
-        });
-        let _ = cpu;
-    }
 }

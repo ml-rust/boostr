@@ -146,12 +146,29 @@ impl<R: Runtime<DType = DType>> RotatedMlp<R> {
         factors: LoraFactors<R>,
         activation_dtype: DType,
     ) -> Result<()> {
+        self.attach_adapter_trainable(client, projection, factors, activation_dtype, false)
+    }
+
+    /// [`Self::attach_adapter`] with `requires_grad = trainable` on both
+    /// factors. The base projection keeps its own `requires_grad`.
+    ///
+    /// # Errors
+    ///
+    /// As [`MaybeRotatedLinear::attach_factors_trainable`].
+    pub fn attach_adapter_trainable<C: TypeConversionOps<R>>(
+        &mut self,
+        client: &C,
+        projection: MlpProjection,
+        factors: LoraFactors<R>,
+        activation_dtype: DType,
+        trainable: bool,
+    ) -> Result<()> {
         let linear = match projection {
             MlpProjection::Gate => &mut self.gate,
             MlpProjection::Up => &mut self.up,
             MlpProjection::Down => &mut self.down,
         };
-        linear.attach_factors(client, factors, activation_dtype)
+        linear.attach_factors_trainable(client, factors, activation_dtype, trainable)
     }
 
     pub fn parameters(&self) -> Vec<(TensorId, &Var<R>)> {

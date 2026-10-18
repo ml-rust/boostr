@@ -105,6 +105,44 @@ impl<R: Runtime> QkNorm<R> {
         })
     }
 
+    /// Build from both weights, each with its stable autograd id, and
+    /// `requires_grad = trainable` on both.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`].
+    pub fn with_ids(
+        q_weight: (Tensor<R>, TensorId),
+        k_weight: (Tensor<R>, TensorId),
+        head_dim: usize,
+        eps: f32,
+        trainable: bool,
+    ) -> Result<Self> {
+        let (q, q_id) = q_weight;
+        let (k, k_id) = k_weight;
+        let checked = Self::new(q, k, head_dim, eps)?;
+        let q = checked.q_norm.weight().tensor().clone();
+        let k = checked.k_norm.weight().tensor().clone();
+        Ok(Self {
+            q_norm: RmsNorm::with_id(q, q_id, eps, trainable),
+            k_norm: RmsNorm::with_id(k, k_id, eps, trainable),
+            head_dim,
+        })
+    }
+
+    /// The same weights and ids with `requires_grad = trainable` on both.
+    pub fn with_trainable(&self, trainable: bool) -> Self {
+        let rebuild = |norm: &RmsNorm<R>| {
+            let weight = norm.weight();
+            RmsNorm::with_id(weight.tensor().clone(), weight.id(), norm.eps(), trainable)
+        };
+        Self {
+            q_norm: rebuild(&self.q_norm),
+            k_norm: rebuild(&self.k_norm),
+            head_dim: self.head_dim,
+        }
+    }
+
     /// Normalise `q` and `k`, each `[.., head_dim]`.
     ///
     /// # Errors
@@ -229,6 +267,26 @@ mod tests {
             false,
         );
         assert!(norm.forward(&client, &bad, &bad).is_err());
+    }
+
+    /// `with_ids` and `with_trainable` keep every id and set the flag.
+    #[test]
+    fn ids_and_trainable_flag_carry_over() {
+        let (_, device) = cpu_setup();
+        let w = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[4], &device).unwrap();
+        let (q_id, k_id) = (TensorId::new(), TensorId::new());
+        let norm = QkNorm::with_ids((w.clone(), q_id), (w, k_id), 4, 1e-6, true).unwrap();
+        assert_eq!(
+            (norm.q_norm().weight().id(), norm.k_norm().weight().id()),
+            (q_id, k_id)
+        );
+        assert!(norm.q_norm().weight().requires_grad());
+
+        let frozen = norm.with_trainable(false);
+        assert_eq!(frozen.q_norm().weight().id(), q_id);
+        assert_eq!(frozen.k_norm().weight().id(), k_id);
+        assert!(!frozen.k_norm().weight().requires_grad());
+        assert_eq!(frozen.q_norm().eps(), 1e-6);
     }
 
     #[test]

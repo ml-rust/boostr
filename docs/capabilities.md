@@ -84,6 +84,7 @@ For the feature flags, see the [README](../README.md#feature-flags).
 - **Gradient accumulation** and checkpointing, with an asynchronous checkpoint writer.
 - **Learning rate schedules**: constant, linear warmup, cosine annealing, Warmup-Stable-Decay, and step decay.
 - **Gated DeltaNet training**: `var_gdn_chunk` (`ops/autograd_gated_delta_net.rs`) runs the chunked prefill in autograd. The final state's gradient is not propagated.
+- **Qwen3.5 training**: `Qwen35Model::forward_train` runs the hybrid model from token ids to logits in autograd, with optional per-layer activation checkpointing. The gated attention block trains through `var_flash_attention`. LoRA adapters on attention, GDN and FFN projections train over a frozen base. Hadamard-rotated checkpoints are refused.
 - **Gated DeltaNet layers for a trainer**: `GdnBlock::init` and `load` build from a `VarBuilder`, `with_ids` rebuilds under stable ids, and `forward_train_checkpointed` keeps only the block input (`model/hybrid/blocks/gdn/`).
 - **Distributed training** (`src/distributed/`):
   - ZeRO stages 1, 2, and 3 for parameter, gradient, and optimizer sharding

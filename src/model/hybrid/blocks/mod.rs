@@ -18,6 +18,7 @@ pub(super) use attention::AttentionBlock;
 pub use attention_qwen35::Qwen35GraphStep;
 pub use attention_qwen35::{
     Qwen35AttentionBlock, Qwen35AttentionProjection, Qwen35AttentionWeights,
+    Qwen35AttentionWeightsWithIds,
 };
 pub use gdn::{GdnBlock, GdnProjection, GdnWeights, GdnWeightsWithIds};
 pub(super) use ssm::SsmBlock;

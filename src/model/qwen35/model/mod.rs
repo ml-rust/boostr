@@ -2,8 +2,9 @@
 //! `forward*` (`forward_gather` returns normed hidden rows at chosen
 //! positions, `head_rows` F32 logits of chosen `lm_head` rows), the
 //! decision backbone over one shared prefix in `decision_backbone`, the
-//! loader in `gguf*` and `attach`, and the unmerged LoRA attach in
-//! `adapter*`.
+//! loader in `gguf*` and `attach`, the unmerged LoRA attach in
+//! `adapter*`, the tracked training forward in `forward_train`, and
+//! parameter access in `params`.
 
 mod adapter;
 mod adapter_attach;
@@ -18,9 +19,11 @@ mod forward_embeds;
 mod forward_gather;
 mod forward_graph;
 mod forward_layers;
+mod forward_train;
 mod gguf;
 mod gguf_layers;
 mod head_rows;
+mod params;
 
 pub use build::{Qwen35AttentionLayer, Qwen35Block, Qwen35GdnLayer, Qwen35Model};
 

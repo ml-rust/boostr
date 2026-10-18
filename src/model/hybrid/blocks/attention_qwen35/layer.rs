@@ -1,5 +1,5 @@
 //! `qwen35` gated full-attention block: weights and construction. The
-//! forward is in `forward`.
+//! forward is in `forward`, the tracked training forward in `train`.
 //!
 //! # Norm and residual ownership
 //!
@@ -76,6 +76,16 @@ pub struct Qwen35AttentionWeights<R: Runtime> {
     pub attn_k_norm: Tensor<R>,
 }
 
+/// A block's modules in its own layout, for [`Qwen35AttentionBlock::assemble`].
+pub(super) struct BlockLayout<R: Runtime> {
+    /// Rows regrouped to `[query rows | gate rows]`.
+    pub(super) attn_q: MaybeRotatedLinear<R>,
+    pub(super) attn_k: MaybeRotatedLinear<R>,
+    pub(super) attn_v: MaybeRotatedLinear<R>,
+    pub(super) attn_output: MaybeRotatedLinear<R>,
+    pub(super) qk_norm: QkNorm<R>,
+}
+
 impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
     /// Build from a validated config and built modules.
     ///
@@ -91,44 +101,69 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
             cfg.q_gate_dim(),
             cfg.hidden_size,
         )?;
-        check_linear(
-            weights.attn_k.base(),
-            "attn_k",
-            cfg.kv_dim(),
-            cfg.hidden_size,
-        )?;
-        check_linear(
-            weights.attn_v.base(),
-            "attn_v",
-            cfg.kv_dim(),
-            cfg.hidden_size,
-        )?;
-        check_linear(
-            weights.attn_output.base(),
-            "attn_output",
-            cfg.hidden_size,
-            cfg.q_dim(),
-        )?;
-        let device = weights.attn_q_norm.device().clone();
         let qk_norm = QkNorm::new(
             weights.attn_q_norm,
             weights.attn_k_norm,
             cfg.head_dim,
             cfg.rms_eps,
         )?;
-        let mrope_selector =
-            mrope_stream_selector::<R>(cfg.rope_sections, cfg.rope_dim / 2, &device)?;
         // Stored order is `[head][query | gate]`; the forward wants
         // `[query][head] | [gate][head]`.
         let attn_q = weights.attn_q.regroup_rows(cfg.num_heads, 2)?;
+        Self::assemble(
+            cfg,
+            BlockLayout {
+                attn_q,
+                attn_k: weights.attn_k,
+                attn_v: weights.attn_v,
+                attn_output: weights.attn_output,
+                qk_norm,
+            },
+        )
+    }
 
+    /// Build from modules already in the block's layout: `attn_q` rows
+    /// regrouped to `[query | gate]`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ModelError`] when `cfg.validate()` fails or a projection
+    /// or norm shape disagrees with `cfg`.
+    pub(super) fn assemble(cfg: Qwen35AttentionConfig, parts: BlockLayout<R>) -> Result<Self> {
+        cfg.validate()?;
+        check_linear(
+            parts.attn_q.base(),
+            "attn_q",
+            cfg.q_gate_dim(),
+            cfg.hidden_size,
+        )?;
+        check_linear(parts.attn_k.base(), "attn_k", cfg.kv_dim(), cfg.hidden_size)?;
+        check_linear(parts.attn_v.base(), "attn_v", cfg.kv_dim(), cfg.hidden_size)?;
+        check_linear(
+            parts.attn_output.base(),
+            "attn_output",
+            cfg.hidden_size,
+            cfg.q_dim(),
+        )?;
+        if parts.qk_norm.head_dim() != cfg.head_dim {
+            return Err(Error::ModelError {
+                reason: format!(
+                    "qwen35_attention: qk_norm width {} disagrees with head_dim {}",
+                    parts.qk_norm.head_dim(),
+                    cfg.head_dim
+                ),
+            });
+        }
+        let device = parts.qk_norm.q_norm().weight().tensor().device().clone();
+        let mrope_selector =
+            mrope_stream_selector::<R>(cfg.rope_sections, cfg.rope_dim / 2, &device)?;
         Ok(Self {
             cfg,
-            attn_q,
-            attn_k: weights.attn_k,
-            attn_v: weights.attn_v,
-            attn_output: weights.attn_output,
-            qk_norm,
+            attn_q: parts.attn_q,
+            attn_k: parts.attn_k,
+            attn_v: parts.attn_v,
+            attn_output: parts.attn_output,
+            qk_norm: parts.qk_norm,
             mrope_selector,
         })
     }

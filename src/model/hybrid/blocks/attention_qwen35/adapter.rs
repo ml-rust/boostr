@@ -48,26 +48,33 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
         factors: LoraFactors<R>,
         activation_dtype: DType,
     ) -> Result<()> {
-        match projection {
+        self.attach_adapter_trainable(client, projection, factors, activation_dtype, false)
+    }
+
+    /// [`Self::attach_adapter`] with `requires_grad = trainable` on both
+    /// factors. The base projection keeps its own `requires_grad`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::attach_adapter`].
+    pub fn attach_adapter_trainable<C: TypeConversionOps<R>>(
+        &mut self,
+        client: &C,
+        projection: Qwen35AttentionProjection,
+        factors: LoraFactors<R>,
+        activation_dtype: DType,
+        trainable: bool,
+    ) -> Result<()> {
+        let (linear, factors) = match projection {
             Qwen35AttentionProjection::Q => {
                 let lora_b = regroup_leading_axis(&factors.lora_b, self.cfg.num_heads, 2)?;
-                let regrouped = LoraFactors { lora_b, ..factors };
-                self.attn_q
-                    .attach_factors(client, regrouped, activation_dtype)
+                (&mut self.attn_q, LoraFactors { lora_b, ..factors })
             }
-            Qwen35AttentionProjection::K => {
-                self.attn_k
-                    .attach_factors(client, factors, activation_dtype)
-            }
-            Qwen35AttentionProjection::V => {
-                self.attn_v
-                    .attach_factors(client, factors, activation_dtype)
-            }
-            Qwen35AttentionProjection::Output => {
-                self.attn_output
-                    .attach_factors(client, factors, activation_dtype)
-            }
-        }
+            Qwen35AttentionProjection::K => (&mut self.attn_k, factors),
+            Qwen35AttentionProjection::V => (&mut self.attn_v, factors),
+            Qwen35AttentionProjection::Output => (&mut self.attn_output, factors),
+        };
+        linear.attach_factors_trainable(client, factors, activation_dtype, trainable)
     }
 }
 

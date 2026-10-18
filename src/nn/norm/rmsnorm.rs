@@ -113,6 +113,11 @@ impl<R: Runtime> RmsNorm<R> {
         &self.weight
     }
 
+    /// The epsilon added to the mean square.
+    pub fn eps(&self) -> f32 {
+        self.eps
+    }
+
     /// All parameters with their stable autograd IDs.
     pub fn parameters(&self) -> Vec<(TensorId, &Var<R>)> {
         vec![(self.weight.id(), &self.weight)]

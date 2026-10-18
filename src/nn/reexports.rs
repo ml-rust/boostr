@@ -13,9 +13,9 @@ pub use super::lora_targets::{
     LoraTargets, adapt_if_targeted, load_lora_child, named_tensors_to_id_map, push_projection_name,
 };
 pub use super::loss::{
-    contrastive_loss, cross_entropy_loss, cross_entropy_loss_masked, cross_entropy_loss_smooth,
-    flow_matching_interpolate, flow_matching_loss, flow_matching_target, focal_loss, kl_div_loss,
-    mse_loss, router_z_loss,
+    contrastive_loss, cross_entropy_loss, cross_entropy_loss_masked, cross_entropy_loss_masked_sum,
+    cross_entropy_loss_smooth, flow_matching_interpolate, flow_matching_loss, flow_matching_target,
+    focal_loss, kl_div_loss, mse_loss, router_z_loss,
 };
 pub use super::lstm::{BiLstm, Lstm};
 pub use super::maybe_lora::MaybeLoraLinear;

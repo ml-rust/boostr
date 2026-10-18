@@ -50,6 +50,73 @@ where
         + IndexingOps<R>
         + TypeConversionOps<R>,
 {
+    let MaskedNll { masked, mask_2d, n } = masked_nll(client, logits, targets, mask)?;
+
+    // Denominator: number of masked-IN positions, never N.
+    //
+    // Reading it back to the host is a device sync point, once per loss call.
+    // It is what makes the empty-mask guard below possible: without it,
+    // sum(mask) == 0 yields 0/0 = NaN and poisons every gradient silently.
+    // Do NOT remove this readback without replacing the guard.
+    let mask_sum = client.sum(&mask_2d, &[0, 1], false).map_err(Error::Numr)?;
+    let kept: f32 = client
+        .cast(&mask_sum, DType::F32)
+        .map_err(Error::Numr)?
+        .item()
+        .map_err(Error::Numr)?;
+    if kept <= 0.0 || !kept.is_finite() {
+        return Err(Error::InvalidArgument {
+            arg: "mask",
+            reason: format!(
+                "mask selected no positions: sum(mask) = {kept} over {n} positions; this usually means the mask was derived from the wrong tensor - pass a mask with at least one 1.0 entry"
+            ),
+        });
+    }
+
+    let total =
+        var_sum(&masked, &all_dims(masked.shape().len()), false, client).map_err(Error::Numr)?;
+    let loss = var_div_scalar(&total, kept as f64, client).map_err(Error::Numr)?;
+
+    Ok(loss)
+}
+
+/// Per-position NLL times the mask, before any reduction.
+pub(super) struct MaskedNll<R: Runtime<DType = DType>> {
+    /// `nll * mask`, shape `[N, 1]`, tracked w.r.t. `logits`.
+    pub(super) masked: Var<R>,
+    /// The mask as `[N, 1]` at the logits dtype.
+    pub(super) mask_2d: Tensor<R>,
+    /// Number of positions `N`.
+    pub(super) n: usize,
+}
+
+/// Checks the shapes and computes `nll * mask` per position.
+///
+/// The mean and the sum variants share this, so both score the same positions.
+pub(super) fn masked_nll<R, C>(
+    client: &C,
+    logits: &Var<R>,
+    targets: &Tensor<R>,
+    mask: &Tensor<R>,
+) -> Result<MaskedNll<R>>
+where
+    R: Runtime<DType = DType>,
+    C: RuntimeClient<R>
+        + ActivationOps<R>
+        + BinaryOps<R>
+        + UnaryOps<R>
+        + ReduceOps<R>
+        + ScalarOps<R>
+        + IndexingOps<R>
+        + TypeConversionOps<R>,
+    R::Client: ActivationOps<R>
+        + BinaryOps<R>
+        + UnaryOps<R>
+        + ReduceOps<R>
+        + ScalarOps<R>
+        + IndexingOps<R>
+        + TypeConversionOps<R>,
+{
     let logits_shape = logits.shape();
     if logits_shape.len() != 2 {
         return Err(Error::InvalidArgument {
@@ -97,34 +164,10 @@ where
         client.cast(&mask_2d, logits_dtype).map_err(Error::Numr)?
     };
 
-    // Denominator: number of masked-IN positions, never N.
-    //
-    // Reading it back to the host is a device sync point, once per loss call.
-    // It is what makes the empty-mask guard below possible: without it,
-    // sum(mask) == 0 yields 0/0 = NaN and poisons every gradient silently.
-    // Do NOT remove this readback without replacing the guard.
-    let mask_sum = client.sum(&mask_2d, &[0, 1], false).map_err(Error::Numr)?;
-    let kept: f32 = client
-        .cast(&mask_sum, DType::F32)
-        .map_err(Error::Numr)?
-        .item()
-        .map_err(Error::Numr)?;
-    if kept <= 0.0 || !kept.is_finite() {
-        return Err(Error::InvalidArgument {
-            arg: "mask",
-            reason: format!(
-                "mask selected no positions: sum(mask) = {kept} over {n} positions; this usually means the mask was derived from the wrong tensor - pass a mask with at least one 1.0 entry"
-            ),
-        });
-    }
-
-    let mask_var = Var::new(mask_2d, false);
+    let mask_var = Var::new(mask_2d.clone(), false);
     let masked = var_mul(&nll, &mask_var, client).map_err(Error::Numr)?;
-    let total =
-        var_sum(&masked, &all_dims(masked.shape().len()), false, client).map_err(Error::Numr)?;
-    let loss = var_div_scalar(&total, kept as f64, client).map_err(Error::Numr)?;
 
-    Ok(loss)
+    Ok(MaskedNll { masked, mask_2d, n })
 }
 
 #[cfg(test)]

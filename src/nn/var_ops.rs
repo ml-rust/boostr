@@ -103,6 +103,47 @@ where
     numr::autograd::var_reshape(&expanded, &[b, h_kv * repeat, s, d])
 }
 
+/// Repeat heads in tiled order: `[b, s, H_k, S]` -> `[b, s, H_v, S]`.
+///
+/// With `rep = H_v / H_k`, output head `h` reads input head `h % H_k`.
+/// [`repeat_kv`] groups copies instead: output head `h` reads `h / rep`.
+/// Every step is tracked, so gradient flows back to the input.
+///
+/// # Errors
+///
+/// `InvalidArgument` when the input is not 4-D, `H_k` is 0, or `H_v` is not a
+/// multiple of `H_k`.
+pub fn repeat_heads_tiled<R: Runtime>(x: &Var<R>, h_v: usize) -> numr::error::Result<Var<R>>
+where
+    R::Client: numr::ops::TensorOps<R>,
+{
+    let shape = x.shape();
+    if shape.len() != 4 {
+        return Err(numr::error::Error::InvalidArgument {
+            arg: "x",
+            reason: format!("expected [b, s, heads, size], got {shape:?}"),
+        });
+    }
+    let [b, s, h_k, size] = [shape[0], shape[1], shape[2], shape[3]];
+    if h_k == 0 || !h_v.is_multiple_of(h_k) {
+        return Err(numr::error::Error::InvalidArgument {
+            arg: "h_v",
+            reason: format!("target heads {h_v} must be a multiple of input heads {h_k}"),
+        });
+    }
+    let rep = h_v / h_k;
+    if rep == 1 {
+        // `alias` keeps the input's TensorId, so gradient state is not orphaned.
+        return Ok(x.alias());
+    }
+
+    let expanded = var_contiguous_numr(x)?;
+    let expanded = numr::autograd::var_reshape(&expanded, &[b, s, 1, h_k, size])?;
+    let expanded = numr::autograd::var_broadcast_to(&expanded, &[b, s, rep, h_k, size])?;
+    let expanded = var_contiguous_numr(&expanded)?;
+    numr::autograd::var_reshape(&expanded, &[b, s, h_v, size])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +209,88 @@ mod tests {
             .expect("repeat_kv(1) must not detach upstream parameters");
         let values: Vec<f32> = grad.contiguous().unwrap().to_vec();
         assert_eq!(values, vec![2.0, 4.0, 6.0, 8.0]);
+    }
+
+    /// Tiled repeat must stay on the autograd graph.
+    #[test]
+    fn repeat_heads_tiled_preserves_gradient_flow() {
+        let (client, device) = cpu_setup();
+
+        // [b=1, s=2, H_k=2, S=2]
+        let x = Var::new(
+            Tensor::<CpuRuntime>::from_slice(
+                &[0.5f32, -1.0, 2.0, 0.25, -0.75, 1.5, 0.1, -0.3],
+                &[1, 2, 2, 2],
+                &device,
+            )
+            .unwrap(),
+            true,
+        );
+
+        let repeated = repeat_heads_tiled(&x, 6).unwrap();
+        assert_eq!(repeated.shape(), &[1, 2, 6, 2]);
+
+        let loss = numr::autograd::var_sum(&repeated, &[0, 1, 2, 3], false, &client).unwrap();
+        let grads = backward(&loss, &client).unwrap();
+
+        let grad = grads
+            .get(x.id())
+            .expect("repeat_heads_tiled must propagate gradient back to the input");
+        let values: Vec<f32> = grad.contiguous().unwrap().to_vec();
+        assert_eq!(values, vec![3.0; 8]);
+    }
+
+    /// Output head `h` reads input head `h % H_k`, unlike the grouped order.
+    #[test]
+    fn repeat_heads_tiled_uses_tiled_order() {
+        let (_client, device) = cpu_setup();
+
+        // [1, 1, H_k=2, S=2]: head 0 = [1, 2], head 1 = [3, 4].
+        let x = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[1, 1, 2, 2], &device)
+                .unwrap(),
+            false,
+        );
+
+        let tiled = repeat_heads_tiled(&x, 4).unwrap();
+        assert_eq!(tiled.shape(), &[1, 1, 4, 2]);
+        let tiled: Vec<f32> = tiled.tensor().contiguous().unwrap().to_vec();
+        assert_eq!(tiled, vec![1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0]);
+
+        // Same data as `[b, H, s, d]`: `repeat_kv` groups heads as [h0, h0, h1, h1].
+        let xg = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[1, 2, 1, 2], &device)
+                .unwrap(),
+            false,
+        );
+        let grouped = repeat_kv(&xg, 2).unwrap();
+        let grouped: Vec<f32> = grouped.tensor().contiguous().unwrap().to_vec();
+        assert_eq!(grouped, vec![1.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 4.0]);
+        assert_ne!(tiled, grouped);
+    }
+
+    /// rep == 1 returns the same Var, and a non-multiple is an error.
+    #[test]
+    fn repeat_heads_tiled_identity_and_bad_ratio() {
+        let (client, device) = cpu_setup();
+
+        let w = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[1, 1, 2, 2], &device)
+                .unwrap(),
+            true,
+        );
+        let upstream = numr::autograd::var_mul(&w, &w, &client).unwrap();
+
+        let same = repeat_heads_tiled(&upstream, 2).unwrap();
+        assert_eq!(same.shape(), &[1, 1, 2, 2]);
+        let loss = numr::autograd::var_sum(&same, &[0, 1, 2, 3], false, &client).unwrap();
+        let grads = backward(&loss, &client).unwrap();
+        let grad = grads
+            .get(w.id())
+            .expect("rep == 1 must not detach upstream");
+        let values: Vec<f32> = grad.contiguous().unwrap().to_vec();
+        assert_eq!(values, vec![2.0, 4.0, 6.0, 8.0]);
+
+        assert!(repeat_heads_tiled(&upstream, 3).is_err());
     }
 }

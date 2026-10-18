@@ -30,6 +30,8 @@ Adds exact-resume optimizer state export and import, keyed by parameter name. Ad
 
 ### Added
 
+- **`nn::var_ops::repeat_heads_tiled`** — tracked head repeat in tiled order, `[b, s, H_k, S]` to `[b, s, H_v, S]`. Output head `h` reads input head `h % H_k`, unlike the grouped order of `repeat_kv`. `H_v` must be a multiple of `H_k`.
+- **`nn::conv::var_causal_conv1d_silu`** — tracked depthwise causal conv with optional bias and SiLU, in `[batch, seq, channels]`. It sums shifted copies of the padded input, so backward needs no per-tap conv launches. It uses the weight layout and tap order of `causal_conv1d`.
 - **`GatedDeltaNetOps::gdn_chunk_backward`** — the gradients of `gdn_chunk_prefill` for `q`, `k`, `v`, `g`, `beta` and the initial state, returned as `GdnGrads`. `dq` is the gradient of the unscaled `q`, so it includes the `1 / sqrt(S_k)` factor. A `d_state_final` of `None` means a zero gradient on the final state.
 - **`var_gdn_chunk`** — the chunked GDN prefill as an autograd op. It returns the tracked output and the final state as a detached tensor. The final state's gradient is not propagated, so training through consecutive segments truncates backpropagation at each segment boundary. An input that does not require grad gets no gradient.
 - **`gdn_recurrent_backward`** — the sequential GDN gradient, one token at a time. It is the reference for faster backward paths.

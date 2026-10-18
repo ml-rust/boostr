@@ -30,6 +30,7 @@ Adds exact-resume optimizer state export and import, keyed by parameter name. Ad
 
 ### Added
 
+- **`ParamGroup`, `AdamW::with_param_groups`** — per-group learning-rate scale and weight decay for AdamW. A group steps at `config.lr * lr_scale`, so `set_lr` and schedulers keep their meaning. A parameter in no group uses `lr_scale` 1.0 and the config weight decay. `add_param_group`, `param_groups`, `set_group_lr_scale` and `set_group_weight_decay` manage groups. An id in two groups, or a `lr_scale` that is not finite or is negative, is an error. `ParamGroup::no_decay_from_names` builds the usual bias and norm group. With no groups the step is one launch with the same bits as before. State dict keys are unchanged.
 - **`nn::var_ops::repeat_heads_tiled`** — tracked head repeat in tiled order, `[b, s, H_k, S]` to `[b, s, H_v, S]`. Output head `h` reads input head `h % H_k`, unlike the grouped order of `repeat_kv`. `H_v` must be a multiple of `H_k`.
 - **`nn::conv::var_causal_conv1d_silu`** — tracked depthwise causal conv with optional bias and SiLU, in `[batch, seq, channels]`. It sums shifted copies of the padded input, so backward needs no per-tap conv launches. It uses the weight layout and tap order of `causal_conv1d`.
 - **`GatedDeltaNetOps::gdn_chunk_backward`** — the gradients of `gdn_chunk_prefill` for `q`, `k`, `v`, `g`, `beta` and the initial state, returned as `GdnGrads`. `dq` is the gradient of the unscaled `q`, so it includes the `1 / sqrt(S_k)` factor. A `d_state_final` of `None` means a zero gradient on the final state.

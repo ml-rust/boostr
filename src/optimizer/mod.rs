@@ -12,7 +12,7 @@ pub(crate) mod state_dict;
 pub mod traits;
 
 pub use adagrad::{AdaGrad, AdaGradConfig};
-pub use adamw::{AdamW, AdamWConfig};
+pub use adamw::{AdamW, AdamWConfig, ParamGroup};
 pub use grad_accumulator::GradAccumulator;
 pub use grad_clip::{clip_grad_norm, clip_grad_norm_per_param, clip_grad_value};
 pub use grad_scaler::GradScaler;

@@ -1,6 +1,7 @@
 //! `AdamWConfig`, per-parameter state, and the `AdamW` struct's bookkeeping
 //! methods. The `step` algorithm itself lives in `super::step`.
 
+use super::groups::ParamGroup;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::{Tensor, TensorId};
@@ -54,12 +55,19 @@ pub(super) struct ParamState<R: Runtime> {
 /// the narrow parameter directly rounds every step away and the model never
 /// trains. See [`crate::optimizer::precision`].
 ///
+/// [`ParamGroup`]s give a set of parameters their own learning-rate scale and
+/// weight decay. `config.lr` stays the base rate and a group steps at
+/// `config.lr * lr_scale`.
+///
 /// `state_dict` exports the state keyed by parameter name. `load_state_dict`
 /// restores it, so a resumed run continues the exact update sequence.
 pub struct AdamW<R: Runtime> {
     pub(super) config: AdamWConfig,
     pub(super) state: HashMap<TensorId, ParamState<R>>,
     pub(super) timestep: u64,
+    pub(super) groups: Vec<ParamGroup>,
+    /// Index into `groups` for every id that is in a group.
+    pub(super) group_of: HashMap<TensorId, usize>,
 }
 
 impl<R: Runtime<DType = DType>> AdamW<R> {
@@ -68,6 +76,8 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
             config,
             state: HashMap::new(),
             timestep: 0,
+            groups: Vec::new(),
+            group_of: HashMap::new(),
         }
     }
 

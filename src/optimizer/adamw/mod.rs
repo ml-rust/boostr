@@ -4,6 +4,7 @@
 //! Uses numr tensor ops directly — works on any backend without GPU↔CPU transfers.
 
 mod apply;
+mod groups;
 mod state_dict;
 mod step;
 mod types;
@@ -11,4 +12,5 @@ mod types;
 #[cfg(test)]
 mod test_support;
 
+pub use groups::ParamGroup;
 pub use types::{AdamW, AdamWConfig};

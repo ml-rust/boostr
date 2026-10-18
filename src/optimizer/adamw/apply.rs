@@ -2,8 +2,9 @@
 //! multi-tensor fast path when parameter, gradient and state already share
 //! one dtype, and a widened path (through an F32 master copy) otherwise.
 
+use super::groups::StepRates;
 use super::types::{AdamW, ParamState};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::ops::FusedOptimizerOps;
 use crate::optimizer::precision::optimizer_state_dtype;
 use crate::optimizer::{init_master, widen_grad, write_back};
@@ -59,6 +60,9 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
 
     /// Multi-tensor fast path: parameter, gradient and state already share one
     /// dtype for every id in `direct`.
+    ///
+    /// Launches once per bucket, with that bucket's lr and weight decay. With
+    /// no groups every id sits in bucket 0 and there is one launch.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub(super) fn apply_direct<C>(
         &mut self,
@@ -66,12 +70,10 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
         params: &mut HashMap<TensorId, Tensor<R>>,
         grads: &GradStore<R>,
         direct: &[TensorId],
-        lr: f64,
         beta1: f64,
         beta2: f64,
         eps: f64,
-        wd: f64,
-        step_size: f64,
+        rates: &StepRates,
     ) -> Result<()>
     where
         C: RuntimeClient<R>
@@ -81,40 +83,46 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
             + ReduceOps<R>
             + FusedOptimizerOps<R>,
     {
-        if direct.is_empty() {
-            return Ok(());
+        let mut buckets: Vec<Vec<TensorId>> = vec![Vec::new(); rates.buckets()];
+        for &id in direct {
+            if let Some(ids) = buckets.get_mut(self.bucket(id)) {
+                ids.push(id);
+            }
         }
 
-        // Build groups for multi-tensor launch
-        let groups: Vec<(&Tensor<R>, &Tensor<R>, &Tensor<R>, &Tensor<R>)> = direct
-            .iter()
-            .map(|id| {
-                let param = params
-                    .get(id)
-                    .expect("id came from params.keys() while building `direct`");
-                let grad = grads
-                    .get(*id)
-                    .expect("`direct` only holds ids that have a gradient");
+        for (bucket, ids) in buckets.iter().enumerate() {
+            if ids.is_empty() {
+                continue;
+            }
+            let rate = rates.of(bucket);
+            let mut batch: Vec<(&Tensor<R>, &Tensor<R>, &Tensor<R>, &Tensor<R>)> =
+                Vec::with_capacity(ids.len());
+            for id in ids {
+                let param = params.get(id).ok_or_else(|| missing("parameter", *id))?;
+                let grad = grads.get(*id).ok_or_else(|| missing("gradient", *id))?;
+                let state = self.state.get(id).ok_or_else(|| missing("state", *id))?;
+                batch.push((param, grad, &state.m, &state.v));
+            }
+
+            let results = client.fused_multi_tensor_adamw(
+                &batch,
+                rate.lr,
+                beta1,
+                beta2,
+                eps,
+                rate.wd,
+                rate.step_size,
+            )?;
+
+            for (id, (new_param, new_m, new_v)) in ids.iter().zip(results) {
                 let state = self
                     .state
-                    .get(id)
-                    .expect("state was lazily initialized for every id in `direct`");
-                (param, grad, &state.m, &state.v)
-            })
-            .collect();
-
-        let results =
-            client.fused_multi_tensor_adamw(&groups, lr, beta1, beta2, eps, wd, step_size)?;
-
-        // Write back results
-        for (id, (new_param, new_m, new_v)) in direct.iter().zip(results) {
-            let state_mut = self
-                .state
-                .get_mut(id)
-                .expect("state was lazily initialized for every id in `direct`");
-            state_mut.m = new_m;
-            state_mut.v = new_v;
-            params.insert(*id, new_param);
+                    .get_mut(id)
+                    .ok_or_else(|| missing("state", *id))?;
+                state.m = new_m;
+                state.v = new_v;
+                params.insert(*id, new_param);
+            }
         }
 
         Ok(())
@@ -124,7 +132,8 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
     /// state needs widening (an F32 master copy, an F32 gradient, or both).
     /// Runs one parameter at a time so each temporary F32 gradient is freed
     /// before the next one is allocated — batching them would hold an F32
-    /// copy of EVERY gradient at once.
+    /// copy of EVERY gradient at once. Each parameter uses its own group's
+    /// lr and weight decay.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_widened<C>(
         &mut self,
@@ -132,12 +141,10 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
         params: &mut HashMap<TensorId, Tensor<R>>,
         grads: &GradStore<R>,
         widened: Vec<TensorId>,
-        lr: f64,
         beta1: f64,
         beta2: f64,
         eps: f64,
-        wd: f64,
-        step_size: f64,
+        rates: &StepRates,
     ) -> Result<()>
     where
         C: RuntimeClient<R>
@@ -149,25 +156,13 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
             + FusedOptimizerOps<R>,
     {
         for id in widened {
-            let param_dtype = params
-                .get(&id)
-                .expect("id came from params.keys() while building `widened`")
-                .dtype();
-            let grad = grads
-                .get(id)
-                .expect("`widened` only holds ids that have a gradient");
-
-            let state = self
-                .state
-                .get(&id)
-                .expect("state was lazily initialized for every id in `widened`");
+            let rate = rates.of(self.bucket(id));
+            let param = params.get(&id).ok_or_else(|| missing("parameter", id))?;
+            let param_dtype = param.dtype();
+            let grad = grads.get(id).ok_or_else(|| missing("gradient", id))?;
+            let state = self.state.get(&id).ok_or_else(|| missing("state", id))?;
             let state_dtype = state.m.dtype();
-            let arith_param = match state.master.as_ref() {
-                Some(master) => master,
-                None => params
-                    .get(&id)
-                    .expect("id came from params.keys() while building `widened`"),
-            };
+            let arith_param = state.master.as_ref().unwrap_or(param);
 
             let widened_grad = widen_grad(client, grad, state_dtype)?;
             let arith_grad = widened_grad.as_ref().unwrap_or(grad);
@@ -177,18 +172,18 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
                 arith_grad,
                 &state.m,
                 &state.v,
-                lr,
+                rate.lr,
                 beta1,
                 beta2,
                 eps,
-                wd,
-                step_size,
+                rate.wd,
+                rate.step_size,
             )?;
 
             let state_mut = self
                 .state
                 .get_mut(&id)
-                .expect("state was lazily initialized for every id in `widened`");
+                .ok_or_else(|| missing("state", id))?;
             state_mut.m = new_m;
             state_mut.v = new_v;
 
@@ -197,6 +192,13 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
         }
 
         Ok(())
+    }
+}
+
+/// Error for an id that lost its parameter, gradient or state mid-step.
+fn missing(what: &str, id: TensorId) -> Error {
+    Error::TrainingError {
+        reason: format!("AdamW step: no {what} for {id:?}"),
     }
 }
 

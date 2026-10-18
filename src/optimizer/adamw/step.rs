@@ -50,16 +50,14 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
 
         let beta1 = self.config.beta1;
         let beta2 = self.config.beta2;
-        let lr = self.config.lr;
         let eps = self.config.eps;
-        let wd = self.config.weight_decay;
 
         // Bias correction factors
         let bc1 = 1.0 - beta1.powi(t as i32);
         let bc2 = 1.0 - beta2.powi(t as i32);
 
-        // Corrected learning rate: lr * sqrt(1 - beta2^t) / (1 - beta1^t)
-        let step_size = lr * bc2.sqrt() / bc1;
+        // Per bucket: lr, weight decay and lr * sqrt(1 - beta2^t) / (1 - beta1^t)
+        let rates = self.step_rates(bc1, bc2);
 
         // Collect params that have gradients, lazily initializing state (and
         // the F32 master copy for narrow-dtype params), and split them:
@@ -72,12 +70,8 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
         //   would hold an F32 copy of EVERY gradient at once.
         let (direct, widened) = self.collect_and_init_state(client, params, grads)?;
 
-        self.apply_direct(
-            client, params, grads, &direct, lr, beta1, beta2, eps, wd, step_size,
-        )?;
-        self.apply_widened(
-            client, params, grads, widened, lr, beta1, beta2, eps, wd, step_size,
-        )?;
+        self.apply_direct(client, params, grads, &direct, beta1, beta2, eps, &rates)?;
+        self.apply_widened(client, params, grads, widened, beta1, beta2, eps, &rates)?;
 
         Ok(())
     }

@@ -14,8 +14,10 @@ use numr::tensor::Tensor;
 /// - `logits`: `[1, M, V]` in any float dtype, `M = drafts.len() + 1`.
 ///   Row `i` scores the prefix `context ++ drafts[..i]`.
 /// - `context`: the prefix row 0 scores. It ends with the last committed token.
-/// - `drafts`: the draft ids. The drafter is deterministic, so each draft
-///   distribution is one-hot.
+/// - `drafts`: the draft ids.
+/// - `draft_probs`: `[1, drafts.len(), V]` F32, row `i` the distribution
+///   `drafts[i]` was drawn from. `None` treats each draft distribution as
+///   one-hot, for a deterministic drafter. The greedy rule ignores it.
 ///
 /// Row `i` takes the penalties of `rule` over the penalty window of its
 /// prefix: its last `rule.penalty_last_n` tokens, or all of it for 0. The
@@ -35,7 +37,7 @@ use numr::tensor::Tensor;
 ///
 /// # Errors
 ///
-/// [`Error::InvalidArgument`] for a wrong logits shape or a bad `rule`.
+/// [`Error::InvalidArgument`] for a wrong logits or draft probs shape, or a bad `rule`.
 /// [`Error::InferenceError`] when the verify result is out of range. A
 /// device op error returns as is.
 pub fn verify_logits<R, C>(
@@ -45,6 +47,7 @@ pub fn verify_logits<R, C>(
     drafts: &[u32],
     rule: &SampleRule,
     draw: Draw,
+    draft_probs: Option<&Tensor<R>>,
 ) -> Result<Verdict>
 where
     R: Runtime<DType = DType>,
@@ -78,13 +81,28 @@ where
         let ids: Vec<u32> = client
             .argmax(scores, 2, false)?
             .contiguous()?
-            .to_vec::<i64>()
+            .try_to_vec::<i64>()?
             .into_iter()
             .map(|id| u32::try_from(id).unwrap_or(u32::MAX))
             .collect();
         return match_drafts(drafts, &ids, vocab, "argmax");
     }
 
+    if let Some(q) = draft_probs {
+        let want = [1, drafts.len(), vocab];
+        if q.shape() != want.as_slice() {
+            return Err(Error::InvalidArgument {
+                arg: "draft_probs",
+                reason: format!(
+                    "verify_logits: expected {want:?} for {} drafts, got {:?}",
+                    drafts.len(),
+                    q.shape()
+                ),
+            });
+        }
+    }
+    // No drafts leave no draft row; target row 0 alone picks the token.
+    let draft_probs = draft_probs.filter(|_| !drafts.is_empty());
     let probs = client.sampling_probs(scores, &rule.filter)?;
 
     let ids: Vec<i32> = drafts
@@ -93,9 +111,9 @@ where
         .collect();
     let draft_tokens = Tensor::<R>::from_slice(&ids, &[1, drafts.len()], device)?;
     let uniforms = client.philox_uniform(&[1, rows], draw.key, draw.counter, DType::F32)?;
-    let result = client.speculative_verify(&probs, None, &draft_tokens, &uniforms)?;
+    let result = client.speculative_verify(&probs, draft_probs, &draft_tokens, &uniforms)?;
 
-    let pair = result.contiguous()?.to_vec::<i32>();
+    let pair = result.contiguous()?.try_to_vec::<i32>()?;
     let (m, next) = match pair.as_slice() {
         &[m, next] => (m, next),
         other => {
@@ -123,7 +141,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::traits::inference::FilterRule;
+    use crate::ops::traits::inference::{FilterRule, SamplingProbsOps};
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::CpuRuntime;
 
@@ -152,7 +170,8 @@ mod tests {
         ]);
         for counter in 0..8 {
             let draw = Draw::for_step(0, counter);
-            let all = verify_logits(&client, &l, &[4], &[1, 0], &top1(), draw).expect("verify");
+            let all =
+                verify_logits(&client, &l, &[4], &[1, 0], &top1(), draw, None).expect("verify");
             assert_eq!(
                 all,
                 Verdict {
@@ -160,7 +179,8 @@ mod tests {
                     next: 3
                 }
             );
-            let one = verify_logits(&client, &l, &[4], &[1, 2], &top1(), draw).expect("verify");
+            let one =
+                verify_logits(&client, &l, &[4], &[1, 2], &top1(), draw, None).expect("verify");
             assert_eq!(
                 one,
                 Verdict {
@@ -181,7 +201,7 @@ mod tests {
         };
         let draw = Draw::for_step(7, 0);
         // Row 0 counts token 1 from the context, so token 2 wins.
-        let got = verify_logits(&client, &l, &[1], &[2], &rule, draw).expect("verify");
+        let got = verify_logits(&client, &l, &[1], &[2], &rule, draw, None).expect("verify");
         // Row 1 counts tokens 1 and 2: 1.0 vs 0.5, token 1 wins.
         assert_eq!(
             got,
@@ -209,7 +229,7 @@ mod tests {
                 ..rule
             };
             let draw = Draw::for_step(0, n as u64);
-            let got = verify_logits(&client, &l, &[1, 1], &[1], &rule, draw).expect("verify");
+            let got = verify_logits(&client, &l, &[1, 1], &[1], &rule, draw, None).expect("verify");
             assert_eq!(got, Verdict { accepted, next }, "window {n}");
         }
     }
@@ -218,7 +238,7 @@ mod tests {
     fn no_drafts_draws_from_row_zero() {
         let (client, _) = cpu_setup();
         let l = logits(&[[0.0, 0.0, 0.0, 4.0, 0.0]]);
-        let got = verify_logits(&client, &l, &[0], &[], &top1(), Draw::for_step(1, 2));
+        let got = verify_logits(&client, &l, &[0], &[], &top1(), Draw::for_step(1, 2), None);
         assert_eq!(
             got.expect("verify"),
             Verdict {
@@ -229,10 +249,52 @@ mod tests {
     }
 
     #[test]
+    fn draft_probs_equal_to_the_target_accept_every_draft() {
+        let (client, _) = cpu_setup();
+        let l = logits(&[
+            [0.0, 2.0, 1.0, 0.0, 0.5],
+            [1.0, 0.0, 1.0, 0.3, 0.0],
+            [0.0, 0.2, 0.0, 0.5, 0.0],
+        ]);
+        let rule = SampleRule::new(FilterRule::temperature_only(1.0));
+        let p = client.sampling_probs(&l, &rule.filter).expect("probs");
+        let q = p.narrow(1, 0, 2).expect("rows").contiguous().expect("q");
+        for counter in 0..16 {
+            let draw = Draw::for_step(3, counter);
+            let got =
+                verify_logits(&client, &l, &[4], &[1, 2], &rule, draw, Some(&q)).expect("verify");
+            assert_eq!(
+                got.accepted, 2,
+                "counter {counter}: q == p accepts every draft"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrong_draft_probs_shape_names_the_draft_probs() {
+        let (client, device) = cpu_setup();
+        let l = logits(&[[0.0; V], [0.0; V]]);
+        let rule = SampleRule::new(FilterRule::temperature_only(1.0));
+        let q = Tensor::<CpuRuntime>::from_slice(&[0.2f32; 2 * V], &[1, 2, V], &device).expect("q");
+        match verify_logits(
+            &client,
+            &l,
+            &[0],
+            &[1],
+            &rule,
+            Draw::for_step(0, 0),
+            Some(&q),
+        ) {
+            Err(Error::InvalidArgument { arg, .. }) => assert_eq!(arg, "draft_probs"),
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_wrong_row_count_names_the_logits() {
         let (client, _) = cpu_setup();
         let l = logits(&[[0.0; V]]);
-        match verify_logits(&client, &l, &[0], &[1], &top1(), Draw::for_step(0, 0)) {
+        match verify_logits(&client, &l, &[0], &[1], &top1(), Draw::for_step(0, 0), None) {
             Err(Error::InvalidArgument { arg, .. }) => assert_eq!(arg, "logits"),
             other => panic!("expected InvalidArgument, got {other:?}"),
         }

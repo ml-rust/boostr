@@ -1,9 +1,8 @@
 //! One speculative step: draft, one verify forward, accept, roll back.
 
-use super::accept::{greedy, rejection};
 use super::generate::{Phase, SpeculativeGenerator};
+use super::source::DraftSource;
 use crate::error::{Error, Result};
-use crate::inference::speculative::draft::Drafter;
 use crate::inference::speculative::model::SpeculativeModel;
 use crate::inference::speculative::types::{Draw, FinishReason, Verdict};
 
@@ -16,12 +15,13 @@ pub struct StepOutput {
     pub finish: Option<FinishReason>,
 }
 
-impl<M: SpeculativeModel, D: Drafter> SpeculativeGenerator<M, D> {
+impl<M: SpeculativeModel, D: DraftSource<M>> SpeculativeGenerator<M, D> {
     /// Run one step and return the tokens it emits.
     ///
     /// The drafter proposes up to `num_draft_tokens` tokens. The count is
     /// clamped so that the step never emits past `max_tokens`. The proposal
-    /// is cut at its first id outside the vocabulary. One forward feeds the
+    /// is cut at its first id outside the vocabulary. A [`ModelDrafter`]
+    /// also hands its draft distributions to the verify. One forward feeds the
     /// last committed token `x` and the drafts `d_1..d_k`. The greedy path
     /// keeps the longest prefix where each draft equals the target's argmax.
     /// With a penalty that argmax runs over penalized logits. The sampled
@@ -37,6 +37,8 @@ impl<M: SpeculativeModel, D: Drafter> SpeculativeGenerator<M, D> {
     /// output ends, or when the model breaks its contract. A model error
     /// returns as is. After any error, steps are refused until a `start`
     /// succeeds.
+    ///
+    /// [`ModelDrafter`]: crate::inference::speculative::ModelDrafter
     pub fn step(&mut self) -> Result<StepOutput> {
         match self.phase {
             Phase::Running => {}
@@ -61,7 +63,6 @@ impl<M: SpeculativeModel, D: Drafter> SpeculativeGenerator<M, D> {
     }
 
     fn run_step(&mut self) -> Result<StepOutput> {
-        let vocab_size = self.model.vocab_size();
         let committed = self.tokens.len();
         let last = *self.tokens.last().ok_or_else(|| Error::InferenceError {
             reason: "the generator holds no committed token; call start first".into(),
@@ -85,23 +86,16 @@ impl<M: SpeculativeModel, D: Drafter> SpeculativeGenerator<M, D> {
 
         self.feed.clear();
         self.feed.push(last);
-        if k > 0 {
-            let proposal = self.drafter.propose(&self.tokens, k);
-            self.feed.extend(
-                proposal
-                    .iter()
-                    .take(k)
-                    .take_while(|&&id| (id as usize) < vocab_size),
-            );
-        }
-
-        let Verdict { accepted, next } = match self.config.sampled_rule().copied() {
-            None => greedy::accept(&mut self.model, &self.feed, len_before)?,
-            Some(rule) => {
-                let draw = Draw::for_step(self.key, self.step_index);
-                rejection::accept(&mut self.model, &self.feed, &rule, draw, len_before)?
-            }
-        };
+        let rule = self.config.sampled_rule().copied();
+        let draw = Draw::for_step(self.key, self.step_index);
+        let Verdict { accepted, next } = self.drafter.draft_and_verify(
+            &mut self.model,
+            &self.tokens,
+            k,
+            rule.as_ref(),
+            draw,
+            &mut self.feed,
+        )?;
         self.step_index += 1;
         let drafts = &self.feed[1..];
         let mut tokens = Vec::with_capacity(accepted + 1);
@@ -144,7 +138,7 @@ impl<M: SpeculativeModel, D: Drafter> SpeculativeGenerator<M, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inference::speculative::draft::PromptLookup;
+    use crate::inference::speculative::draft::{Drafter, PromptLookup};
     use crate::inference::speculative::toy_lm::{
         EmptyDrafter, Oracle, Scripted, ToyLm, toy_continuation,
     };

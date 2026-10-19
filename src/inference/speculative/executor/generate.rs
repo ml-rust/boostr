@@ -1,9 +1,9 @@
 //! Generator state, start-up and the generation loop.
 
 use super::accept::check_extend;
+use super::source::DraftSource;
 use super::step::StepOutput;
 use crate::error::{Error, Result};
-use crate::inference::speculative::draft::Drafter;
 use crate::inference::speculative::model::SpeculativeModel;
 use crate::inference::speculative::types::{FinishReason, SpeculativeConfig, SpeculativeStats};
 
@@ -18,7 +18,7 @@ pub(super) enum Phase {
     Finished(FinishReason),
 }
 
-/// Speculative generation over a target model and a drafter.
+/// Speculative generation over a target model and a drafter or a draft model.
 ///
 /// With a greedy rule, the output equals plain greedy decoding of the same
 /// model token for token, penalties included. With a temperature above 0,
@@ -61,7 +61,7 @@ pub struct SpeculativeGenerator<M, D> {
     pub(super) step_index: u64,
 }
 
-impl<M: SpeculativeModel, D: Drafter> SpeculativeGenerator<M, D> {
+impl<M: SpeculativeModel, D: DraftSource<M>> SpeculativeGenerator<M, D> {
     /// A generator over `model` and `drafter`. Call [`start`](Self::start) next.
     ///
     /// # Errors
@@ -211,7 +211,7 @@ impl<M: SpeculativeModel, D: Drafter> SpeculativeGenerator<M, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inference::speculative::draft::PromptLookup;
+    use crate::inference::speculative::draft::{Drafter, PromptLookup};
     use crate::inference::speculative::toy_lm::{
         EmptyDrafter, OffByOne, Oracle, RandomDrafter, ToyLm, plain_greedy,
     };

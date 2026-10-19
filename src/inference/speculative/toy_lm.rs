@@ -1,4 +1,4 @@
-//! Test support: a toy target model, test drafters and a plain greedy loop.
+//! Test support: a toy target and draft model, test drafters and a plain greedy loop.
 //!
 //! The toy's next token hashes the whole fed prefix. A duplicate, missing or
 //! stale cache position changes every later output. Half of its choices
@@ -6,8 +6,8 @@
 //! finds matches. Its logits put the next token 1.0 above every other id, so
 //! argmax equals the greedy next token.
 
-use super::draft::Drafter;
-use super::model::SpeculativeModel;
+use super::draft::{DraftModel, Drafter, ModelDrafter};
+use super::model::{SpeculativeModel, SpeculativeProbModel};
 use super::types::{Draw, FinishReason, SampleRule, SpeculativeConfig, Verdict};
 use super::verify::verify_logits;
 use crate::error::{Error, Result};
@@ -126,23 +126,54 @@ impl SpeculativeModel for ToyLm {
     }
 
     fn extend_sampled(&mut self, tokens: &[u32], rule: &SampleRule, draw: Draw) -> Result<Verdict> {
+        self.extend_sampled_with_probs(tokens, rule, draw, None)
+    }
+}
+
+impl SpeculativeProbModel<CpuRuntime> for ToyLm {
+    fn extend_sampled_with_probs(
+        &mut self,
+        tokens: &[u32],
+        rule: &SampleRule,
+        draw: Draw,
+        draft_probs: Option<&Tensor<CpuRuntime>>,
+    ) -> Result<Verdict> {
         if tokens.is_empty() {
             return Err(Error::InferenceError {
                 reason: "extend_sampled needs the last committed token".into(),
             });
         }
         let start = self.fed.len();
+        let logits = self.forward_logits(tokens)?;
+        let (client, _) = cpu_setup();
+        let (context, drafts) = self.fed.split_at(start + 1);
+        verify_logits(&client, &logits, context, drafts, rule, draw, draft_probs)
+    }
+}
+
+impl DraftModel<CpuRuntime> for ToyLm {
+    fn forward_logits(&mut self, tokens: &[u32]) -> Result<Tensor<CpuRuntime>> {
         let mut rows = Vec::with_capacity(tokens.len() * self.vocab);
         for &t in tokens {
             self.fed.push(t);
             rows.extend(toy_logits(self.seed, self.vocab, &self.fed));
         }
-        let (client, device) = cpu_setup();
-        let logits =
-            Tensor::<CpuRuntime>::from_slice(&rows, &[1, tokens.len(), self.vocab], &device)?;
-        let (context, drafts) = self.fed.split_at(start + 1);
-        verify_logits(&client, &logits, context, drafts, rule, draw)
+        let (_, device) = cpu_setup();
+        Ok(Tensor::<CpuRuntime>::from_slice(
+            &rows,
+            &[1, tokens.len(), self.vocab],
+            &device,
+        )?)
     }
+}
+
+/// A [`ModelDrafter`] over a toy draft model of `vocab` tokens and `seed`.
+pub(crate) fn toy_drafter(
+    vocab: usize,
+    seed: u64,
+) -> ModelDrafter<CpuRuntime, ToyLm, numr::runtime::cpu::CpuClient> {
+    let (client, _) = cpu_setup();
+    ModelDrafter::new(ToyLm::new(vocab, seed), client)
 }
 
 /// The toy logits after `prefix`, penalized as `apply_sampling_penalties` does, in f32.

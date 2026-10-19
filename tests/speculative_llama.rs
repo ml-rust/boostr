@@ -135,7 +135,7 @@ impl SpeculativeModel for TinyTarget {
         let logits = self.forward(tokens)?;
         // Row 0 scores the cached tokens plus tokens[0]; row i adds tokens[1..=i].
         let (context, drafts) = self.fed.split_at(start + 1);
-        verify_logits(&self.client, &logits, context, drafts, rule, draw)
+        verify_logits(&self.client, &logits, context, drafts, rule, draw, None)
     }
 }
 

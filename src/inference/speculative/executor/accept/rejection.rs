@@ -2,8 +2,10 @@
 
 use super::contract::check_growth;
 use crate::error::{Error, Result};
-use crate::inference::speculative::model::SpeculativeModel;
+use crate::inference::speculative::model::{SpeculativeModel, SpeculativeProbModel};
 use crate::inference::speculative::types::{Draw, SampleRule, Verdict};
+use numr::runtime::Runtime;
+use numr::tensor::Tensor;
 
 /// Feed `feed` through `extend_sampled` and check the verdict.
 ///
@@ -21,15 +23,50 @@ pub(crate) fn accept<M: SpeculativeModel>(
     draw: Draw,
     len_before: usize,
 ) -> Result<Verdict> {
-    let vocab_size = model.vocab_size();
-    let drafts = feed
-        .len()
+    let drafts = draft_count(feed)?;
+    let verdict = model.extend_sampled(feed, rule, draw)?;
+    check_verdict(model, feed.len(), drafts, verdict, len_before)
+}
+
+/// [`accept`] through `extend_sampled_with_probs`, with the draft distributions `q`.
+///
+/// `q` is `[1, feed.len() - 1, V]` F32, or `None` for one-hot drafts.
+///
+/// # Errors
+///
+/// Every error of [`accept`].
+pub(crate) fn accept_with_probs<R: Runtime, M: SpeculativeProbModel<R>>(
+    model: &mut M,
+    feed: &[u32],
+    rule: &SampleRule,
+    draw: Draw,
+    q: Option<&Tensor<R>>,
+    len_before: usize,
+) -> Result<Verdict> {
+    let drafts = draft_count(feed)?;
+    let verdict = model.extend_sampled_with_probs(feed, rule, draw, q)?;
+    check_verdict(model, feed.len(), drafts, verdict, len_before)
+}
+
+/// The drafts in `feed`: every token after the last committed one.
+fn draft_count(feed: &[u32]) -> Result<usize> {
+    feed.len()
         .checked_sub(1)
         .ok_or_else(|| Error::InferenceError {
             reason: "a verify forward needs the last committed token".into(),
-        })?;
-    let verdict = model.extend_sampled(feed, rule, draw)?;
-    check_growth(feed.len(), len_before, model.len())?;
+        })
+}
+
+/// Check the cache growth and the verdict range of one sampled verify forward.
+fn check_verdict<M: SpeculativeModel>(
+    model: &M,
+    fed: usize,
+    drafts: usize,
+    verdict: Verdict,
+    len_before: usize,
+) -> Result<Verdict> {
+    let vocab_size = model.vocab_size();
+    check_growth(fed, len_before, model.len())?;
     if verdict.accepted > drafts {
         return Err(Error::InferenceError {
             reason: format!(
@@ -54,10 +91,11 @@ pub(crate) fn accept<M: SpeculativeModel>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inference::speculative::draft::{Drafter, PromptLookup};
+    use crate::inference::speculative::draft::PromptLookup;
     use crate::inference::speculative::executor::generate::SpeculativeGenerator;
+    use crate::inference::speculative::executor::source::DraftSource;
     use crate::inference::speculative::toy_lm::{
-        HashDrafter, Oracle, RandomDrafter, ToyLm, plain_greedy, reference_probs,
+        HashDrafter, Oracle, RandomDrafter, ToyLm, plain_greedy, reference_probs, toy_drafter,
     };
     use crate::inference::speculative::types::{
         COUNTERS_PER_STEP, FinishReason, SpeculativeConfig, SpeculativeStats,
@@ -194,7 +232,7 @@ mod tests {
     }
 
     /// One sampled run on a toy of `vocab` tokens. Checks the cache invariant.
-    fn run_toy<D: Drafter>(
+    fn run_toy<D: DraftSource<ToyLm>>(
         vocab: usize,
         seed: u64,
         drafter: D,
@@ -428,7 +466,7 @@ mod tests {
     /// `expect_accepts` asks for at least one accepted draft. A strict filter can give a
     /// deterministic drafter's token zero probability on every run, so only drafters
     /// and filters that keep it in the kept set set this.
-    fn check_distribution<D: Drafter>(
+    fn check_distribution<D: DraftSource<ToyLm>>(
         name: &str,
         rule: SampleRule,
         expect_accepts: bool,
@@ -517,5 +555,37 @@ mod tests {
             let name = format!("penalty window {last_n}");
             check_distribution(&name, rule, true, || HashDrafter { salt: 9, vocab: V8 });
         }
+    }
+
+    /// A draft model of another seed drafts from a q that is not one-hot.
+    /// Every rejection then draws from the residual `max(0, p - q)`.
+    const DRAFT_SEED: u64 = TOY_SEED ^ 0x0d2a_f75e;
+
+    #[test]
+    fn draft_model_output_follows_the_target_distribution() {
+        let rule = SampleRule::new(filter(1.0, 0, 1.0, 0.0));
+        check_distribution("draft model", rule, true, || toy_drafter(V8, DRAFT_SEED));
+    }
+
+    #[test]
+    fn filtered_draft_model_output_follows_the_target_distribution() {
+        let rule = SampleRule::new(filter(0.9, 6, 0.95, 0.02));
+        check_distribution("draft model filtered", rule, true, || {
+            toy_drafter(V8, DRAFT_SEED)
+        });
+    }
+
+    #[test]
+    fn penalized_draft_model_output_follows_the_penalized_distribution() {
+        let rule = SampleRule {
+            repeat_penalty: 1.3,
+            frequency_penalty: 0.2,
+            presence_penalty: 0.4,
+            penalty_last_n: 2,
+            ..SampleRule::new(filter(1.0, 0, 1.0, 0.05))
+        };
+        check_distribution("draft model penalties", rule, true, || {
+            toy_drafter(V8, DRAFT_SEED)
+        });
     }
 }

@@ -2,6 +2,8 @@
 
 use super::types::{Draw, SampleRule, Verdict};
 use crate::error::{Error, Result};
+use numr::runtime::Runtime;
+use numr::tensor::Tensor;
 
 /// A causal target model with a rollback-capable cache.
 ///
@@ -81,5 +83,42 @@ pub trait SpeculativeModel {
                      SpeculativeModel::extend_sampled, or set temperature 0 with no penalty"
                 .into(),
         })
+    }
+}
+
+/// A target model that verifies drafts against their draft distributions.
+///
+/// A draft model drafts by sampling, so each draft distribution `q` is not
+/// one-hot. Rejection sampling then needs `q` for an unbiased output.
+pub trait SpeculativeProbModel<R: Runtime>: SpeculativeModel {
+    /// [`extend_sampled`](SpeculativeModel::extend_sampled) with the draft distributions.
+    ///
+    /// `draft_probs` is `[1, tokens.len() - 1, V]` F32. Row `i` is the
+    /// distribution draft `tokens[i + 1]` was drawn from. An implementation
+    /// passes it to
+    /// [`verify_logits`](crate::inference::speculative::verify_logits).
+    /// `None` means one-hot draft distributions, as for `extend_sampled`.
+    ///
+    /// The default runs `extend_sampled` for `None` and refuses `Some`.
+    ///
+    /// # Errors
+    ///
+    /// An error when the forward or the verify fails. The default returns
+    /// [`Error::InferenceError`] for `Some`.
+    fn extend_sampled_with_probs(
+        &mut self,
+        tokens: &[u32],
+        rule: &SampleRule,
+        draw: Draw,
+        draft_probs: Option<&Tensor<R>>,
+    ) -> Result<Verdict> {
+        match draft_probs {
+            None => self.extend_sampled(tokens, rule, draw),
+            Some(_) => Err(Error::InferenceError {
+                reason: "this model ignores draft distributions; implement \
+                         SpeculativeProbModel::extend_sampled_with_probs to verify a draft model"
+                    .into(),
+            }),
+        }
     }
 }

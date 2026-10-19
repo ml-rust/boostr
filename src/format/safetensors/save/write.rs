@@ -1,9 +1,9 @@
 //! SafeTensors file writer
 
-use super::encode::{dtype_name, tensor_to_le_bytes};
+use super::encode::tensor_to_le_bytes;
+use super::header::{Spec, encode_header};
 use crate::error::{Error, Result};
 use crate::format::atomic_write::write_atomic;
-use numr::dtype::DType;
 use numr::runtime::cpu::CpuRuntime;
 use numr::tensor::Tensor;
 use std::collections::HashMap;
@@ -16,71 +16,14 @@ fn io_error(e: std::io::Error) -> Error {
     }
 }
 
-/// Serialize the header JSON, prefixed by its little-endian `u64` length
-///
-/// Runs before any file is touched, so an unsupported dtype or a
-/// serialization error leaves the filesystem unchanged.
-fn encode_header(
-    entries: &[(String, Vec<u8>, Vec<usize>, DType)],
-    metadata: Option<&HashMap<String, String>>,
-) -> Result<Vec<u8>> {
-    let mut header = serde_json::Map::new();
-
-    if let Some(meta) = metadata {
-        let mut meta_obj = serde_json::Map::new();
-        for (k, v) in meta {
-            meta_obj.insert(k.clone(), serde_json::Value::String(v.clone()));
-        }
-        header.insert("__metadata__".into(), serde_json::Value::Object(meta_obj));
-    }
-
-    let mut current_offset: usize = 0;
-    for (name, data, shape, dtype) in entries {
-        let byte_len = data.len();
-        let mut info = serde_json::Map::new();
-        info.insert(
-            "dtype".into(),
-            serde_json::Value::String(dtype_name(*dtype)?.into()),
-        );
-        info.insert(
-            "shape".into(),
-            serde_json::Value::Array(
-                shape
-                    .iter()
-                    .map(|&s| serde_json::Value::Number(s.into()))
-                    .collect(),
-            ),
-        );
-        info.insert(
-            "data_offsets".into(),
-            serde_json::Value::Array(vec![
-                serde_json::Value::Number(current_offset.into()),
-                serde_json::Value::Number((current_offset + byte_len).into()),
-            ]),
-        );
-        header.insert(name.clone(), serde_json::Value::Object(info));
-        current_offset += byte_len;
-    }
-
-    // Sorted keys keep the header bytes fixed for any metadata map order.
-    let mut header = serde_json::Value::Object(header);
-    header.sort_all_objects();
-    let header_str = serde_json::to_string(&header).map_err(|e| Error::ModelError {
-        reason: format!("JSON serialize error: {e}"),
-    })?;
-    let mut out = Vec::with_capacity(8 + header_str.len());
-    out.extend_from_slice(&(header_str.len() as u64).to_le_bytes());
-    out.extend_from_slice(header_str.as_bytes());
-    Ok(out)
-}
-
 /// Save tensors to SafeTensors format
 ///
 /// Each tensor is written at its own dtype — a BF16 tensor produces a BF16
 /// entry at 2 bytes per element, not an F32 one at 4.
 ///
-/// The function encodes every tensor and the header before it touches the
-/// filesystem. It then writes a sibling temp file and renames it over `path`.
+/// The function builds the header from shapes and dtypes before it touches
+/// the filesystem. It then writes a sibling temp file, one encoded tensor at
+/// a time, and renames it over `path`. Peak memory tracks the largest tensor.
 /// An error leaves any existing file at `path` unchanged.
 ///
 /// Only accepts CPU tensors. Move GPU tensors to CPU before saving.
@@ -89,27 +32,23 @@ pub fn save_safetensors<P: AsRef<Path>>(
     tensors: &HashMap<String, Tensor<CpuRuntime>>,
     metadata: Option<&HashMap<String, String>>,
 ) -> Result<()> {
-    let mut entries: Vec<(String, Vec<u8>, Vec<usize>, DType)> = Vec::new();
     let mut names: Vec<&String> = tensors.keys().collect();
     names.sort();
 
-    for name in &names {
-        let tensor = &tensors[*name];
-        let data = tensor_to_le_bytes(tensor)?;
-        entries.push((
-            (*name).clone(),
-            data,
-            tensor.shape().to_vec(),
-            tensor.dtype(),
-        ));
-    }
-
-    let header = encode_header(&entries, metadata)?;
+    let shapes: Vec<&[usize]> = names.iter().map(|n| tensors[*n].shape()).collect();
+    let specs: Vec<Spec<'_>> = names
+        .iter()
+        .zip(&shapes)
+        .map(|(n, shape)| (n.as_str(), *shape, tensors[*n].dtype()))
+        .collect();
+    let header = encode_header(&specs, metadata)?;
 
     write_atomic(path, |w| {
         w.write_all(&header)?;
-        for (_, data, _, _) in &entries {
-            w.write_all(data)?;
+        for name in &names {
+            let data = tensor_to_le_bytes(&tensors[*name])
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            w.write_all(&data)?;
         }
         Ok(())
     })
@@ -121,6 +60,7 @@ mod tests {
     use super::*;
     use crate::format::safetensors::SafeTensors;
     use crate::test_utils::cpu_setup;
+    use numr::dtype::DType;
     use tempfile::NamedTempFile;
 
     #[test]
@@ -145,23 +85,13 @@ mod tests {
         assert!((data[3] - 4.0).abs() < 1e-6);
     }
 
-    /// Independent reference encoder for F32 tensors.
-    fn legacy_save_f32(
+    /// Reference encoder: encodes every tensor into one buffer, then the header.
+    fn reference_save(
         tensors: &HashMap<String, Tensor<CpuRuntime>>,
         metadata: Option<&HashMap<String, String>>,
     ) -> Vec<u8> {
-        let mut entries: Vec<(String, Vec<f32>, Vec<usize>)> = Vec::new();
         let mut names: Vec<&String> = tensors.keys().collect();
         names.sort();
-        for name in &names {
-            let tensor = &tensors[*name];
-            entries.push((
-                (*name).clone(),
-                tensor.to_vec::<f32>(),
-                tensor.shape().to_vec(),
-            ));
-        }
-
         let mut header = serde_json::Map::new();
         if let Some(meta) = metadata {
             let mut meta_obj = serde_json::Map::new();
@@ -170,59 +100,84 @@ mod tests {
             }
             header.insert("__metadata__".into(), serde_json::Value::Object(meta_obj));
         }
-
-        let mut current_offset: usize = 0;
-        for (name, data, shape) in &entries {
-            let byte_len = data.len() * 4;
-            let mut info = serde_json::Map::new();
-            info.insert("dtype".into(), serde_json::Value::String("F32".into()));
-            info.insert(
-                "shape".into(),
-                serde_json::Value::Array(
-                    shape
-                        .iter()
-                        .map(|&s| serde_json::Value::Number(s.into()))
-                        .collect(),
-                ),
+        let mut body = Vec::new();
+        for name in names {
+            let t = &tensors[name];
+            let data = tensor_to_le_bytes(t).unwrap();
+            header.insert(
+                name.clone(),
+                serde_json::json!({
+                    "dtype": crate::format::safetensors::save::encode::dtype_name(t.dtype()).unwrap(),
+                    "shape": t.shape(),
+                    "data_offsets": [body.len(), body.len() + data.len()],
+                }),
             );
-            info.insert(
-                "data_offsets".into(),
-                serde_json::Value::Array(vec![
-                    serde_json::Value::Number(current_offset.into()),
-                    serde_json::Value::Number((current_offset + byte_len).into()),
-                ]),
-            );
-            header.insert(name.clone(), serde_json::Value::Object(info));
-            current_offset += byte_len;
+            body.extend_from_slice(&data);
         }
-
         let mut header = serde_json::Value::Object(header);
         header.sort_all_objects();
         let header_str = serde_json::to_string(&header).unwrap();
-        let mut out = Vec::new();
-        out.extend_from_slice(&(header_str.len() as u64).to_le_bytes());
+        let mut out = (header_str.len() as u64).to_le_bytes().to_vec();
         out.extend_from_slice(header_str.as_bytes());
-        for (_, data, _) in &entries {
-            for f in data {
-                out.extend_from_slice(&f.to_le_bytes());
-            }
-        }
+        out.extend_from_slice(&body);
         out
     }
 
-    /// An F32 file must be byte-identical to the reference encoder output.
+    fn tensor_of(
+        bytes: &[u8],
+        dtype: DType,
+        shape: &[usize],
+        device: &numr::runtime::cpu::CpuDevice,
+    ) -> Tensor<CpuRuntime> {
+        let storage =
+            numr::tensor::Storage::<CpuRuntime>::from_bytes(bytes, dtype, device).unwrap();
+        Tensor::<CpuRuntime>::from_storage_contiguous(storage, shape)
+    }
+
+    /// Streamed output must be byte-identical to the reference encoder.
     #[test]
-    fn test_save_f32_bytes_unchanged() {
+    fn test_streamed_bytes_match_reference_encoder() {
         let (_, device) = cpu_setup();
         let mut tensors = HashMap::new();
         tensors.insert(
-            "b.weight".to_string(),
+            "b.f32".to_string(),
             Tensor::<CpuRuntime>::from_slice(&[7.5f32, -1.25, 0.0], &[3], &device).unwrap(),
         );
         tensors.insert(
-            "a.weight".to_string(),
+            "a.f32".to_string(),
             Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &device).unwrap(),
         );
+        tensors.insert(
+            "c.i64".to_string(),
+            Tensor::<CpuRuntime>::from_slice(&[-5i64, 0, 9], &[3], &device).unwrap(),
+        );
+        tensors.insert(
+            "d.scalar".to_string(),
+            tensor_of(&2.5f32.to_le_bytes(), DType::F32, &[], &device),
+        );
+        tensors.insert(
+            "e.empty".to_string(),
+            tensor_of(&[], DType::F32, &[0], &device),
+        );
+        #[cfg(feature = "f16")]
+        {
+            let h: Vec<u8> = [1.0f32, 2.5, -3.0]
+                .iter()
+                .flat_map(|&v| half::f16::from_f32(v).to_le_bytes())
+                .collect();
+            let b: Vec<u8> = [1.0f32, 2.5, -3.0]
+                .iter()
+                .flat_map(|&v| half::bf16::from_f32(v).to_le_bytes())
+                .collect();
+            tensors.insert(
+                "f.f16".to_string(),
+                tensor_of(&h, DType::F16, &[3], &device),
+            );
+            tensors.insert(
+                "g.bf16".to_string(),
+                tensor_of(&b, DType::BF16, &[3], &device),
+            );
+        }
         let mut metadata = HashMap::new();
         metadata.insert("format".to_string(), "pt".to_string());
 
@@ -230,8 +185,7 @@ mod tests {
         save_safetensors(tmp.path(), &tensors, Some(&metadata)).unwrap();
 
         let actual = std::fs::read(tmp.path()).unwrap();
-        let expected = legacy_save_f32(&tensors, Some(&metadata));
-        assert_eq!(actual, expected, "F32 output differs from reference");
+        assert_eq!(actual, reference_save(&tensors, Some(&metadata)));
     }
 
     fn temp_files_in(dir: &Path) -> Vec<String> {

@@ -199,10 +199,11 @@ pub(super) mod tests {
     const SUPER_BLOCKS: usize = 8;
     const N: usize = SUPER_BLOCKS * 256;
 
-    /// Seeded LCG (Numerical Recipes constants) — deterministic, no `rand` dep
-    struct Lcg(u32);
+    /// Seeded 32-bit LCG (Numerical Recipes constants), not the shared 64-bit
+    /// `test_utils::Lcg`. The fixture bytes depend on this exact stream.
+    struct NumRecipesLcg32(u32);
 
-    impl Lcg {
+    impl NumRecipesLcg32 {
         fn next_unit(&mut self) -> f32 {
             self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             // Top 24 bits into [-1, 1).
@@ -216,7 +217,7 @@ pub(super) mod tests {
     /// The magnitude spread is what makes a shared-scale bug visible: with uniform
     /// magnitudes a wrong sub-block-to-scale mapping costs almost nothing.
     pub(in super::super) fn synthetic_weights() -> Vec<f32> {
-        let mut rng = Lcg(0x5EED_1234);
+        let mut rng = NumRecipesLcg32(0x5EED_1234);
         let mut out = Vec::with_capacity(N);
         for i in 0..N {
             // Sum of three uniforms approximates a normal.

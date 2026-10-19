@@ -70,11 +70,9 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
 #[cfg(test)]
 mod tests {
     use super::super::Qwen35AttentionProjection;
-    use super::super::train_fixture::{
-        Fixture, HIDDEN, Lcg, SEQ, cfg32, positions, rope, to_f64, weighted_loss,
-    };
+    use super::super::train_fixture::{Fixture, HIDDEN, SEQ, cfg32, positions, rope};
     use crate::nn::LoraFactors;
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{Lcg, cpu_setup, to_f64, weighted_loss};
     use numr::autograd::{Var, backward};
     use numr::dtype::DType;
     use numr::runtime::cpu::CpuRuntime;

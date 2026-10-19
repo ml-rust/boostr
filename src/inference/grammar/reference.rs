@@ -7,6 +7,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use super::ast::Expr;
+pub(super) use crate::test_utils::Lcg;
 
 /// True when `expr` matches all of `input`.
 pub(super) fn matches(expr: &Expr, input: &[char]) -> bool {
@@ -113,29 +114,6 @@ impl Matcher<'_> {
     }
 }
 
-/// A seeded linear congruential generator.
-pub(super) struct Lcg(pub u64);
-
-impl Lcg {
-    pub(super) fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.0 >> 33
-    }
-
-    /// A value in `0..n`.
-    pub(super) fn below(&mut self, n: u64) -> u64 {
-        self.next_u64() % n.max(1)
-    }
-
-    pub(super) fn pick<T: Clone>(&mut self, items: &[T]) -> T {
-        let i = self.below(items.len() as u64) as usize;
-        items[i].clone()
-    }
-}
-
 /// The alphabet of random expressions.
 pub(super) const ALPHABET: [char; 5] = ['a', 'b', 'c', 'é', '世'];
 
@@ -144,21 +122,21 @@ pub(super) const EXTRA: [char; 4] = ['z', '\u{7f}', '\u{10000}', '\u{10ffff}'];
 
 /// A random expression of depth at most `depth`.
 pub(super) fn random_expr(rng: &mut Lcg, depth: u32) -> Expr {
-    let leaf = depth == 0 || rng.below(3) == 0;
+    let leaf = depth == 0 || rng.below_u64(3) == 0;
     if leaf {
-        return match rng.below(8) {
+        return match rng.below_u64(8) {
             0 => Expr::Empty,
             1 => Expr::Any,
             2 => Expr::Alt(vec![]),
             3 | 4 => {
-                let len = 1 + rng.below(3);
+                let len = 1 + rng.below_u64(3);
                 Expr::Literal((0..len).map(|_| rng.pick(&ALPHABET)).collect())
             }
             _ => {
                 let pairs = [('a', 'b'), ('c', 'c'), ('é', '世'), ('a', 'é'), ('b', 'b')];
-                let count = 1 + rng.below(2);
+                let count = 1 + rng.below_u64(2);
                 Expr::Class {
-                    negated: rng.below(3) == 0,
+                    negated: rng.below_u64(3) == 0,
                     ranges: (0..count).map(|_| rng.pick(&pairs)).collect(),
                 }
             }
@@ -167,20 +145,20 @@ pub(super) fn random_expr(rng: &mut Lcg, depth: u32) -> Expr {
     let children = |rng: &mut Lcg, n: u64| -> Vec<Expr> {
         (0..n).map(|_| random_expr(rng, depth - 1)).collect()
     };
-    match rng.below(3) {
+    match rng.below_u64(3) {
         0 => {
-            let n = 2 + rng.below(2);
+            let n = 2 + rng.below_u64(2);
             Expr::Seq(children(rng, n))
         }
         1 => {
-            let n = 1 + rng.below(3);
+            let n = 1 + rng.below_u64(3);
             Expr::Alt(children(rng, n))
         }
         _ => {
-            let min = rng.below(3) as u32;
-            let max = match rng.below(3) {
+            let min = rng.below_u64(3) as u32;
+            let max = match rng.below_u64(3) {
                 0 => None,
-                _ => Some(min + rng.below(3) as u32),
+                _ => Some(min + rng.below_u64(3) as u32),
             };
             Expr::Repeat {
                 expr: Box::new(random_expr(rng, depth - 1)),
@@ -210,7 +188,7 @@ pub(super) fn test_strings(rng: &mut Lcg, random: usize) -> Vec<Vec<char>> {
     }
     let all: Vec<char> = ALPHABET.iter().chain(EXTRA.iter()).copied().collect();
     for _ in 0..random {
-        let len = rng.below(9) as usize;
+        let len = rng.below_u64(9) as usize;
         out.push((0..len).map(|_| rng.pick(&all)).collect());
     }
     out

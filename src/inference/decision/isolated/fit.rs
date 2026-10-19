@@ -170,8 +170,8 @@ pub(crate) fn fit_bracketed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inference::decision::calibrate::tests::Lcg;
     use crate::inference::decision::objective::Target;
+    use crate::test_utils::Lcg;
 
     /// The combined level distribution of `levels` at `t`, in f64.
     fn combined(levels: &[[f64; 2]], t: f64) -> Vec<f64> {
@@ -185,7 +185,7 @@ mod tests {
 
     fn levels(g: &mut Lcg, k: usize) -> Vec<[f64; 2]> {
         (0..k)
-            .map(|_| [g.uniform() * 8.0 - 4.0, g.uniform() * 8.0 - 4.0])
+            .map(|_| [g.next_f64() * 8.0 - 4.0, g.next_f64() * 8.0 - 4.0])
             .collect()
     }
 
@@ -197,7 +197,7 @@ mod tests {
             .map(|_| {
                 let lv = levels(&mut g, k);
                 let p = combined(&lv, t_star);
-                let r = g.uniform();
+                let r = g.next_f64();
                 let mut c = 0.0;
                 let mut gold = k - 1;
                 for (i, pi) in p.iter().enumerate() {
@@ -276,7 +276,7 @@ mod tests {
                 let gold = i % 3;
                 let lv = (0..3)
                     .map(|j| {
-                        let d = 0.5 + 2.5 * g.uniform();
+                        let d = 0.5 + 2.5 * g.next_f64();
                         if j == gold { [0.0, d] } else { [d, 0.0] }
                     })
                     .collect();

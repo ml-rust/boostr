@@ -233,7 +233,7 @@ mod tests {
     use crate::inference::{LayeredGdnState, LayeredKvCache};
     use crate::model::hybrid::{GdnProjection, Qwen35AttentionProjection};
     use crate::nn::{LoraFactors, MlpProjection, cross_entropy_loss};
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{cpu_setup, max_abs_diff};
     use numr::autograd::{GradStore, backward};
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
     use numr::tensor::TensorId;
@@ -287,14 +287,6 @@ mod tests {
             .get(id)
             .unwrap_or_else(|| panic!("{id:?}: no gradient"));
         grad.contiguous().unwrap().to_vec::<f32>()
-    }
-
-    fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-        assert_eq!(a.len(), b.len());
-        a.iter()
-            .zip(b)
-            .map(|(x, y)| (x - y).abs())
-            .fold(0.0, f32::max)
     }
 
     #[test]

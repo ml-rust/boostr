@@ -86,7 +86,9 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
 #[cfg(test)]
 mod tests {
     use super::super::GdnProjection;
-    use super::super::init::tests::{bits, cfg, init_block, input, uniform, weighted_loss};
+    use super::super::init::tests::{
+        cfg, f64_bits, init_block, input, seeded_weighted_loss, uniform,
+    };
     use crate::nn::LoraFactors;
     use crate::test_utils::cpu_setup;
     use numr::autograd::backward;
@@ -113,7 +115,7 @@ mod tests {
         } else {
             block.forward_train(client, &x).unwrap()
         };
-        let grads = backward(&weighted_loss(client, &y, 0x6d4e_0301), client).unwrap();
+        let grads = backward(&seeded_weighted_loss(client, &y, 0x6d4e_0301), client).unwrap();
         let mut ids = vec![x.id()];
         ids.extend(block.trainable_parameters().into_iter().map(|(id, _)| id));
         let grad_bits = ids
@@ -122,10 +124,10 @@ mod tests {
                 let grad = grads
                     .get(id)
                     .unwrap_or_else(|| panic!("checkpointed={checkpointed}: no gradient for {id}"));
-                (id, bits(grad))
+                (id, f64_bits(grad))
             })
             .collect();
-        (bits(y.tensor()), grad_bits)
+        (f64_bits(y.tensor()), grad_bits)
     }
 
     fn assert_same(client: &CpuClient, block: &Block, dtype: DType) {
@@ -239,7 +241,7 @@ mod tests {
 
         let x = input(&client, &device, DType::F64, 0x6d4e_0324, false);
         let y = block.forward_train_checkpointed(&client, &x).unwrap();
-        let grads = backward(&weighted_loss(&client, &y, 0x6d4e_0325), &client).unwrap();
+        let grads = backward(&seeded_weighted_loss(&client, &y, 0x6d4e_0325), &client).unwrap();
         for (name, var) in block.named_parameters() {
             if name.contains("proj") && !var.requires_grad() {
                 assert!(grads.get(var.id()).is_none(), "frozen {name} gets none");

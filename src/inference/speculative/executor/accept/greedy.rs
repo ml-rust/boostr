@@ -83,6 +83,7 @@ mod tests {
     };
     use crate::inference::speculative::types::{FinishReason, SampleRule, SpeculativeConfig};
     use crate::ops::traits::inference::FilterRule;
+    use crate::test_utils::Lcg;
 
     #[test]
     fn match_drafts_keeps_the_longest_equal_prefix() {
@@ -122,18 +123,6 @@ mod tests {
         );
         let err = match_drafts(&[1], &[1, 10], 10, "argmax").expect_err("id 10");
         assert!(err.to_string().contains("id 10 at row 1"), "{err}");
-    }
-
-    struct Lcg(u64);
-
-    impl Lcg {
-        fn below(&mut self, n: usize) -> usize {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            ((self.0 >> 33) % n as u64) as usize
-        }
     }
 
     /// Plain penalized greedy decoding: one token per step from the test oracle.

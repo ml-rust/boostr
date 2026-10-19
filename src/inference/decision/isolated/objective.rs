@@ -136,8 +136,8 @@ pub fn evaluate_isolated(samples: &[IsolatedSample], beta: f64) -> ObjectivePoin
 mod tests {
     use super::*;
     use crate::inference::decision::answer::combine_isolated;
-    use crate::inference::decision::calibrate::tests::Lcg;
     use crate::inference::decision::temperature::tempered_softmax;
+    use crate::test_utils::Lcg;
 
     fn hard(levels: Vec<[f64; 2]>, g: usize) -> IsolatedSample {
         IsolatedSample {
@@ -165,7 +165,7 @@ mod tests {
         let mut g = Lcg(5);
         for t in [0.3, 1.0, 2.5] {
             let levels: Vec<[f64; 2]> = (0..4)
-                .map(|_| [g.uniform() * 6.0 - 3.0, g.uniform() * 6.0 - 3.0])
+                .map(|_| [g.next_f64() * 6.0 - 3.0, g.next_f64() * 6.0 - 3.0])
                 .collect();
             let yes: Vec<f64> = levels
                 .iter()

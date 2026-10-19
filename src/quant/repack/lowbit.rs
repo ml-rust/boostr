@@ -74,6 +74,7 @@ pub fn repack_pq2_0_to_ptq1_0(src: &[u8], n_elems: usize) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::quant::cpu::kernels::dequant_lowbit::{dequant_pq2_0, dequant_ptq1_0};
+    use crate::test_utils::bits;
     use half::f16;
 
     const BLOCKS: usize = 16;
@@ -95,10 +96,6 @@ mod tests {
             bytes.extend_from_slice(&block);
         }
         bytes
-    }
-
-    fn bits(values: &[f32]) -> Vec<u32> {
-        values.iter().map(|v| v.to_bits()).collect()
     }
 
     #[test]

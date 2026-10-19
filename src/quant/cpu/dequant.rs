@@ -146,14 +146,8 @@ fn dequant_into(format: QuantFormat, block_bytes: &[u8], out: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::cpu_setup as setup;
     use half::f16;
-    use numr::runtime::cpu::CpuDevice;
-
-    fn setup() -> (CpuClient, CpuDevice) {
-        let device = CpuDevice::new();
-        let client = CpuClient::new(device.clone());
-        (client, device)
-    }
 
     #[test]
     fn test_dequant_q4_0_roundtrip() {

@@ -243,21 +243,10 @@ mod tests {
         FinishReason, SpeculativeConfig, SpeculativeStats, Verdict,
     };
     use crate::ops::traits::inference::FilterRule;
+    use crate::test_utils::Lcg;
     use numr::runtime::cpu::{CpuClient, CpuRuntime};
 
     type ToyDrafter = ModelDrafter<CpuRuntime, ToyLm, CpuClient>;
-
-    struct Lcg(u64);
-
-    impl Lcg {
-        fn below(&mut self, n: usize) -> usize {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            ((self.0 >> 33) % n as u64) as usize
-        }
-    }
 
     fn config(
         k: usize,

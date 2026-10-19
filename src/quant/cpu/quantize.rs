@@ -170,13 +170,7 @@ fn quantize_cpu(
 mod tests {
     use super::*;
     use crate::quant::DequantOps;
-    use numr::runtime::cpu::CpuDevice;
-
-    fn setup() -> (CpuClient, CpuDevice) {
-        let device = CpuDevice::new();
-        let client = CpuClient::new(device.clone());
-        (client, device)
-    }
+    use crate::test_utils::cpu_setup as setup;
 
     /// Deterministic ramp with a sign flip, so no sub-block is constant.
     fn ramp(n: usize) -> Vec<f32> {

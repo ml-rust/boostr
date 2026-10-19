@@ -146,7 +146,7 @@ where
 mod tests {
     use super::super::step::gdn_step_impl;
     use super::*;
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{Lcg, cpu_setup};
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 
     /// Central-difference step.
@@ -154,23 +154,6 @@ mod tests {
     /// Allowed error relative to the largest analytic entry of each input.
     const REL_TOL: f64 = 1e-6;
     const NAMES: [&str; 6] = ["q", "k", "v", "g", "beta", "state"];
-
-    /// Deterministic 64-bit LCG; no rand dependency.
-    struct Lcg(u64);
-
-    impl Lcg {
-        fn next_f64(&mut self) -> f64 {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
-        }
-
-        fn uniform(&mut self, lo: f64, hi: f64) -> f64 {
-            lo + (hi - lo) * self.next_f64()
-        }
-    }
 
     /// How gates and keys are drawn.
     #[derive(Clone, Copy)]
@@ -266,19 +249,23 @@ mod tests {
     fn unit_rows(rng: &mut Lcg, rows: usize, dim: usize) -> Vec<f64> {
         let mut out = Vec::with_capacity(rows * dim);
         for _ in 0..rows {
-            let row: Vec<f64> = (0..dim).map(|_| rng.uniform(-1.0, 1.0)).collect();
+            let row: Vec<f64> = (0..dim).map(|_| rng.uniform_f64(-1.0, 1.0)).collect();
             out.extend(normalize(&row));
         }
         out
     }
 
     fn clustered_unit_rows(rng: &mut Lcg, rows: usize, dim: usize, eps: f64) -> Vec<f64> {
-        let center = normalize(&(0..dim).map(|_| rng.uniform(-1.0, 1.0)).collect::<Vec<_>>());
+        let center = normalize(
+            &(0..dim)
+                .map(|_| rng.uniform_f64(-1.0, 1.0))
+                .collect::<Vec<_>>(),
+        );
         let mut out = Vec::with_capacity(rows * dim);
         for _ in 0..rows {
             let row: Vec<f64> = center
                 .iter()
-                .map(|c| c + eps * rng.uniform(-1.0, 1.0))
+                .map(|c| c + eps * rng.uniform_f64(-1.0, 1.0))
                 .collect();
             out.extend(normalize(&row));
         }
@@ -295,19 +282,19 @@ mod tests {
             Some(eps) => clustered_unit_rows(&mut rng, rows, dims.s_k, eps),
         };
         let v = (0..rows * dims.s_v)
-            .map(|_| rng.uniform(-1.0, 1.0))
+            .map(|_| rng.uniform_f64(-1.0, 1.0))
             .collect();
         let g = (0..rows)
-            .map(|_| -rng.uniform(regime.g.0, regime.g.1))
+            .map(|_| -rng.uniform_f64(regime.g.0, regime.g.1))
             .collect();
         let beta = (0..rows)
-            .map(|_| rng.uniform(regime.beta.0, regime.beta.1))
+            .map(|_| rng.uniform_f64(regime.beta.0, regime.beta.1))
             .collect();
-        let state = (0..state_len).map(|_| rng.uniform(-0.5, 0.5)).collect();
+        let state = (0..state_len).map(|_| rng.uniform_f64(-0.5, 0.5)).collect();
         let w_o = (0..rows * dims.s_v)
-            .map(|_| rng.uniform(-1.0, 1.0))
+            .map(|_| rng.uniform_f64(-1.0, 1.0))
             .collect();
-        let w_s = (0..state_len).map(|_| rng.uniform(-1.0, 1.0)).collect();
+        let w_s = (0..state_len).map(|_| rng.uniform_f64(-1.0, 1.0)).collect();
         Problem {
             dims,
             inputs: [q, k, v, g, beta, state],

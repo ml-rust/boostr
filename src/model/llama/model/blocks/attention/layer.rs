@@ -212,7 +212,7 @@ mod tests {
     use super::super::super::builders::{build_block_from_config, build_block_from_varbuilder};
     use crate::model::config::ModelConfig;
     use crate::nn::{VarBuilder, VarMap};
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{bits, cpu_setup};
     use numr::dtype::DType;
     use numr::ops::{LinalgOps, ScalarOps};
     use numr::runtime::cpu::CpuRuntime;
@@ -248,10 +248,6 @@ mod tests {
         .unwrap();
         assert_eq!(mask.shape(), &[1, 1, sq, sk]);
         mask.to_vec::<f32>()
-    }
-
-    fn bits(values: &[f32]) -> Vec<u32> {
-        values.iter().map(|v| v.to_bits()).collect()
     }
 
     #[test]

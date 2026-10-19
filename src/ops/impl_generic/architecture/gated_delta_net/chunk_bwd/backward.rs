@@ -107,7 +107,7 @@ where
 mod tests {
     use super::super::super::recurrent_bwd::gdn_recurrent_backward;
     use super::*;
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{Lcg, cpu_setup};
     use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 
     const BATCH: usize = 2;
@@ -120,23 +120,6 @@ mod tests {
     /// F32 bound, relative to `max(1, largest oracle entry)`.
     const TOL_F32: f64 = 1e-4;
     const NAMES: [&str; 6] = ["dq", "dk", "dv", "dg", "dbeta", "dstate"];
-
-    /// Deterministic 64-bit LCG; no rand dependency.
-    struct Lcg(u64);
-
-    impl Lcg {
-        fn next_f64(&mut self) -> f64 {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
-        }
-
-        fn uniform(&mut self, lo: f64, hi: f64) -> f64 {
-            lo + (hi - lo) * self.next_f64()
-        }
-    }
 
     /// How gates and keys are drawn.
     #[derive(Clone, Copy)]
@@ -175,14 +158,18 @@ mod tests {
     }
 
     fn unit_rows(rng: &mut Lcg, rows: usize, dim: usize, spread: Option<f64>) -> Vec<f64> {
-        let center = normalize(&(0..dim).map(|_| rng.uniform(-1.0, 1.0)).collect::<Vec<_>>());
+        let center = normalize(
+            &(0..dim)
+                .map(|_| rng.uniform_f64(-1.0, 1.0))
+                .collect::<Vec<_>>(),
+        );
         let mut out = Vec::with_capacity(rows * dim);
         for _ in 0..rows {
             let row: Vec<f64> = match spread {
-                None => (0..dim).map(|_| rng.uniform(-1.0, 1.0)).collect(),
+                None => (0..dim).map(|_| rng.uniform_f64(-1.0, 1.0)).collect(),
                 Some(eps) => center
                     .iter()
-                    .map(|c| c + eps * rng.uniform(-1.0, 1.0))
+                    .map(|c| c + eps * rng.uniform_f64(-1.0, 1.0))
                     .collect(),
             };
             out.extend(normalize(&row));
@@ -212,7 +199,7 @@ mod tests {
         let q = unit_rows(&mut rng, rows, S_K, None);
         let k = unit_rows(&mut rng, rows, S_K, regime.key_spread);
         let mut uni = |n: usize, lo: f64, hi: f64| -> Vec<f64> {
-            (0..n).map(|_| rng.uniform(lo, hi)).collect()
+            (0..n).map(|_| rng.uniform_f64(lo, hi)).collect()
         };
         let v = uni(rows * S_V, -1.0, 1.0);
         let g = uni(rows, regime.g.0, regime.g.1)

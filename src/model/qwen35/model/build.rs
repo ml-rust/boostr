@@ -173,7 +173,7 @@ pub(crate) mod tests {
     use crate::nn::{
         Embedding, HadamardRotation, Linear, MaybeQuantEmbedding, MaybeQuantLinear, RotatedLinear,
     };
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{Lcg, cpu_setup};
     use numr::runtime::cpu::{CpuDevice, CpuRuntime};
     use numr::tensor::Tensor;
     use std::collections::HashMap;
@@ -192,33 +192,6 @@ pub(crate) mod tests {
     const ROPE_DIM: usize = 4;
     pub(crate) const SEQ: usize = 7;
     const ROT_BLOCK: usize = 4;
-
-    struct Lcg(u64);
-
-    impl Lcg {
-        fn next_f32(&mut self) -> f32 {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            ((self.0 >> 40) as f32) / ((1u64 << 24) as f32)
-        }
-
-        fn uniform(&mut self, lo: f32, hi: f32) -> f32 {
-            lo + (hi - lo) * self.next_f32()
-        }
-
-        fn tensor(
-            &mut self,
-            device: &CpuDevice,
-            shape: &[usize],
-            scale: f32,
-        ) -> Tensor<CpuRuntime> {
-            let n: usize = shape.iter().product();
-            let data: Vec<f32> = (0..n).map(|_| self.uniform(-scale, scale)).collect();
-            Tensor::<CpuRuntime>::from_slice(&data, shape, device).unwrap()
-        }
-    }
 
     pub(crate) fn tiny_config() -> UniversalConfig {
         UniversalConfig {
@@ -321,7 +294,9 @@ pub(crate) mod tests {
         }
 
         fn norm(&mut self) -> RmsNorm<CpuRuntime> {
-            let w: Vec<f32> = (0..HIDDEN).map(|_| self.rng.uniform(0.5, 1.5)).collect();
+            let w: Vec<f32> = (0..HIDDEN)
+                .map(|_| self.rng.uniform_f32(0.5, 1.5))
+                .collect();
             let w = Tensor::<CpuRuntime>::from_slice(&w, &[HIDDEN], self.device).unwrap();
             RmsNorm::new(w, 1e-6, false)
         }
@@ -335,7 +310,7 @@ pub(crate) mod tests {
 
         fn gdn(&mut self, cfg: &GdnConfig) -> GdnBlock<CpuRuntime> {
             let a: Vec<f32> = (0..H_V)
-                .map(|_| -self.rng.uniform(0.5, 1.5).exp())
+                .map(|_| -self.rng.uniform_f32(0.5, 1.5).exp())
                 .collect();
             let weights = GdnWeights {
                 attn_qkv: self.linear(cfg.qkv_dim(), HIDDEN),
@@ -352,7 +327,7 @@ pub(crate) mod tests {
         }
 
         fn attention(&mut self, cfg: &Qwen35AttentionConfig) -> Qwen35AttentionBlock<CpuRuntime> {
-            let q_norm: Vec<f32> = (0..HD).map(|_| self.rng.uniform(0.5, 1.5)).collect();
+            let q_norm: Vec<f32> = (0..HD).map(|_| self.rng.uniform_f32(0.5, 1.5)).collect();
             let weights = Qwen35AttentionWeights {
                 attn_q: self.linear(cfg.q_gate_dim(), HIDDEN),
                 attn_k: self.linear(cfg.kv_dim(), HIDDEN),

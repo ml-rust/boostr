@@ -121,6 +121,7 @@ where
 mod tests {
     use super::*;
     use crate::quant::{QuantFormat, QuantTensor};
+    use crate::test_utils::bits;
     use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 
     fn t(v: &[f32], shape: &[usize], device: &CpuDevice) -> Tensor<CpuRuntime> {
@@ -145,10 +146,6 @@ mod tests {
 
     /// Weight-like values: norm weights near zero and `A_log` in `(-2, 3)`.
     const VALUES: [f32; 8] = [0.3, -1.7, 2.5e-3, 0.0, -0.61, 1.33, 2.71, -0.047];
-
-    fn bits(v: &[f32]) -> Vec<u32> {
-        v.iter().map(|x| x.to_bits()).collect()
-    }
 
     /// An F32 tensor takes the ops in its own dtype, with no cast.
     #[test]

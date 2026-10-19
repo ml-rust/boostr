@@ -230,7 +230,7 @@ mod tests {
     use crate::optimizer::state_dict::test_support::{
         Fixture, assert_same_params, assert_same_state, deep, run,
     };
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{bits, cpu_setup};
     use numr::autograd::GradStore;
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
     use numr::tensor::Tensor;
@@ -276,12 +276,8 @@ mod tests {
         }
     }
 
-    fn bits(params: &Params, id: TensorId) -> Vec<u32> {
-        params[&id]
-            .to_vec::<f32>()
-            .iter()
-            .map(|v| v.to_bits())
-            .collect()
+    fn param_bits(params: &Params, id: TensorId) -> Vec<u32> {
+        bits(&params[&id].to_vec::<f32>())
     }
 
     #[test]
@@ -296,7 +292,7 @@ mod tests {
         let mut params = HashMap::from([(id, plain_id)]);
         let mut plain = AdamW::<CpuRuntime>::new(cfg.clone());
         step_n(&mut plain, &client, &device, &mut params, &[(id, &[g])], 4);
-        assert_eq!(bits(&params, id), vec![expected]);
+        assert_eq!(param_bits(&params, id), vec![expected]);
 
         let empty = AdamW::<CpuRuntime>::with_param_groups(cfg.clone(), vec![]).unwrap();
         assert!(empty.param_groups().is_empty());
@@ -315,7 +311,7 @@ mod tests {
             &[(gid, &[g])],
             4,
         );
-        assert_eq!(bits(&params, gid), vec![expected]);
+        assert_eq!(param_bits(&params, gid), vec![expected]);
     }
 
     #[test]
@@ -407,8 +403,8 @@ mod tests {
         let mut slow_opt = AdamW::<CpuRuntime>::new(config(0.01, 0.1));
         step_n(&mut slow_opt, &client, &device, &mut slow, &[(ib, grad)], 3);
 
-        assert_eq!(bits(&params, ia), bits(&fast, ia));
-        assert_eq!(bits(&params, ib), bits(&slow, ib));
+        assert_eq!(param_bits(&params, ia), param_bits(&fast, ia));
+        assert_eq!(param_bits(&params, ib), param_bits(&slow, ib));
     }
 
     #[cfg(feature = "f16")]
@@ -519,7 +515,7 @@ mod tests {
             &[(ia, grad)],
             2,
         );
-        assert_eq!(bits(&params, ia), bits(&reference, ia));
+        assert_eq!(param_bits(&params, ia), param_bits(&reference, ia));
     }
 
     #[test]

@@ -174,6 +174,7 @@ mod tests {
     use super::*;
     use crate::inference::memory::CpuBlockAllocator;
     use crate::inference::prefix_cache::{PrefixCache, PrefixCacheConfig};
+    use crate::test_utils::Lcg;
 
     const BLOCK: usize = 4;
 
@@ -283,18 +284,6 @@ mod tests {
         assert_eq!(sched.allocator().free_block_count(), 30);
     }
 
-    struct Lcg(u64);
-
-    impl Lcg {
-        fn below(&mut self, n: u64) -> u64 {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            (self.0 >> 33) % n
-        }
-    }
-
     fn live_ids(sched: &SequenceScheduler<CpuBlockAllocator>, running_only: bool) -> Vec<u64> {
         let mut ids: Vec<u64> = sched
             .sequences
@@ -317,14 +306,14 @@ mod tests {
         let bases: [Vec<u32>; 3] = [(0..12).collect(), (50..62).collect(), (0..6).collect()];
         let mut next_id = 0u64;
         for op in 0..200 {
-            match rng.below(6) {
+            match rng.below_u64(6) {
                 0 => {
-                    let base = &bases[rng.below(3) as usize];
-                    let keep = rng.below(base.len() as u64 + 1) as usize;
-                    let extra = 1 + rng.below(6) as usize;
+                    let base = &bases[rng.below_u64(3) as usize];
+                    let keep = rng.below_u64(base.len() as u64 + 1) as usize;
+                    let extra = 1 + rng.below_u64(6) as usize;
                     let mut prompt = base[..keep].to_vec();
-                    prompt.extend((0..extra).map(|_| 200 + rng.below(3) as u32));
-                    let max_new = 1 + rng.below(8) as usize;
+                    prompt.extend((0..extra).map(|_| 200 + rng.below_u64(3) as u32));
+                    let max_new = 1 + rng.below_u64(8) as usize;
                     let request = SequenceRequest::new(next_id, prompt).with_max_tokens(max_new);
                     sched.add_request(request).expect("add");
                     next_id += 1;
@@ -333,14 +322,14 @@ mod tests {
                 2 => {
                     let ids = live_ids(&sched, true);
                     if !ids.is_empty() {
-                        let id = ids[rng.below(ids.len() as u64) as usize];
+                        let id = ids[rng.below_u64(ids.len() as u64) as usize];
                         sched.finish_sequence(id).expect("finish");
                     }
                 }
                 3 => {
                     let ids = live_ids(&sched, false);
                     if !ids.is_empty() {
-                        let id = ids[rng.below(ids.len() as u64) as usize];
+                        let id = ids[rng.below_u64(ids.len() as u64) as usize];
                         sched.abort_sequence(id).expect("cancel");
                     }
                 }
@@ -351,9 +340,9 @@ mod tests {
                         .filter(|&id| sched.get_sequence_state(id) != Some(SequenceState::Running))
                         .collect();
                     if !ids.is_empty() {
-                        let id = ids[rng.below(ids.len() as u64) as usize];
+                        let id = ids[rng.below_u64(ids.len() as u64) as usize];
                         let before = snapshot(&sched);
-                        let result = if rng.below(2) == 0 {
+                        let result = if rng.below_u64(2) == 0 {
                             sched.finish_sequence(id)
                         } else {
                             sched.preempt_sequence(id)

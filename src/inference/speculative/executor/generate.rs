@@ -216,22 +216,7 @@ mod tests {
         EmptyDrafter, OffByOne, Oracle, RandomDrafter, ToyLm, plain_greedy,
     };
     use crate::inference::speculative::types::MAX_NUM_DRAFT_TOKENS;
-
-    struct Lcg(u64);
-
-    impl Lcg {
-        fn next(&mut self) -> u64 {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            self.0 >> 33
-        }
-
-        fn below(&mut self, n: usize) -> usize {
-            (self.next() % n as u64) as usize
-        }
-    }
+    use crate::test_utils::Lcg;
 
     fn config(k: usize, max_tokens: usize, eos: Vec<u32>) -> SpeculativeConfig {
         SpeculativeConfig {
@@ -312,7 +297,7 @@ mod tests {
         let mut oracle_speedups = 0usize;
         for case in 0..CASES {
             let vocab = 8 + rng.below(293);
-            let seed = rng.next();
+            let seed = rng.next_u64();
             let prompt_len = 1 + rng.below(40);
             let prompt: Vec<u32> = if rng.below(3) == 0 {
                 let period = 1 + rng.below(4);

@@ -115,7 +115,7 @@ mod tests {
     use crate::nn::{MaybeQuantLinear, MaybeRotatedLinear, VarMap};
     use crate::quant::QuantFormat;
     use crate::quant::traits::QuantizeOps;
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{bits, cpu_setup};
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
     use numr::tensor::Tensor;
     use std::path::Path;
@@ -123,10 +123,6 @@ mod tests {
     const RANK: usize = 2;
 
     type Entries = Vec<(String, Tensor<CpuRuntime>, Tensor<CpuRuntime>)>;
-
-    fn bits(v: &[f32]) -> Vec<u32> {
-        v.iter().map(|x| x.to_bits()).collect()
-    }
 
     /// The base in the loader layout of `config`, after `edit`.
     fn base_map(

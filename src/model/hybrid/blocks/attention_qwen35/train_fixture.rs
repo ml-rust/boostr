@@ -7,9 +7,10 @@
 use super::layer::{Qwen35AttentionBlock, Qwen35AttentionWeights};
 use crate::model::config::Qwen35AttentionConfig;
 use crate::nn::{Linear, MaybeQuantLinear, MaybeRotatedLinear, RoPE};
-use numr::autograd::{Var, var_mul, var_sum};
+use crate::test_utils::Lcg;
+use numr::autograd::Var;
 use numr::dtype::DType;
-use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
+use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
 
 pub(super) const HIDDEN: usize = 8;
@@ -57,31 +58,6 @@ pub(super) fn cfg_kv(num_kv_heads: usize) -> Qwen35AttentionConfig {
     }
 }
 
-/// Deterministic 64-bit LCG; no rand dependency.
-pub(super) struct Lcg(pub(super) u64);
-
-impl Lcg {
-    pub(super) fn bits(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.0 >> 11
-    }
-
-    pub(super) fn uniform(&mut self, lo: f64, hi: f64) -> f64 {
-        lo + (hi - lo) * (self.bits() as f64) / ((1u64 << 53) as f64)
-    }
-
-    pub(super) fn vec(&mut self, n: usize, scale: f64) -> Vec<f64> {
-        (0..n).map(|_| self.uniform(-scale, scale)).collect()
-    }
-
-    pub(super) fn index(&mut self, n: usize) -> usize {
-        (self.bits() % n as u64) as usize
-    }
-}
-
 /// Host-side input and weights of one block, built at `dtype`.
 #[derive(Clone)]
 pub(super) struct Fixture {
@@ -111,7 +87,7 @@ impl Fixture {
             .map(|(shape, scale)| rng.vec(shape.iter().product(), scale))
             .collect();
         for _ in 0..2 {
-            values.push((0..HD).map(|_| rng.uniform(0.5, 1.5)).collect());
+            values.push((0..HD).map(|_| rng.uniform_f64(0.5, 1.5)).collect());
         }
         Self {
             cfg: cfg.clone(),
@@ -196,22 +172,4 @@ pub(super) fn positions(seq: usize, device: &CpuDevice) -> T {
     }
     data.resize(4 * seq, 0);
     T::from_slice(&data, &[4, seq], device).unwrap()
-}
-
-/// `sum(y * w)`.
-pub(super) fn weighted_loss(
-    client: &CpuClient,
-    y: &Var<CpuRuntime>,
-    w: &Var<CpuRuntime>,
-) -> Var<CpuRuntime> {
-    let prod = var_mul(y, w, client).unwrap();
-    var_sum(&prod, &[0, 1, 2], false, client).unwrap()
-}
-
-pub(super) fn to_f64(t: &T) -> Vec<f64> {
-    let t = t.contiguous().unwrap();
-    match t.dtype() {
-        DType::F64 => t.to_vec::<f64>(),
-        _ => t.to_vec::<f32>().iter().map(|v| f64::from(*v)).collect(),
-    }
 }

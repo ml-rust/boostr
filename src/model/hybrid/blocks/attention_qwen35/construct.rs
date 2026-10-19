@@ -166,10 +166,10 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::train_fixture::{Fixture, SEQ, cfg32, positions, rope, to_f64};
+    use super::super::train_fixture::{Fixture, SEQ, cfg32, positions, rope};
     use super::*;
     use crate::nn::VarMap;
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{cpu_setup, to_f64};
     use numr::runtime::cpu::CpuRuntime;
 
     type Block = Qwen35AttentionBlock<CpuRuntime>;

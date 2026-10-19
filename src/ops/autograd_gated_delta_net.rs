@@ -158,7 +158,7 @@ where
 mod tests {
     use super::*;
     use crate::ops::impl_generic::architecture::gated_delta_net::gdn_recurrent_backward;
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{Lcg, cpu_setup};
     use numr::autograd::{GradStore, backward, var_mul, var_sum};
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 
@@ -176,19 +176,6 @@ mod tests {
     const ALL: [bool; INPUTS] = [true; INPUTS];
 
     type T = Tensor<CpuRuntime>;
-
-    /// Deterministic 64-bit LCG; no rand dependency.
-    struct Lcg(u64);
-
-    impl Lcg {
-        fn uniform(&mut self, lo: f64, hi: f64) -> f64 {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            lo + (hi - lo) * ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
-        }
-    }
 
     fn shapes() -> [Vec<usize>; INPUTS] {
         [
@@ -215,7 +202,7 @@ mod tests {
         let mut rng = Lcg(0x9d4_0001);
         let rows = BATCH * SEQ * HEADS;
         let mut uni = |n: usize, lo: f64, hi: f64| -> Vec<f64> {
-            (0..n).map(|_| rng.uniform(lo, hi)).collect()
+            (0..n).map(|_| rng.uniform_f64(lo, hi)).collect()
         };
         let data = [
             unit_rows(uni(rows * S_K, -1.0, 1.0), S_K),

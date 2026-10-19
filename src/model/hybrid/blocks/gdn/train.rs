@@ -245,7 +245,7 @@ mod tests {
     use crate::quant::decomposed::{
         DecomposedQuantLinear, DecomposedQuantMethod, DecomposedQuantTensor,
     };
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{Lcg, cpu_setup, to_f64, weighted_loss};
     use numr::autograd::{Var, backward, var_mul, var_mul_scalar, var_sub, var_sum};
     use numr::dtype::DType;
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
@@ -294,31 +294,6 @@ mod tests {
 
     type T = Tensor<CpuRuntime>;
 
-    /// Deterministic 64-bit LCG; no rand dependency.
-    struct Lcg(u64);
-
-    impl Lcg {
-        fn bits(&mut self) -> u64 {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            self.0 >> 11
-        }
-
-        fn uniform(&mut self, lo: f64, hi: f64) -> f64 {
-            lo + (hi - lo) * (self.bits() as f64) / ((1u64 << 53) as f64)
-        }
-
-        fn vec(&mut self, n: usize, scale: f64) -> Vec<f64> {
-            (0..n).map(|_| self.uniform(-scale, scale)).collect()
-        }
-
-        fn index(&mut self, n: usize) -> usize {
-            (self.bits() % n as u64) as usize
-        }
-    }
-
     fn f32_tensor(data: &[f64], shape: &[usize], device: &CpuDevice) -> T {
         let data: Vec<f32> = data.iter().map(|v| *v as f32).collect();
         T::from_slice(&data, shape, device).unwrap()
@@ -326,20 +301,6 @@ mod tests {
 
     fn f64_tensor(data: &[f64], shape: &[usize], device: &CpuDevice) -> T {
         T::from_slice(data, shape, device).unwrap()
-    }
-
-    fn to_f64(t: &T) -> Vec<f64> {
-        t.contiguous().unwrap().to_vec::<f64>()
-    }
-
-    /// `sum(y * w)`.
-    fn weighted_loss(
-        client: &CpuClient,
-        y: &Var<CpuRuntime>,
-        w: &Var<CpuRuntime>,
-    ) -> Var<CpuRuntime> {
-        let prod = var_mul(y, w, client).unwrap();
-        var_sum(&prod, &[0, 1, 2], false, client).unwrap()
     }
 
     // ---- Value parity with the inference forward (F32 fixtures) ----
@@ -431,7 +392,7 @@ mod tests {
             .map(|(i, (shape, scale))| {
                 let n: usize = shape.iter().product();
                 match i {
-                    A_LOG | NORM => (0..n).map(|_| rng.uniform(0.5, 1.5)).collect(),
+                    A_LOG | NORM => (0..n).map(|_| rng.uniform_f64(0.5, 1.5)).collect(),
                     _ => rng.vec(n, scale),
                 }
             })

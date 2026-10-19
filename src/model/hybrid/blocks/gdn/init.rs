@@ -296,7 +296,7 @@ pub(super) mod tests {
 
     /// `sum(y * w)` with a seeded `w`, so every output gets its own
     /// upstream gradient.
-    pub(in super::super) fn weighted_loss(
+    pub(in super::super) fn seeded_weighted_loss(
         client: &CpuClient,
         y: &Var<CpuRuntime>,
         seed: u64,
@@ -309,7 +309,7 @@ pub(super) mod tests {
 
     /// The bits of `t` as f64. F32 widens exactly, so equal bits mean
     /// equal source bits.
-    pub(in super::super) fn bits(t: &T) -> Vec<u64> {
+    pub(in super::super) fn f64_bits(t: &T) -> Vec<u64> {
         let t = t.contiguous().unwrap();
         match t.dtype() {
             DType::F64 => t.to_vec::<f64>().iter().map(|v| v.to_bits()).collect(),
@@ -318,7 +318,7 @@ pub(super) mod tests {
                 .iter()
                 .map(|v| f64::from(*v).to_bits())
                 .collect(),
-            other => panic!("bits: unsupported dtype {other:?}"),
+            other => panic!("f64_bits: unsupported dtype {other:?}"),
         }
     }
 
@@ -326,7 +326,7 @@ pub(super) mod tests {
         block
             .named_parameters()
             .into_iter()
-            .map(|(name, var)| (name, bits(var.tensor())))
+            .map(|(name, var)| (name, f64_bits(var.tensor())))
             .collect()
     }
 
@@ -422,7 +422,7 @@ pub(super) mod tests {
         let x = input(&client, &device, DType::F64, 0x6d4e_0201, false);
         let want = block.forward_train(&client, &x).unwrap();
         let got = loaded.forward_train(&client, &x).unwrap();
-        assert_eq!(bits(got.tensor()), bits(want.tensor()));
+        assert_eq!(f64_bits(got.tensor()), f64_bits(want.tensor()));
 
         let mut partial = save();
         partial.remove("A_log");

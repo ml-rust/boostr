@@ -45,35 +45,12 @@ mod tests {
     use crate::model::mamba::mamba2::config::Mamba2Config;
     use crate::model::mamba::mamba2::layer::{Mamba2, Mamba2Weights};
     use crate::nn::{Conv1d, Linear};
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{Lcg, cpu_setup, tensor_max_abs_diff as max_abs_diff};
     use numr::autograd::Var;
     use numr::dtype::DType;
     use numr::ops::{PaddingMode, ShapeOps};
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
     use numr::tensor::Tensor;
-
-    struct Lcg(u64);
-
-    impl Lcg {
-        fn uniform(&mut self, lo: f32, hi: f32) -> f32 {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            lo + (hi - lo) * ((self.0 >> 40) as f32) / ((1u64 << 24) as f32)
-        }
-
-        fn tensor(
-            &mut self,
-            device: &CpuDevice,
-            shape: &[usize],
-            scale: f32,
-        ) -> Tensor<CpuRuntime> {
-            let n: usize = shape.iter().product();
-            let data: Vec<f32> = (0..n).map(|_| self.uniform(-scale, scale)).collect();
-            Tensor::<CpuRuntime>::from_slice(&data, shape, device).unwrap()
-        }
-    }
 
     /// Tiny layer with varied weights so a wrong conv window changes the output.
     fn varied_mamba2(device: &CpuDevice) -> (Mamba2<CpuRuntime>, Mamba2Config) {
@@ -109,16 +86,6 @@ mod tests {
             norm: None,
         };
         (Mamba2::new(config.clone(), weights, false), config)
-    }
-
-    fn max_abs_diff(a: &Tensor<CpuRuntime>, b: &Tensor<CpuRuntime>) -> f32 {
-        let a = a.to_vec::<f32>();
-        let b = b.to_vec::<f32>();
-        assert_eq!(a.len(), b.len());
-        a.iter()
-            .zip(&b)
-            .map(|(x, y)| (x - y).abs())
-            .fold(0.0, f32::max)
     }
 
     fn prefill(

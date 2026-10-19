@@ -226,22 +226,10 @@ pub(crate) fn finish(
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::super::objective::Target;
     use super::*;
-
-    /// 64-bit LCG (Knuth MMIX constants); `uniform` gives a uniform in `[0, 1)`.
-    pub(crate) struct Lcg(pub(crate) u64);
-
-    impl Lcg {
-        pub(crate) fn uniform(&mut self) -> f64 {
-            self.0 = self
-                .0
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            (self.0 >> 11) as f64 / (1u64 << 53) as f64
-        }
-    }
+    use crate::test_utils::Lcg;
 
     fn reference_probs(z: &[f64], t: f64) -> Vec<f64> {
         let m = z.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -255,9 +243,9 @@ pub(crate) mod tests {
         let mut g = Lcg(seed);
         (0..n)
             .map(|_| {
-                let z: Vec<f64> = (0..k).map(|_| g.uniform() * 8.0 - 4.0).collect();
+                let z: Vec<f64> = (0..k).map(|_| g.next_f64() * 8.0 - 4.0).collect();
                 let p = reference_probs(&z, t_star);
-                let r = g.uniform();
+                let r = g.next_f64();
                 let mut c = 0.0;
                 let mut label = k - 1;
                 for (i, pi) in p.iter().enumerate() {
@@ -312,7 +300,7 @@ pub(crate) mod tests {
         let mut g = Lcg(42);
         let samples: Vec<CalibrationSample> = (0..50)
             .map(|_| {
-                let z: Vec<f64> = (0..5).map(|_| g.uniform() * 6.0 - 3.0).collect();
+                let z: Vec<f64> = (0..5).map(|_| g.next_f64() * 6.0 - 3.0).collect();
                 let y = reference_probs(&z, 1.7);
                 CalibrationSample {
                     logits: z,
@@ -330,7 +318,7 @@ pub(crate) mod tests {
         let samples: Vec<CalibrationSample> = (0..60)
             .map(|i| {
                 let k = [2, 3, 5][i % 3];
-                let z: Vec<f64> = (0..k).map(|_| g.uniform() * 6.0 - 3.0).collect();
+                let z: Vec<f64> = (0..k).map(|_| g.next_f64() * 6.0 - 3.0).collect();
                 let y = reference_probs(&z, 0.6);
                 CalibrationSample {
                     logits: z,
@@ -347,7 +335,7 @@ pub(crate) mod tests {
         let mut g = Lcg(11);
         let samples: Vec<CalibrationSample> = (0..40)
             .map(|_| {
-                let z: Vec<f64> = (0..4).map(|_| g.uniform() * 4.0 - 2.0).collect();
+                let z: Vec<f64> = (0..4).map(|_| g.next_f64() * 4.0 - 2.0).collect();
                 let label = (0..4).fold(0, |b, i| if z[i] > z[b] { i } else { b });
                 CalibrationSample {
                     logits: z,

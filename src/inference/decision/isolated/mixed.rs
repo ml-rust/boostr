@@ -93,13 +93,13 @@ pub fn fit_temperature_mixed(
 mod tests {
     use super::*;
     use crate::inference::decision::calibrate::FitOutcome;
-    use crate::inference::decision::calibrate::tests::Lcg;
     use crate::inference::decision::objective::Target;
+    use crate::test_utils::Lcg;
 
     fn listed(g: &mut Lcg, n: usize) -> Vec<CalibrationSample> {
         (0..n)
             .map(|i| CalibrationSample {
-                logits: (0..3).map(|_| g.uniform() * 6.0 - 3.0).collect(),
+                logits: (0..3).map(|_| g.next_f64() * 6.0 - 3.0).collect(),
                 target: Target::Hard(i % 3),
             })
             .collect()
@@ -109,7 +109,7 @@ mod tests {
         (0..n)
             .map(|i| IsolatedSample {
                 levels: (0..4)
-                    .map(|_| [g.uniform() * 6.0 - 3.0, g.uniform() * 6.0 - 3.0])
+                    .map(|_| [g.next_f64() * 6.0 - 3.0, g.next_f64() * 6.0 - 3.0])
                     .collect(),
                 target: Target::Hard(i % 4),
             })

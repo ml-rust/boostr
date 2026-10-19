@@ -105,8 +105,7 @@ mod tests {
 
     use super::super::Qwen35AttentionProjection;
     use super::super::train_fixture::{
-        BATCH, Fixture, HIDDEN, K, Lcg, MAX_POS, NAMES, Q, SEQ, V, cfg_kv, cfg32, positions, rope,
-        to_f64, weighted_loss,
+        BATCH, Fixture, HIDDEN, K, MAX_POS, NAMES, Q, SEQ, V, cfg_kv, cfg32, positions, rope,
     };
     use super::*;
     use crate::inference::KvCache;
@@ -115,7 +114,9 @@ mod tests {
     use crate::quant::decomposed::{
         DecomposedQuantLinear, DecomposedQuantMethod, DecomposedQuantTensor,
     };
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{
+        Lcg, cpu_setup, max_abs_diff_f64 as max_abs_diff, to_f64, weighted_loss,
+    };
     use numr::autograd::backward;
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
     use numr::tensor::TensorId;
@@ -134,14 +135,6 @@ mod tests {
         let device = x.tensor().device();
         let pos = positions(x.shape()[1], device);
         block.forward_train(client, x, &rope(device), &pos).unwrap()
-    }
-
-    fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
-        assert_eq!(a.len(), b.len());
-        a.iter()
-            .zip(b)
-            .map(|(x, y)| (x - y).abs())
-            .fold(0.0, f64::max)
     }
 
     // ---- Value parity with the inference forward (F32) ----

@@ -204,7 +204,7 @@ mod tests {
         H_KV, HD, HIDDEN, MAX_POS, SEQ, VOCAB, rotated_model, tiny_model,
     };
     use super::*;
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{cpu_setup, tensor_max_abs_diff as max_abs_diff};
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 
     fn caches(
@@ -249,16 +249,6 @@ mod tests {
         model
             .forward_qwen35(client, ids, kv, gdn, position)
             .unwrap()
-    }
-
-    fn max_abs_diff(a: &Tensor<CpuRuntime>, b: &Tensor<CpuRuntime>) -> f32 {
-        let a = a.to_vec::<f32>();
-        let b = b.to_vec::<f32>();
-        assert_eq!(a.len(), b.len());
-        a.iter()
-            .zip(&b)
-            .map(|(x, y)| (x - y).abs())
-            .fold(0.0, f32::max)
     }
 
     #[test]

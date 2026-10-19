@@ -111,25 +111,8 @@ where
 mod tests {
     use super::super::step::gdn_step_impl;
     use super::*;
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{Lcg, cpu_setup, max_abs_diff};
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
-
-    /// Deterministic 64-bit LCG; no rand dependency.
-    struct Lcg(u64);
-
-    impl Lcg {
-        fn next_f32(&mut self) -> f32 {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            ((self.0 >> 40) as f32) / ((1u64 << 24) as f32)
-        }
-
-        fn uniform(&mut self, lo: f32, hi: f32) -> f32 {
-            lo + (hi - lo) * self.next_f32()
-        }
-    }
 
     /// How gates and keys are drawn.
     #[derive(Clone, Copy)]
@@ -182,7 +165,7 @@ mod tests {
     fn unit_rows(rng: &mut Lcg, rows: usize, dim: usize) -> Vec<f32> {
         let mut out = Vec::with_capacity(rows * dim);
         for _ in 0..rows {
-            let row: Vec<f32> = (0..dim).map(|_| rng.uniform(-1.0, 1.0)).collect();
+            let row: Vec<f32> = (0..dim).map(|_| rng.uniform_f32(-1.0, 1.0)).collect();
             out.extend(normalize(&row));
         }
         out
@@ -190,13 +173,13 @@ mod tests {
 
     /// Unit rows that each sit within about `eps` of one random direction.
     fn clustered_unit_rows(rng: &mut Lcg, rows: usize, dim: usize, eps: f32) -> Vec<f32> {
-        let center: Vec<f32> = (0..dim).map(|_| rng.uniform(-1.0, 1.0)).collect();
+        let center: Vec<f32> = (0..dim).map(|_| rng.uniform_f32(-1.0, 1.0)).collect();
         let center = normalize(&center);
         let mut out = Vec::with_capacity(rows * dim);
         for _ in 0..rows {
             let row: Vec<f32> = center
                 .iter()
-                .map(|c| c + eps * rng.uniform(-1.0, 1.0))
+                .map(|c| c + eps * rng.uniform_f32(-1.0, 1.0))
                 .collect();
             out.extend(normalize(&row));
         }
@@ -221,15 +204,17 @@ mod tests {
             None => unit_rows(&mut rng, rows, s_k),
             Some(eps) => clustered_unit_rows(&mut rng, rows, s_k, eps),
         };
-        let v: Vec<f32> = (0..rows * s_v).map(|_| rng.uniform(-1.0, 1.0)).collect();
+        let v: Vec<f32> = (0..rows * s_v)
+            .map(|_| rng.uniform_f32(-1.0, 1.0))
+            .collect();
         let g: Vec<f32> = (0..rows)
-            .map(|_| -rng.uniform(regime.g.0, regime.g.1))
+            .map(|_| -rng.uniform_f32(regime.g.0, regime.g.1))
             .collect();
         let beta: Vec<f32> = (0..rows)
-            .map(|_| rng.uniform(regime.beta.0, regime.beta.1))
+            .map(|_| rng.uniform_f32(regime.beta.0, regime.beta.1))
             .collect();
         let state: Vec<f32> = (0..batch * heads * s_k * s_v)
-            .map(|_| rng.uniform(-0.5, 0.5))
+            .map(|_| rng.uniform_f32(-0.5, 0.5))
             .collect();
         let mk = |data: &[f32], shape: &[usize]| {
             Tensor::<CpuRuntime>::from_slice(data, shape, device).unwrap()
@@ -265,14 +250,6 @@ mod tests {
         let refs: Vec<&Tensor<CpuRuntime>> = outs.iter().collect();
         let o = client.cat(&refs, 1).unwrap();
         (o.to_vec::<f32>(), state.to_vec::<f32>())
-    }
-
-    fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-        assert_eq!(a.len(), b.len());
-        a.iter()
-            .zip(b)
-            .map(|(x, y)| (x - y).abs())
-            .fold(0.0, f32::max)
     }
 
     fn max_abs(a: &[f32]) -> f32 {

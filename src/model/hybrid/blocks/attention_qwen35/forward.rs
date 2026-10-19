@@ -155,7 +155,7 @@ mod tests {
     use super::*;
     use crate::model::config::Qwen35AttentionConfig;
     use crate::nn::{Linear, MaybeQuantLinear, MaybeRotatedLinear};
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{Lcg, cpu_setup, tensor_max_abs_diff as max_abs_diff};
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 
     const HIDDEN: usize = 8;
@@ -165,36 +165,6 @@ mod tests {
     const ROPE_DIM: usize = 4;
     const SEQ: usize = 5;
     const MAX_POS: usize = 16;
-
-    struct Lcg(u64);
-
-    impl Lcg {
-        fn next_f32(&mut self) -> f32 {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            ((self.0 >> 40) as f32) / ((1u64 << 24) as f32)
-        }
-
-        fn uniform(&mut self, lo: f32, hi: f32) -> f32 {
-            lo + (hi - lo) * self.next_f32()
-        }
-
-        fn data(&mut self, n: usize, scale: f32) -> Vec<f32> {
-            (0..n).map(|_| self.uniform(-scale, scale)).collect()
-        }
-
-        fn tensor(
-            &mut self,
-            device: &CpuDevice,
-            shape: &[usize],
-            scale: f32,
-        ) -> Tensor<CpuRuntime> {
-            let n: usize = shape.iter().product();
-            Tensor::<CpuRuntime>::from_slice(&self.data(n, scale), shape, device).unwrap()
-        }
-    }
 
     fn cfg(sections: [usize; 4]) -> Qwen35AttentionConfig {
         Qwen35AttentionConfig {
@@ -295,16 +265,6 @@ mod tests {
             .unwrap()
             .tensor()
             .clone()
-    }
-
-    fn max_abs_diff(a: &Tensor<CpuRuntime>, b: &Tensor<CpuRuntime>) -> f32 {
-        let a = a.to_vec::<f32>();
-        let b = b.to_vec::<f32>();
-        assert_eq!(a.len(), b.len());
-        a.iter()
-            .zip(&b)
-            .map(|(x, y)| (x - y).abs())
-            .fold(0.0, f32::max)
     }
 
     /// Prefill of 5 tokens equals prefill of 3 then 2 cached decode steps.

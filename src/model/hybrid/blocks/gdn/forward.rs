@@ -208,7 +208,7 @@ pub(super) mod tests {
     use crate::nn::hadamard::HadamardRotation;
     use crate::nn::linear::RotatedLinear;
     use crate::nn::{Linear, MaybeQuantLinear, MaybeRotatedLinear};
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{Lcg, cpu_setup, tensor_max_abs_diff as max_abs_diff};
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 
     const HIDDEN: usize = 8;
@@ -217,33 +217,6 @@ pub(super) mod tests {
     const S: usize = 4;
     const KERNEL: usize = 4;
     const SEQ: usize = 9;
-
-    struct Lcg(u64);
-
-    impl Lcg {
-        fn next_f32(&mut self) -> f32 {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            ((self.0 >> 40) as f32) / ((1u64 << 24) as f32)
-        }
-
-        fn uniform(&mut self, lo: f32, hi: f32) -> f32 {
-            lo + (hi - lo) * self.next_f32()
-        }
-
-        fn tensor(
-            &mut self,
-            device: &CpuDevice,
-            shape: &[usize],
-            scale: f32,
-        ) -> Tensor<CpuRuntime> {
-            let n: usize = shape.iter().product();
-            let data: Vec<f32> = (0..n).map(|_| self.uniform(-scale, scale)).collect();
-            Tensor::<CpuRuntime>::from_slice(&data, shape, device).unwrap()
-        }
-    }
 
     fn cfg(v_grouped: bool) -> GdnConfig {
         GdnConfig {
@@ -280,7 +253,7 @@ pub(super) mod tests {
         let cfg = cfg(v_grouped);
         let mut rng = Lcg(seed);
         let in_scale = 0.5 / (HIDDEN as f32).sqrt();
-        let a: Vec<f32> = (0..H_V).map(|_| -rng.uniform(0.5, 1.5).exp()).collect();
+        let a: Vec<f32> = (0..H_V).map(|_| -rng.uniform_f32(0.5, 1.5).exp()).collect();
         let weights = GdnWeights {
             attn_qkv: rotated_plain(rng.tensor(device, &[cfg.qkv_dim(), HIDDEN], in_scale)),
             attn_gate: rotated_plain(rng.tensor(device, &[cfg.value_dim(), HIDDEN], in_scale)),
@@ -305,7 +278,7 @@ pub(super) mod tests {
         let cfg = cfg(false);
         let mut rng = Lcg(seed);
         let in_scale = 0.5 / (HIDDEN as f32).sqrt();
-        let a: Vec<f32> = (0..H_V).map(|_| -rng.uniform(0.5, 1.5).exp()).collect();
+        let a: Vec<f32> = (0..H_V).map(|_| -rng.uniform_f32(0.5, 1.5).exp()).collect();
         let signs: Vec<i8> = (0..HIDDEN)
             .map(|i| if i % 2 == 0 { -1 } else { 1 })
             .collect();
@@ -385,16 +358,6 @@ pub(super) mod tests {
             .unwrap()
             .tensor()
             .clone()
-    }
-
-    fn max_abs_diff(a: &Tensor<CpuRuntime>, b: &Tensor<CpuRuntime>) -> f32 {
-        let a = a.to_vec::<f32>();
-        let b = b.to_vec::<f32>();
-        assert_eq!(a.len(), b.len());
-        a.iter()
-            .zip(&b)
-            .map(|(x, y)| (x - y).abs())
-            .fold(0.0, f32::max)
     }
 
     #[test]

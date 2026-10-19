@@ -35,10 +35,10 @@ fn pool() -> Vec<Value> {
 
 /// A random schema nesting at most `depth` levels.
 pub(super) fn schema(rng: &mut Lcg, depth: u32) -> Value {
-    let kind = if depth == 0 || rng.below(3) == 0 {
-        rng.below(7)
+    let kind = if depth == 0 || rng.below_u64(3) == 0 {
+        rng.below_u64(7)
     } else {
-        7 + rng.below(4)
+        7 + rng.below_u64(4)
     };
     let mut out = match kind {
         0 => json!({"type": "null"}),
@@ -46,9 +46,9 @@ pub(super) fn schema(rng: &mut Lcg, depth: u32) -> Value {
         2 => json!({"type": "integer"}),
         3 => json!({"type": "number"}),
         4 => {
-            let lo = rng.below(3);
-            let hi = lo + rng.below(4);
-            match rng.below(3) {
+            let lo = rng.below_u64(3);
+            let hi = lo + rng.below_u64(4);
+            match rng.below_u64(3) {
                 0 => json!({"type": "string"}),
                 1 => json!({"type": "string", "minLength": lo}),
                 _ => json!({"type": "string", "minLength": lo, "maxLength": hi}),
@@ -56,8 +56,8 @@ pub(super) fn schema(rng: &mut Lcg, depth: u32) -> Value {
         }
         5 => {
             let mut members = pool();
-            let keep = 1 + rng.below(4) as usize;
-            let start = rng.below(members.len() as u64) as usize;
+            let keep = 1 + rng.below_u64(4) as usize;
+            let start = rng.below_u64(members.len() as u64) as usize;
             members.rotate_left(start);
             members.truncate(keep);
             json!({"enum": members})
@@ -68,17 +68,17 @@ pub(super) fn schema(rng: &mut Lcg, depth: u32) -> Value {
             let mut map = Map::new();
             map.insert("type".into(), json!("array"));
             map.insert("items".into(), schema(rng, depth - 1));
-            if rng.below(2) == 0 {
-                let lo = rng.below(3);
+            if rng.below_u64(2) == 0 {
+                let lo = rng.below_u64(3);
                 map.insert("minItems".into(), json!(lo));
-                map.insert("maxItems".into(), json!(lo + rng.below(3)));
+                map.insert("maxItems".into(), json!(lo + rng.below_u64(3)));
             }
             Value::Object(map)
         }
         9 => json!({"anyOf": [schema(rng, depth - 1), schema(rng, depth - 1)]}),
         _ => json!({"type": rng.pick(&[json!(["string", "null"]), json!(["integer", "boolean"])])}),
     };
-    if rng.below(6) == 0
+    if rng.below_u64(6) == 0
         && let Some(map) = out.as_object_mut()
     {
         map.insert("nullable".into(), json!(true));
@@ -90,10 +90,10 @@ pub(super) fn schema(rng: &mut Lcg, depth: u32) -> Value {
 fn object(rng: &mut Lcg, depth: u32) -> Value {
     let mut props = Map::new();
     let mut required = Vec::new();
-    for i in 0..1 + rng.below(4) {
+    for i in 0..1 + rng.below_u64(4) {
         let key = format!("p{i}");
         props.insert(key.clone(), schema(rng, depth - 1));
-        if rng.below(2) == 0 {
+        if rng.below_u64(2) == 0 {
             required.push(json!(key));
         }
     }
@@ -103,7 +103,7 @@ fn object(rng: &mut Lcg, depth: u32) -> Value {
 /// A random instance valid for `schema`.
 pub(super) fn instance(rng: &mut Lcg, schema: &Value) -> Inst {
     let map = schema.as_object().cloned().unwrap_or_default();
-    if map.get("nullable") == Some(&json!(true)) && rng.below(4) == 0 {
+    if map.get("nullable") == Some(&json!(true)) && rng.below_u64(4) == 0 {
         return Inst::Atom(Value::Null);
     }
     if let Some(Value::Array(members)) = map.get("enum") {
@@ -122,8 +122,8 @@ pub(super) fn instance(rng: &mut Lcg, schema: &Value) -> Inst {
         None => json!("null"),
     };
     match name.as_str().unwrap_or("null") {
-        "boolean" => Inst::Atom(json!(rng.below(2) == 0)),
-        "integer" => Inst::Atom(json!(rng.below(2001) as i64 - 1000)),
+        "boolean" => Inst::Atom(json!(rng.below_u64(2) == 0)),
+        "integer" => Inst::Atom(json!(rng.below_u64(2001) as i64 - 1000)),
         "number" => Inst::Atom(rng.pick(&[
             json!(0),
             json!(-0.0),
@@ -142,7 +142,8 @@ pub(super) fn instance(rng: &mut Lcg, schema: &Value) -> Inst {
             let required = map.get("required").cloned().unwrap_or(json!([]));
             let mut members = Vec::new();
             for (key, sub) in &props {
-                if required.as_array().is_some_and(|r| r.contains(&json!(key))) || rng.below(2) == 0
+                if required.as_array().is_some_and(|r| r.contains(&json!(key)))
+                    || rng.below_u64(2) == 0
                 {
                     members.push((key.clone(), instance(rng, sub)));
                 }
@@ -155,7 +156,7 @@ pub(super) fn instance(rng: &mut Lcg, schema: &Value) -> Inst {
                 .get("maxItems")
                 .and_then(Value::as_u64)
                 .unwrap_or(lo + 3);
-            let len = lo + rng.below(hi - lo + 1);
+            let len = lo + rng.below_u64(hi - lo + 1);
             let items = map.get("items").cloned().unwrap_or(json!({}));
             Inst::Arr((0..len).map(|_| instance(rng, &items)).collect())
         }
@@ -183,7 +184,7 @@ fn text(rng: &mut Lcg, map: &Map<String, Value>) -> String {
         .get("maxLength")
         .and_then(Value::as_u64)
         .unwrap_or(lo + 5);
-    let len = lo + rng.below(hi - lo + 1);
+    let len = lo + rng.below_u64(hi - lo + 1);
     (0..len).map(|_| rng.pick(&chars)).collect()
 }
 
@@ -316,8 +317,8 @@ pub(super) fn mutate(rng: &mut Lcg, schema: &Value, inst: &Inst) -> String {
             })
             .collect();
         let mut out = members.clone();
-        if !present.is_empty() && rng.below(2) == 0 {
-            out.remove(present[rng.below(present.len() as u64) as usize]);
+        if !present.is_empty() && rng.below_u64(2) == 0 {
+            out.remove(present[rng.below_u64(present.len() as u64) as usize]);
         } else {
             out.push(("zz_unknown".into(), Inst::Atom(Value::Null)));
         }
@@ -344,6 +345,6 @@ pub(super) fn mutate(rng: &mut Lcg, schema: &Value, inst: &Inst) -> String {
     if options.is_empty() {
         return format!("{}x", compact(inst));
     }
-    let pick = options[rng.below(options.len() as u64) as usize];
+    let pick = options[rng.below_u64(options.len() as u64) as usize];
     serde_json::to_string(pick).unwrap_or_default()
 }

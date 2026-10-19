@@ -150,7 +150,7 @@ mod tests {
     use super::*;
     use crate::ops::impl_generic::attention::{StandardAttnConfig, standard_attention_fwd};
     use crate::ops::traits::FlashAttentionOps;
-    use crate::test_utils::cuda_setup;
+    use crate::test_utils::{cuda_setup, max_abs_diff};
     use numr::runtime::cuda::CudaDevice;
 
     /// Deterministic values with no repeated rows, so a wrong KV-head mapping
@@ -163,14 +163,10 @@ mod tests {
         Tensor::<CudaRuntime>::from_slice(&data, shape, device).expect("tensor")
     }
 
-    fn max_abs_diff(a: &Tensor<CudaRuntime>, b: &Tensor<CudaRuntime>) -> f32 {
+    fn cuda_max_abs_diff(a: &Tensor<CudaRuntime>, b: &Tensor<CudaRuntime>) -> f32 {
         let a = a.contiguous().expect("contiguous").to_vec::<f32>();
         let b = b.contiguous().expect("contiguous").to_vec::<f32>();
-        assert_eq!(a.len(), b.len());
-        a.iter()
-            .zip(&b)
-            .map(|(x, y)| (x - y).abs())
-            .fold(0.0, f32::max)
+        max_abs_diff(&a, &b)
     }
 
     /// Single-query decode at every head_dim the kernel instantiates, with and
@@ -212,8 +208,8 @@ mod tests {
                     let (ref_out, ref_lse) = standard_attention_fwd(client, &q, &k, &v, cfg)
                         .expect("standard_attention_fwd");
 
-                    let out_diff = max_abs_diff(&out, &ref_out);
-                    let lse_diff = max_abs_diff(&lse, &ref_lse);
+                    let out_diff = cuda_max_abs_diff(&out, &ref_out);
+                    let lse_diff = cuda_max_abs_diff(&lse, &ref_lse);
                     assert!(
                         out_diff < 1e-4,
                         "output diverges at D={head_dim} Sk={seq_k} window={window} causal={causal}: {out_diff}"
@@ -270,8 +266,8 @@ mod tests {
 
             assert_eq!(out.shape(), &[2, heads, seq_q, head_dim]);
             assert_eq!(lse.shape(), &[2, heads, seq_q]);
-            let out_diff = max_abs_diff(&out, &ref_out);
-            let lse_diff = max_abs_diff(&lse, &ref_lse);
+            let out_diff = cuda_max_abs_diff(&out, &ref_out);
+            let lse_diff = cuda_max_abs_diff(&lse, &ref_lse);
             assert!(
                 out_diff < 1e-4,
                 "output diverges at H={heads} Hkv={kv_heads} D={head_dim} Sq={seq_q} Sk={seq_k}: {out_diff}"

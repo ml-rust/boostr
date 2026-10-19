@@ -215,7 +215,7 @@ mod tests {
     use super::*;
     use crate::model::audio::voxcpm::local_dit::sampler::cfm_time_span;
     use crate::model::audio::voxcpm::local_dit::tests as fixture;
-    use crate::test_utils::{CudaTest, cuda_setup};
+    use crate::test_utils::{CudaTest, bits, cuda_setup};
     use numr::runtime::cuda::CudaDevice;
 
     /// Skips without a device. The returned guard serializes this test
@@ -230,9 +230,9 @@ mod tests {
         Var::new(fixture::t_on::<CudaRuntime>(shape, seed, device), false)
     }
 
-    fn bits(v: &Var<CudaRuntime>) -> Vec<u32> {
+    fn var_bits(v: &Var<CudaRuntime>) -> Vec<u32> {
         let host: Vec<f32> = v.tensor().contiguous().unwrap().to_vec();
-        host.iter().map(|x| x.to_bits()).collect()
+        bits(&host)
     }
 
     struct Inputs {
@@ -285,8 +285,8 @@ mod tests {
                 .unwrap();
             assert_eq!(graphed.shape(), i.z.shape());
             assert_eq!(
-                bits(&eager),
-                bits(&graphed),
+                var_bits(&eager),
+                var_bits(&graphed),
                 "call {call} diverged from eager"
             );
             assert_eq!(
@@ -294,7 +294,7 @@ mod tests {
                 1,
                 "call {call} must reuse the graph"
             );
-            results.push(bits(&graphed));
+            results.push(var_bits(&graphed));
         }
         assert_ne!(
             results[0], results[1],

@@ -141,7 +141,9 @@ fn neg_exp<R: Runtime, C: UnaryOps<R>>(client: &C, a_log: &Tensor<R>) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::super::init::tests::{BATCH, SEQ, bits, init_block, input, weighted_loss};
+    use super::super::init::tests::{
+        BATCH, SEQ, f64_bits, init_block, input, seeded_weighted_loss,
+    };
     use super::*;
     use crate::nn::{Linear, Module};
     use crate::test_utils::cpu_setup;
@@ -212,7 +214,7 @@ mod tests {
         let x = input(&client, &device, DType::F64, 0x6d4e_0101, false);
         let want = block.forward_train(&client, &x).unwrap();
         let got = rebuilt.forward_train(&client, &x).unwrap();
-        assert_eq!(bits(got.tensor()), bits(want.tensor()));
+        assert_eq!(f64_bits(got.tensor()), f64_bits(want.tensor()));
     }
 
     /// A rebuild over perturbed values reads them, and every gradient
@@ -227,10 +229,14 @@ mod tests {
         let x = input(&client, &device, DType::F64, 0x6d4e_0111, true);
         let before = block.forward_train(&client, &x).unwrap();
         let y = rebuilt.forward_train(&client, &x).unwrap();
-        assert_ne!(bits(y.tensor()), bits(before.tensor()), "new values read");
+        assert_ne!(
+            f64_bits(y.tensor()),
+            f64_bits(before.tensor()),
+            "new values read"
+        );
         assert_eq!(y.shape(), &[BATCH, SEQ, rebuilt.config().hidden_size]);
 
-        let grads = backward(&weighted_loss(&client, &y, 0x6d4e_0112), &client).unwrap();
+        let grads = backward(&seeded_weighted_loss(&client, &y, 0x6d4e_0112), &client).unwrap();
         assert!(grads.get(x.id()).is_some(), "x gets a gradient");
         for (name, var) in block.named_parameters() {
             let grad = grads

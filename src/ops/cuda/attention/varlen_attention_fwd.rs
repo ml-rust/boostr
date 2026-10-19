@@ -119,7 +119,10 @@ fn varlen_attention_fwd_impl_inner(
         DType::F16 => "fp16",
         _ => {
             return Err(Error::KernelError {
-                reason: format!("varlen attention: unsupported dtype {dtype:?}, only F32/F16"),
+                reason: format!(
+                    "varlen attention: unsupported dtype {dtype:?}, only F32/F16; \
+                     cast q/k/v to F32 or F16"
+                ),
             });
         }
     };

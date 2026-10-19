@@ -119,7 +119,10 @@ pub(super) fn validate_head_dim(head_dim: usize, context: &str) -> Result<()> {
         return Ok(());
     }
     Err(Error::KernelError {
-        reason: format!("{context}: unsupported head_dim {head_dim}, only 64/128/256"),
+        reason: format!(
+            "{context}: unsupported head_dim {head_dim}, only 64/128/256; \
+             use one of those head dims or a non-varlen attention path"
+        ),
     })
 }
 

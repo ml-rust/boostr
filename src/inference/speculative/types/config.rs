@@ -1,5 +1,6 @@
-//! Speculative generation config, statistics and finish reason.
+//! Speculative generation config.
 
+use super::sample_rule::SampleRule;
 use crate::error::{Error, Result};
 
 /// Drafts per step when the caller sets no other count.
@@ -9,7 +10,7 @@ pub const DEFAULT_NUM_DRAFT_TOKENS: usize = 5;
 pub const MAX_NUM_DRAFT_TOKENS: usize = 32;
 
 /// Config of one speculative generation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpeculativeConfig {
     /// Drafts proposed per step, `k`. Must be in `1..=MAX_NUM_DRAFT_TOKENS`.
     pub num_draft_tokens: usize,
@@ -17,16 +18,24 @@ pub struct SpeculativeConfig {
     pub max_tokens: usize,
     /// Tokens that end generation. The EOS token is part of the output.
     pub eos_token_ids: Vec<u32>,
+    /// The sampled acceptance rule. `None` or temperature 0 runs the greedy path.
+    pub sampling: Option<SampleRule>,
 }
 
 impl SpeculativeConfig {
-    /// A config with `max_tokens`, the default draft count and no EOS ids.
+    /// A greedy config with `max_tokens`, the default draft count and no EOS ids.
     pub fn new(max_tokens: usize) -> Self {
         Self {
             num_draft_tokens: DEFAULT_NUM_DRAFT_TOKENS,
             max_tokens,
             eos_token_ids: Vec::new(),
+            sampling: None,
         }
+    }
+
+    /// The rule of the sampled path, or `None` when the greedy path runs.
+    pub fn sampled_rule(&self) -> Option<&SampleRule> {
+        self.sampling.as_ref().filter(|rule| !rule.is_greedy())
     }
 
     /// Check every field against a model with `vocab_size` tokens.
@@ -63,6 +72,9 @@ impl SpeculativeConfig {
                 ),
             });
         }
+        if let Some(rule) = &self.sampling {
+            rule.check()?;
+        }
         Ok(())
     }
 
@@ -72,54 +84,10 @@ impl SpeculativeConfig {
     }
 }
 
-/// Why generation stopped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FinishReason {
-    /// The last emitted token is an EOS id.
-    Eos,
-    /// The output reached `max_tokens`.
-    Length,
-}
-
-/// Counters of one generation. Prefill is not counted.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SpeculativeStats {
-    /// Steps run.
-    pub steps: usize,
-    /// Drafts fed to the target, after the clamp and the vocabulary cut.
-    pub drafted: usize,
-    /// Drafts equal to the target's own choice, before the EOS cut.
-    pub accepted: usize,
-    /// Tokens emitted to the caller.
-    pub emitted: usize,
-    /// Calls of [`SpeculativeModel::extend_greedy`](super::SpeculativeModel::extend_greedy)
-    /// during steps. Each step makes exactly one.
-    pub target_forwards: usize,
-}
-
-impl SpeculativeStats {
-    /// `accepted / drafted`, or 0.0 when nothing was drafted.
-    pub fn acceptance_rate(&self) -> f64 {
-        if self.drafted == 0 {
-            0.0
-        } else {
-            self.accepted as f64 / self.drafted as f64
-        }
-    }
-
-    /// `emitted / target_forwards`, or 0.0 before the first step.
-    pub fn tokens_per_forward(&self) -> f64 {
-        if self.target_forwards == 0 {
-            0.0
-        } else {
-            self.emitted as f64 / self.target_forwards as f64
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ops::traits::inference::FilterRule;
 
     fn arg_of(err: Error) -> &'static str {
         match err {
@@ -132,6 +100,7 @@ mod tests {
     fn default_config_passes() {
         let config = SpeculativeConfig::new(16);
         assert_eq!(config.num_draft_tokens, DEFAULT_NUM_DRAFT_TOKENS);
+        assert_eq!(config.sampling, None);
         config.check(10).expect("valid");
     }
 
@@ -173,18 +142,32 @@ mod tests {
     }
 
     #[test]
-    fn rates_handle_zero_counts() {
-        let stats = SpeculativeStats::default();
-        assert_eq!(stats.acceptance_rate(), 0.0);
-        assert_eq!(stats.tokens_per_forward(), 0.0);
-        let stats = SpeculativeStats {
-            steps: 2,
-            drafted: 4,
-            accepted: 3,
-            emitted: 5,
-            target_forwards: 2,
+    fn a_bad_sample_rule_names_its_field() {
+        let mut rule = SampleRule::new(FilterRule::temperature_only(1.0));
+        rule.filter.top_p = 0.0;
+        let config = SpeculativeConfig {
+            sampling: Some(rule),
+            ..SpeculativeConfig::new(4)
         };
-        assert_eq!(stats.acceptance_rate(), 0.75);
-        assert_eq!(stats.tokens_per_forward(), 2.5);
+        assert_eq!(arg_of(config.check(10).expect_err("top_p 0")), "top_p");
+    }
+
+    #[test]
+    fn temperature_zero_selects_the_greedy_path() {
+        let greedy = SpeculativeConfig {
+            sampling: Some(SampleRule::new(FilterRule {
+                temperature: 0.0,
+                ..FilterRule::temperature_only(1.0)
+            })),
+            ..SpeculativeConfig::new(4)
+        };
+        greedy.check(10).expect("temperature 0 is valid");
+        assert!(greedy.sampled_rule().is_none());
+        let sampled = SpeculativeConfig {
+            sampling: Some(SampleRule::new(FilterRule::temperature_only(0.7))),
+            ..SpeculativeConfig::new(4)
+        };
+        assert!(sampled.sampled_rule().is_some());
+        assert!(SpeculativeConfig::new(4).sampled_rule().is_none());
     }
 }

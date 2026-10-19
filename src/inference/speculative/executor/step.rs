@@ -1,10 +1,11 @@
 //! One speculative step: draft, one verify forward, accept, roll back.
 
+use super::accept::{greedy, rejection};
 use super::generate::{Phase, SpeculativeGenerator};
 use crate::error::{Error, Result};
 use crate::inference::speculative::draft::Drafter;
 use crate::inference::speculative::model::SpeculativeModel;
-use crate::inference::speculative::types::FinishReason;
+use crate::inference::speculative::types::{Draw, FinishReason, Verdict};
 
 /// The tokens one step emits.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,50 +16,19 @@ pub struct StepOutput {
     pub finish: Option<FinishReason>,
 }
 
-/// One `extend_greedy` call over `fed` tokens returned `got` ids and moved the
-/// cache from `len_before` to `len_after` positions.
-///
-/// # Errors
-///
-/// [`Error::InferenceError`] when the id count or the new cache length breaks
-/// the [`SpeculativeModel`] contract.
-pub(super) fn check_extend(
-    fed: usize,
-    got: usize,
-    len_before: usize,
-    len_after: usize,
-) -> Result<()> {
-    if got != fed {
-        return Err(Error::InferenceError {
-            reason: format!(
-                "extend_greedy returned {got} ids for {fed} fed tokens; the model must return \
-                 one id per fed token"
-            ),
-        });
-    }
-    if len_after != len_before + fed {
-        return Err(Error::InferenceError {
-            reason: format!(
-                "the model cache holds {len_after} positions after {fed} tokens fed at \
-                 {len_before}; it must hold {}",
-                len_before + fed
-            ),
-        });
-    }
-    Ok(())
-}
-
 impl<M: SpeculativeModel, D: Drafter> SpeculativeGenerator<M, D> {
     /// Run one step and return the tokens it emits.
     ///
     /// The drafter proposes up to `num_draft_tokens` tokens. The count is
     /// clamped so that the step never emits past `max_tokens`. The proposal
     /// is cut at its first id outside the vocabulary. One forward feeds the
-    /// last committed token `x` and the drafts `d_1..d_k`. It returns the
-    /// target's ids `a_0..a_k`. The step keeps the longest prefix with
-    /// `d_{i+1} == a_i`, of length `m`. It emits `d_1..d_m` and then `a_m`.
-    /// The output ends after the first EOS token or at `max_tokens`. With no
-    /// drafts the step is one plain greedy decode.
+    /// last committed token `x` and the drafts `d_1..d_k`. The greedy path
+    /// keeps the longest prefix where each draft equals the target's argmax.
+    /// The sampled path accepts drafts by rejection sampling at the
+    /// [`Draw`] of this step. Either path keeps `m` drafts and one next
+    /// token. The step emits `d_1..d_m` and then that token. The output
+    /// ends after the first EOS token or at `max_tokens`. With no drafts the
+    /// step is one plain decode.
     ///
     /// # Errors
     ///
@@ -123,27 +93,16 @@ impl<M: SpeculativeModel, D: Drafter> SpeculativeGenerator<M, D> {
                     .take_while(|&&id| (id as usize) < vocab_size),
             );
         }
+
+        let Verdict { accepted, next } = match self.config.sampled_rule().copied() {
+            None => greedy::accept(&mut self.model, &self.feed, len_before)?,
+            Some(rule) => {
+                let draw = Draw::for_step(self.key, self.step_index);
+                rejection::accept(&mut self.model, &self.feed, &rule, draw, len_before)?
+            }
+        };
+        self.step_index += 1;
         let drafts = &self.feed[1..];
-
-        let ids = self.model.extend_greedy(&self.feed)?;
-        check_extend(self.feed.len(), ids.len(), len_before, self.model.len())?;
-        if let Some((j, &id)) = ids
-            .iter()
-            .enumerate()
-            .find(|&(_, &id)| id as usize >= vocab_size)
-        {
-            return Err(Error::InferenceError {
-                reason: format!(
-                    "extend_greedy returned id {id} at row {j}, outside the model vocabulary \
-                     of {vocab_size} tokens"
-                ),
-            });
-        }
-
-        let accepted = drafts.iter().zip(&ids).take_while(|(d, a)| d == a).count();
-        let next = *ids.get(accepted).ok_or_else(|| Error::InferenceError {
-            reason: format!("extend_greedy returned no id for row {accepted}"),
-        })?;
         let mut tokens = Vec::with_capacity(accepted + 1);
         tokens.extend_from_slice(&drafts[..accepted]);
         tokens.push(next);
@@ -207,6 +166,7 @@ mod tests {
             num_draft_tokens: k,
             max_tokens,
             eos_token_ids: eos,
+            sampling: None,
         }
     }
 

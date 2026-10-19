@@ -1,6 +1,7 @@
 //! Generator state, start-up and the generation loop.
 
-use super::step::{StepOutput, check_extend};
+use super::accept::check_extend;
+use super::step::StepOutput;
 use crate::error::{Error, Result};
 use crate::inference::speculative::draft::Drafter;
 use crate::inference::speculative::model::SpeculativeModel;
@@ -17,11 +18,21 @@ pub(super) enum Phase {
     Finished(FinishReason),
 }
 
-/// Greedy-exact speculative generation over a target model and a drafter.
+/// Speculative generation over a target model and a drafter.
 ///
-/// The output equals plain greedy decoding of the same model token for token.
+/// Without a sampled rule, the output equals plain greedy decoding of the
+/// same model token for token. With [`SpeculativeConfig::sampled_rule`] set,
+/// every emitted token follows the target's filtered distribution exactly.
 /// Each [`step`](Self::step) costs one target forward and emits one or more
 /// tokens.
+///
+/// # Randomness
+///
+/// [`start`](Self::start) fixes the Philox key: the rule's seed, or one
+/// `numr::random::next_call_seed` value. So `manual_seed` and `with_seed`
+/// make an unseeded run repeatable. Step `s` draws at
+/// [`Draw::for_step`](crate::inference::speculative::Draw::for_step)`(key, s)`.
+/// Two steps never share a Philox counter. The greedy path draws no seed.
 ///
 /// # Cache invariant
 ///
@@ -44,6 +55,10 @@ pub struct SpeculativeGenerator<M, D> {
     pub(super) phase: Phase,
     /// Reused buffer of the tokens one step feeds.
     pub(super) feed: Vec<u32>,
+    /// The Philox key of the sampled path, fixed at start.
+    pub(super) key: u64,
+    /// Steps run since start. It picks each step's Philox counter.
+    pub(super) step_index: u64,
 }
 
 impl<M: SpeculativeModel, D: Drafter> SpeculativeGenerator<M, D> {
@@ -71,12 +86,16 @@ impl<M: SpeculativeModel, D: Drafter> SpeculativeGenerator<M, D> {
             prompt_len: 0,
             stats: SpeculativeStats::default(),
             phase: Phase::Idle,
+            key: 0,
+            step_index: 0,
         })
     }
 
     /// Reset the model cache and prefill every prompt token except the last.
     ///
-    /// The stats restart from zero. A one-token prompt needs no forward.
+    /// The stats restart from zero. A one-token prompt needs no forward. On
+    /// the sampled path the Philox key is fixed here and the step count
+    /// restarts from zero.
     ///
     /// # Errors
     ///
@@ -114,6 +133,10 @@ impl<M: SpeculativeModel, D: Drafter> SpeculativeGenerator<M, D> {
         self.tokens.extend_from_slice(prompt);
         self.prompt_len = prompt.len();
         self.stats = SpeculativeStats::default();
+        self.step_index = 0;
+        if let Some(rule) = self.config.sampled_rule() {
+            self.key = rule.seed.unwrap_or_else(numr::random::next_call_seed);
+        }
         self.phase = Phase::Running;
         Ok(())
     }
@@ -215,6 +238,7 @@ mod tests {
             num_draft_tokens: k,
             max_tokens,
             eos_token_ids: eos,
+            sampling: None,
         }
     }
 

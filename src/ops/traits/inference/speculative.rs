@@ -10,7 +10,8 @@ use numr::tensor::Tensor;
 /// Device-side sampled verification of draft tokens.
 ///
 /// The output distribution equals the target distribution, whatever the drafter.
-/// The greedy `boostr::inference::speculative::SpeculativeGenerator` does not call it.
+/// The sampled path of `boostr::inference::speculative::SpeculativeGenerator` calls it
+/// through `verify_logits`. The greedy path does not.
 pub trait SpeculativeOps<R: Runtime> {
     /// Accepts the longest valid draft prefix and draws the token after it.
     ///
@@ -27,7 +28,7 @@ pub trait SpeculativeOps<R: Runtime> {
     /// # Algorithm
     ///
     /// - Draft `i` is accepted iff `u_i * q_i(d_i) < p_i(d_i)`. No division runs.
-    /// - A draft with `q_i(d_i) == 0` is rejected. The drafter can not emit it.
+    /// - A draft with `q_i(d_i) == 0` is rejected. The drafter cannot emit it.
     /// - A draft id outside `[0, V)` is rejected. Checking it on the host needs a device read.
     /// - `m` counts the leading accepted drafts. The scan stops at the first reject.
     /// - If `m < K`, `next` is drawn from `max(0, p_m - q_m)`, normalized.

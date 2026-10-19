@@ -1,9 +1,11 @@
-//! Speculative greedy generation on a tiny CPU Llama, against plain greedy.
+//! Speculative generation on a tiny CPU Llama, against plain greedy.
 //!
 //! The target adapter feeds tokens through `forward_with_kv_cache` at the
-//! cache end and takes numr's argmax over the logits on the device. Rollback
-//! goes through `LayeredKvCache::truncate`. Every speculative run must emit
-//! exactly the tokens of one-token-per-forward greedy decoding.
+//! cache end. The greedy path takes numr's argmax over the logits on the
+//! device. The sampled path passes the logits to `verify_logits`. Rollback
+//! goes through `LayeredKvCache::truncate`. Every greedy run, and every
+//! sampled run at top-k 1, must emit exactly the tokens of
+//! one-token-per-forward greedy decoding.
 //!
 //! A one-token and a multi-token forward can round differently. A prompt
 //! whose plain run has a top-2 logit gap below `NEAR_TIE` is skipped with a
@@ -14,13 +16,14 @@ mod common;
 use boostr::error::Result;
 use boostr::inference::LayeredKvCache;
 use boostr::inference::speculative::{
-    Drafter, FinishReason, PromptLookup, SpeculativeConfig, SpeculativeGenerator, SpeculativeModel,
-    SpeculativeStats,
+    Drafter, Draw, FinishReason, PromptLookup, SampleRule, SpeculativeConfig, SpeculativeGenerator,
+    SpeculativeModel, SpeculativeStats, Verdict, verify_logits,
 };
 use boostr::model::LoadedModel;
+use boostr::ops::FilterRule;
 use common::llama_tiny::{HEAD_DIM, KV_HEADS, LAYERS, VOCAB, tiny_llama_on};
 use numr::dtype::DType;
-use numr::runtime::cpu::{CpuDevice, CpuRuntime};
+use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
 
 const SEED: u64 = 0x5bec_11a3;
@@ -34,6 +37,9 @@ struct TinyTarget {
     model: LoadedModel<CpuRuntime>,
     kv: LayeredKvCache<CpuRuntime>,
     device: CpuDevice,
+    client: CpuClient,
+    /// Every token in the cache, for the sampled path's penalty counts.
+    fed: Vec<u32>,
     /// Top-2 logit gap of every fed row while set. Plain reference runs only.
     gaps: Option<Vec<f32>>,
 }
@@ -56,9 +62,26 @@ impl TinyTarget {
         Self {
             model,
             kv,
+            client: CpuClient::new(device.clone()),
             device,
+            fed: Vec::new(),
             gaps: None,
         }
+    }
+
+    /// One forward over `tokens` at the cache end: `[1, M, VOCAB]` logits.
+    fn forward(&mut self, tokens: &[u32]) -> Result<Tensor<CpuRuntime>> {
+        let ids: Vec<i64> = tokens.iter().map(|&t| i64::from(t)).collect();
+        let input = Tensor::<CpuRuntime>::from_slice(&ids, &[1, ids.len()], &self.device)?;
+        let position = self.kv.seq_len();
+        let logits = self
+            .model
+            .forward_with_kv_cache(&input, &mut self.kv, position)?;
+        self.fed.extend_from_slice(tokens);
+        if let Some(gaps) = &mut self.gaps {
+            gaps.extend(top2_gaps(&logits));
+        }
+        Ok(logits)
     }
 }
 
@@ -91,19 +114,13 @@ impl SpeculativeModel for TinyTarget {
     }
 
     fn truncate(&mut self, len: usize) -> Result<()> {
-        self.kv.truncate(len)
+        self.kv.truncate(len)?;
+        self.fed.truncate(len);
+        Ok(())
     }
 
     fn extend_greedy(&mut self, tokens: &[u32]) -> Result<Vec<u32>> {
-        let ids: Vec<i64> = tokens.iter().map(|&t| i64::from(t)).collect();
-        let input = Tensor::<CpuRuntime>::from_slice(&ids, &[1, ids.len()], &self.device)?;
-        let position = self.kv.seq_len();
-        let logits = self
-            .model
-            .forward_with_kv_cache(&input, &mut self.kv, position)?;
-        if let Some(gaps) = &mut self.gaps {
-            gaps.extend(top2_gaps(&logits));
-        }
+        let logits = self.forward(tokens)?;
         // [1, M, VOCAB] -> [1, M] ids on the device; M ids cross to the host.
         let next = logits.argmax(2, false)?;
         Ok(next
@@ -111,6 +128,14 @@ impl SpeculativeModel for TinyTarget {
             .into_iter()
             .map(|id| id as u32)
             .collect())
+    }
+
+    fn extend_sampled(&mut self, tokens: &[u32], rule: &SampleRule, draw: Draw) -> Result<Verdict> {
+        let start = self.fed.len();
+        let logits = self.forward(tokens)?;
+        // Row 0 scores the cached tokens plus tokens[0]; row i adds tokens[1..=i].
+        let (context, drafts) = self.fed.split_at(start + 1);
+        verify_logits(&self.client, &logits, context, drafts, rule, draw)
     }
 }
 
@@ -193,7 +218,25 @@ fn config(k: usize, max_tokens: usize, eos: Vec<u32>) -> SpeculativeConfig {
         num_draft_tokens: k,
         max_tokens,
         eos_token_ids: eos,
+        sampling: None,
     }
+}
+
+fn sampled_config(k: usize, rule: SampleRule) -> SpeculativeConfig {
+    SpeculativeConfig {
+        sampling: Some(rule),
+        ..config(k, MAX_TOKENS, Vec::new())
+    }
+}
+
+fn prompts() -> Vec<Vec<u32>> {
+    vec![
+        tokens(1, 1),
+        tokens(2, 4),
+        tokens(3, 9),
+        vec![5, 9, 5, 9, 5, 9, 5],
+        tokens(4, 6),
+    ]
 }
 
 /// `n` token ids in `0..VOCAB`, fixed by `seed`.
@@ -219,13 +262,7 @@ fn last_first_occurrence(seq: &[u32]) -> usize {
 
 #[test]
 fn speculative_greedy_equals_plain_greedy_on_a_tiny_llama() {
-    let prompts = vec![
-        tokens(1, 1),
-        tokens(2, 4),
-        tokens(3, 9),
-        vec![5, 9, 5, 9, 5, 9, 5],
-        tokens(4, 6),
-    ];
+    let prompts = prompts();
     let mut target = TinyTarget::new();
     let mut checked = 0usize;
     let mut rejected_midway = 0usize;
@@ -321,4 +358,84 @@ fn speculative_greedy_equals_plain_greedy_on_a_tiny_llama() {
         "only {checked} prompts were free of near-ties"
     );
     assert!(rejected_midway > 0);
+}
+
+#[test]
+fn sampled_top_k_one_equals_plain_greedy_on_a_tiny_llama() {
+    let mut target = TinyTarget::new();
+    let mut checked = 0usize;
+    for prompt in &prompts() {
+        let (free, _, gap) = plain(&mut target, prompt, &config(1, MAX_TOKENS, Vec::new()));
+        if gap < NEAR_TIE {
+            println!("skip prompt {prompt:?}: plain run has a top-2 logit gap of {gap:e}");
+            continue;
+        }
+        checked += 1;
+        for k in [1usize, 3, 5] {
+            let what = format!("prompt {prompt:?} k {k}");
+            let rule = SampleRule {
+                seed: Some(k as u64),
+                ..SampleRule::new(FilterRule {
+                    top_k: 1,
+                    ..FilterRule::temperature_only(1.0)
+                })
+            };
+            let cfg = sampled_config(k, rule);
+            let (t, out, finish, _) =
+                speculative(target, PromptLookup::default(), cfg.clone(), prompt);
+            assert_eq!(
+                (&out, finish),
+                (&free, FinishReason::Length),
+                "{what}: lookup"
+            );
+            let corrupt = OracleDraft {
+                prompt_len: prompt.len(),
+                continuation: free.clone(),
+                corrupt_at: Some(k / 2),
+            };
+            let (t, out, finish, stats) = speculative(t, corrupt, cfg, prompt);
+            assert_eq!(
+                (&out, finish),
+                (&free, FinishReason::Length),
+                "{what}: corrupt"
+            );
+            assert!(stats.accepted < stats.drafted, "{what}: {stats:?}");
+            target = t;
+        }
+    }
+    assert!(
+        checked >= 3,
+        "only {checked} prompts were free of near-ties"
+    );
+}
+
+#[test]
+fn sampled_runs_keep_the_cache_invariant_and_repeat_under_one_seed() {
+    let rule = SampleRule {
+        seed: Some(7),
+        ..SampleRule::new(FilterRule::temperature_only(1.0))
+    };
+    let mut target = TinyTarget::new();
+    for prompt in &prompts() {
+        for k in [1usize, 4] {
+            let what = format!("prompt {prompt:?} k {k}");
+            let cfg = sampled_config(k, rule);
+            let (t, first, finish, stats) =
+                speculative(target, PromptLookup::default(), cfg.clone(), prompt);
+            assert_eq!(
+                (first.len(), finish),
+                (MAX_TOKENS, FinishReason::Length),
+                "{what}"
+            );
+            assert!(
+                first.iter().all(|&id| (id as usize) < VOCAB),
+                "{what}: {first:?}"
+            );
+            assert!(stats.accepted <= stats.drafted, "{what}: {stats:?}");
+            assert_eq!(stats.steps, stats.target_forwards, "{what}: {stats:?}");
+            let (t, second, _, _) = speculative(t, PromptLookup::default(), cfg, prompt);
+            assert_eq!(first, second, "{what}: one seed repeats its output");
+            target = t;
+        }
+    }
 }

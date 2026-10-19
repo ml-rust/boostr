@@ -1,12 +1,14 @@
 //! The target model contract of speculative generation.
 
-use crate::error::Result;
+use super::types::{Draw, SampleRule, Verdict};
+use crate::error::{Error, Result};
 
-/// A causal target model with a rollback-capable cache, scored greedily.
+/// A causal target model with a rollback-capable cache.
 ///
 /// The model holds a cache of `len()` positions. Position `i` holds the
-/// `i`-th fed token. Every call of [`extend_greedy`](Self::extend_greedy)
-/// appends at the end, and [`truncate`](Self::truncate) cuts the end off.
+/// `i`-th fed token. Every call of [`extend_greedy`](Self::extend_greedy) or
+/// [`extend_sampled`](Self::extend_sampled) appends at the end, and
+/// [`truncate`](Self::truncate) cuts the end off.
 ///
 /// # Greedy rule
 ///
@@ -52,4 +54,30 @@ pub trait SpeculativeModel {
     ///
     /// An error when the forward fails, for example past the cache capacity.
     fn extend_greedy(&mut self, tokens: &[u32]) -> Result<Vec<u32>>;
+
+    /// Feed `tokens` in one forward and verify the drafts by sampling.
+    ///
+    /// `tokens` is the last committed token, then the drafts. The cache grows
+    /// by `tokens.len()` positions. The generator truncates it afterwards.
+    ///
+    /// Row `i` scores the prefix that ends with `tokens[i]`. Its penalties
+    /// count every token of that prefix, the cached ones included. An
+    /// implementation passes its logits to
+    /// [`verify_logits`](crate::inference::speculative::verify_logits).
+    /// Only the verdict crosses to the host.
+    ///
+    /// The default refuses the call, for a greedy-only model.
+    ///
+    /// # Errors
+    ///
+    /// An error when the forward or the verify fails. The default always
+    /// returns [`Error::InferenceError`].
+    fn extend_sampled(&mut self, tokens: &[u32], rule: &SampleRule, draw: Draw) -> Result<Verdict> {
+        let _ = (tokens, rule, draw);
+        Err(Error::InferenceError {
+            reason: "this model implements only greedy verification; implement \
+                     SpeculativeModel::extend_sampled, or set temperature 0"
+                .into(),
+        })
+    }
 }

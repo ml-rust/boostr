@@ -1,18 +1,19 @@
 //! Sample a token from logits — generic implementation.
 
 use super::output::write_token_id;
-use super::stochastic::{filter_distribution, sample_from_distribution};
+use super::stochastic::{filtered_probs, sample_from_probs};
 use super::validate::{SamplingLogitsShape, validate_sampling_logits, validate_scratch_vocab};
 use crate::error::Result;
+use crate::ops::traits::inference::sampling_probs::FilterRule;
 use crate::ops::traits::inference::sampling_scratch::SamplingScratch;
 use numr::dtype::DType;
-use numr::ops::RandomOps;
+use numr::ops::{CompareOps, RandomOps, ScalarOps, TensorOps};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
 /// Sample a token from logits — generic implementation.
 ///
-/// Performs temperature → softmax → top-k → top-p → min-p → multinomial.
+/// Filters by the canonical rule in [`super::probs`], then draws in id order.
 /// Randomness generated via `RandomOps::rand_into` (on-device for GPU backends).
 /// CUDA backend provides a fused kernel that keeps everything in a single launch.
 ///
@@ -20,6 +21,10 @@ use numr::tensor::Tensor;
 /// [`sample_token_into_impl`]. A caller that samples every step should
 /// allocate its own scratch once and call [`sample_token_into_impl`]
 /// directly instead.
+///
+/// # Errors
+///
+/// Returns an error if the [`FilterRule`] of the arguments fails its check.
 pub fn sample_token_impl<R: Runtime<DType = DType>>(
     client: &R::Client,
     logits: &Tensor<R>,
@@ -29,7 +34,11 @@ pub fn sample_token_impl<R: Runtime<DType = DType>>(
     min_p: f32,
 ) -> Result<u32>
 where
-    R::Client: RandomOps<R> + numr::ops::AdvancedRandomOps<R> + numr::ops::BinaryOps<R>,
+    R::Client: RandomOps<R>
+        + numr::ops::AdvancedRandomOps<R>
+        + TensorOps<R>
+        + CompareOps<R>
+        + ScalarOps<R>,
 {
     let vocab_size = logits.shape().first().copied().unwrap_or(1);
     let scratch = SamplingScratch::new(vocab_size, logits.device())?;
@@ -41,10 +50,10 @@ where
 /// Like [`sample_token_impl`], but writes the sampled token into
 /// `scratch.output` instead of allocating.
 ///
-/// `scratch.probs` is unused on this path: the generic implementation
-/// filters the distribution on the host, in `logits_vec`, rather than in a
-/// device buffer. `scratch.output` is fully overwritten before this
-/// function returns, so it carries nothing from a previous call.
+/// `scratch.probs` is unused on this path: the filter returns a fresh
+/// probability tensor, and the draw reads it on the host. `scratch.output`
+/// is fully overwritten before this function returns, so it carries nothing
+/// from a previous call.
 pub fn sample_token_into_impl<R: Runtime<DType = DType>>(
     client: &R::Client,
     logits: &Tensor<R>,
@@ -55,13 +64,21 @@ pub fn sample_token_into_impl<R: Runtime<DType = DType>>(
     scratch: &SamplingScratch<R>,
 ) -> Result<()>
 where
-    R::Client: RandomOps<R> + numr::ops::AdvancedRandomOps<R> + numr::ops::BinaryOps<R>,
+    R::Client: RandomOps<R>
+        + numr::ops::AdvancedRandomOps<R>
+        + TensorOps<R>
+        + CompareOps<R>
+        + ScalarOps<R>,
 {
     validate_sampling_logits("sample_token", logits, SamplingLogitsShape::Vocab)?;
     validate_scratch_vocab("sample_token", scratch, logits.shape()[0])?;
-    let mut logits_vec: Vec<f32> = logits.to_vec();
-
-    let indexed = filter_distribution(&mut logits_vec, temperature, top_k, top_p, min_p);
+    let rule = FilterRule {
+        temperature,
+        top_k,
+        top_p,
+        min_p,
+    };
+    let probs = filtered_probs::<R>(client, logits, &rule)?;
 
     // Draw into scratch.random instead of allocating a fresh tensor, then
     // read back the scalar it was just fully overwritten with.
@@ -71,7 +88,7 @@ where
         .item::<f32>()
         .map_err(crate::error::Error::Numr)?;
 
-    let token_id = sample_from_distribution(&indexed, random_val) as i64;
+    let token_id = sample_from_probs(&probs, random_val) as i64;
     write_token_id("sample_token", token_id, &scratch.output)
 }
 

@@ -1,14 +1,16 @@
 //! Fused logits-to-token — generic implementation.
 
 use super::output::write_token_id;
-use super::stochastic::{filter_distribution, sample_from_distribution};
+use super::stochastic::{filtered_probs, sample_from_probs};
 use super::validate::{
     SamplingLogitsShape, validate_contiguous_arg, validate_sampling_logits, validate_scratch_vocab,
 };
 use crate::error::Result;
 use crate::ops::traits::inference::sample_seed::SampleSeed;
+use crate::ops::traits::inference::sampling_probs::FilterRule;
 use crate::ops::traits::inference::sampling_scratch::SamplingScratch;
 use numr::dtype::DType;
+use numr::ops::{CompareOps, ScalarOps, TensorOps};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -16,6 +18,7 @@ use numr::tensor::Tensor;
 ///
 /// Narrows to last seq position, casts to F32, applies penalties, then either
 /// argmax (temperature == 0) or full stochastic sampling. Returns `[1]` I64 tensor.
+/// The stochastic branch filters by the canonical rule in [`super::probs`].
 ///
 /// Allocates a one-off [`SamplingScratch`] and delegates to
 /// [`logits_to_token_into_impl`]. A caller that samples every step should
@@ -40,8 +43,9 @@ pub fn logits_to_token_impl<R: Runtime<DType = numr::dtype::DType>>(
 where
     R::Client: numr::ops::RandomOps<R>
         + numr::ops::AdvancedRandomOps<R>
-        + numr::ops::BinaryOps<R>
-        + numr::ops::TypeConversionOps<R>,
+        + TensorOps<R>
+        + CompareOps<R>
+        + ScalarOps<R>,
 {
     let vocab_size = logits.shape().last().copied().unwrap_or(1);
     let scratch = SamplingScratch::new(vocab_size, logits.device())?;
@@ -61,16 +65,21 @@ where
         seed,
         &scratch,
     )?;
-    Ok(scratch.output.clone())
+    Ok(scratch.output)
 }
 
 /// Like [`logits_to_token_impl`], but writes the sampled token into
 /// `scratch.output` instead of allocating.
 ///
-/// `scratch.probs` is unused on this path: the generic implementation
-/// filters the distribution on the host, in a `Vec<f32>`, rather than in a
-/// device buffer. `scratch.output` is fully overwritten before this
-/// function returns, so it carries nothing from a previous call.
+/// `scratch.probs` is unused on this path: the filter returns a fresh
+/// probability tensor, and the draw reads it on the host. `scratch.output`
+/// is fully overwritten before this function returns, so it carries nothing
+/// from a previous call.
+///
+/// # Errors
+///
+/// Returns an error if a nonzero `temperature` and the filter arguments
+/// fail the [`FilterRule`] check.
 #[allow(clippy::too_many_arguments)]
 pub fn logits_to_token_into_impl<R: Runtime<DType = numr::dtype::DType>>(
     client: &R::Client,
@@ -91,8 +100,9 @@ pub fn logits_to_token_into_impl<R: Runtime<DType = numr::dtype::DType>>(
 where
     R::Client: numr::ops::RandomOps<R>
         + numr::ops::AdvancedRandomOps<R>
-        + numr::ops::BinaryOps<R>
-        + numr::ops::TypeConversionOps<R>,
+        + TensorOps<R>
+        + CompareOps<R>
+        + ScalarOps<R>,
 {
     validate_sampling_logits(
         "logits_to_token",
@@ -167,7 +177,14 @@ where
         }
         best_idx as i64
     } else {
-        let indexed = filter_distribution(&mut last_logits, temperature, top_k, top_p, min_p);
+        let rule = FilterRule {
+            temperature,
+            top_k,
+            top_p,
+            min_p,
+        };
+        let row = Tensor::<R>::from_slice(&last_logits, &[vocab_size], logits.device())?;
+        let probs = filtered_probs::<R>(client, &row, &rule)?;
 
         // Draw into scratch.random (the Philox uniform at the seed's key and
         // counter when seeded), then read back the scalar it now holds.
@@ -177,7 +194,7 @@ where
             .item::<f32>()
             .map_err(crate::error::Error::Numr)?;
 
-        sample_from_distribution(&indexed, random_val) as i64
+        sample_from_probs(&probs, random_val) as i64
     };
 
     write_token_id("logits_to_token", token_id, &scratch.output)

@@ -44,10 +44,10 @@ pub mod trainer;
 // Re-export primary boostr traits
 pub use nn::{Init, VarBuilder, VarMap, Weight, router_z_loss};
 pub use ops::{
-    AttentionOps, AttnOutLayout, DeviceGrammarDfa, FlashAttentionOps, FusedFp8TrainingOps,
-    FusedOptimizerOps, FusedQkvOps, GatedDeltaNetOps, GdnGrads, GrammarDfaOps, KvCacheOps,
-    KvSeqLen, MlaOps, PagedAttentionOps, RoPEOps, RoPEPackedOps, SampleSeed, SamplingOps,
-    SamplingScratch, var_flash_attention, var_gdn_chunk,
+    AttentionOps, AttnOutLayout, DeviceGrammarDfa, FilterRule, FlashAttentionOps,
+    FusedFp8TrainingOps, FusedOptimizerOps, FusedQkvOps, GatedDeltaNetOps, GdnGrads, GrammarDfaOps,
+    KvCacheOps, KvSeqLen, MlaOps, PagedAttentionOps, RoPEOps, RoPEPackedOps, SampleSeed,
+    SamplingOps, SamplingProbsOps, SamplingScratch, var_flash_attention, var_gdn_chunk,
 };
 pub use quant::{
     DecomposedQuantLinear, DecomposedQuantMethod, DecomposedQuantTensor, DequantOps, FusedQuantOps,

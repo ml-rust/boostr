@@ -19,11 +19,11 @@ pub use autograd_varlen_attention::var_varlen_attention;
 pub use impl_generic::position::mrope_stream_selector;
 pub use traits::architecture::moe::MoEActivation;
 pub use traits::{
-    AlibiOps, AttentionOps, AttnOutLayout, CalibrationOps, DeviceGrammarDfa, FlashAttentionOps,
-    FusedFp8TrainingOps, FusedOptimizerOps, FusedQkvOps, GatedDeltaNetOps, GdnGrads, GrammarDfaOps,
-    Int4GroupSize, KvCacheOps, KvCacheQuantOps, KvQuantMode, KvSeqLen, MRopeOps, MlaOps, MoEOps,
-    PackedSegments, PagedAttentionOps, RoPEOps, RoPEPackedOps, SampleSeed, SamplingOps,
-    SamplingScratch, SpeculativeOps, VarLenAttentionOps,
+    AlibiOps, AttentionOps, AttnOutLayout, CalibrationOps, DeviceGrammarDfa, FilterRule,
+    FlashAttentionOps, FusedFp8TrainingOps, FusedOptimizerOps, FusedQkvOps, GatedDeltaNetOps,
+    GdnGrads, GrammarDfaOps, Int4GroupSize, KvCacheOps, KvCacheQuantOps, KvQuantMode, KvSeqLen,
+    MRopeOps, MlaOps, MoEOps, PackedSegments, PagedAttentionOps, RoPEOps, RoPEPackedOps,
+    SampleSeed, SamplingOps, SamplingProbsOps, SamplingScratch, SpeculativeOps, VarLenAttentionOps,
 };
 
 // Re-export numr's TensorOps which bundles all operation traits

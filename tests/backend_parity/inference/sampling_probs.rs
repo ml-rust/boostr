@@ -3,7 +3,10 @@
 //! The CPU result is the reference. Each case checks the kept set of every
 //! row exactly and the probabilities within a float tolerance.
 
-#![cfg_attr(not(feature = "wgpu"), allow(dead_code, unused_imports))]
+#![cfg_attr(
+    not(any(feature = "wgpu", feature = "cuda")),
+    allow(dead_code, unused_imports)
+)]
 
 use super::helpers::*;
 use boostr::ops::traits::inference::sampling_probs::{FilterRule, SamplingProbsOps};
@@ -75,12 +78,80 @@ fn check(data: &[f32], shape: &[usize], r: FilterRule, what: &str) -> Vec<f32> {
     let cpu = probs_on::<CpuRuntime>(&cpu_client, &cpu_device, data, shape, r);
     assert_rows_sum_to_one(&cpu, vocab, what);
 
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|client, device| {
+        let gpu = probs_on::<numr::runtime::cuda::CudaRuntime>(&client, &device, data, shape, r);
+        assert_matches_cpu(&gpu, &cpu, vocab, &format!("cuda {what} {r:?}"));
+    });
+
     #[cfg(feature = "wgpu")]
     with_wgpu_backend(|client, device| {
         let gpu = probs_on::<numr::runtime::wgpu::WgpuRuntime>(&client, &device, data, shape, r);
         assert_matches_cpu(&gpu, &cpu, vocab, &format!("wgpu {what} {r:?}"));
     });
     cpu
+}
+
+/// Logits whose softmax is `p` up to rounding. Equal entries of `p` give bitwise ties.
+fn log_probs(p: &[f32]) -> Vec<f32> {
+    p.iter().map(|x| x.ln()).collect()
+}
+
+#[test]
+fn test_sampling_probs_top_k_keeps_ties_in_a_large_row() {
+    let vocab = 1000;
+    let mut data = logits_data(vocab, 0.6);
+    let mut ranked: Vec<usize> = (0..vocab).collect();
+    ranked.sort_by(|&a, &b| data[b].total_cmp(&data[a]));
+    // Ranks 5 to 7 tie with rank 4, the fifth largest.
+    let kth = data[ranked[4]];
+    for &i in &ranked[5..8] {
+        data[i] = kth;
+    }
+    let cpu = check(
+        &data,
+        &[vocab],
+        rule(1.0, 5, 1.0, 0.0),
+        "large-row top-k tie",
+    );
+    let mut want: Vec<usize> = ranked[..8].to_vec();
+    want.sort_unstable();
+    assert_eq!(kept(&cpu), want, "every tie at the fifth value stays");
+}
+
+#[test]
+fn test_sampling_probs_top_p_keeps_ties_at_tau() {
+    // Prefix 0.5 stays below the target 0.6. tau is 0.25, so both ties stay.
+    let data = log_probs(&[0.5, 0.25, 0.25]);
+    let cpu = check(&data, &[3], rule(1.0, 0, 0.6, 0.0), "top-p tie at tau");
+    assert_eq!(kept(&cpu), vec![0, 1, 2]);
+}
+
+#[test]
+fn test_sampling_probs_top_p_runs_before_min_p() {
+    // Top-p first: target 0.65 keeps [0.5, 0.2], then min-p 0.175 keeps both.
+    // Min-p first would leave mass 0.7, target 0.455, and keep only token 0.
+    let data = log_probs(&[0.5, 0.2, 0.15, 0.15]);
+    let cpu = check(&data, &[4], rule(1.0, 0, 0.65, 0.35), "top-p before min-p");
+    assert_eq!(kept(&cpu), vec![0, 1]);
+}
+
+#[test]
+fn test_sampling_probs_all_filters_on_tied_rows() {
+    let rows = [
+        log_probs(&[0.4, 0.3, 0.3, 0.0001]),
+        log_probs(&[0.25, 0.25, 0.25, 0.25]),
+        log_probs(&[0.1, 0.45, 0.1, 0.35]),
+    ];
+    let data: Vec<f32> = rows.concat();
+    for r in [
+        rule(1.0, 2, 0.9, 0.1),
+        rule(1.0, 3, 0.5, 0.0),
+        rule(0.8, 1, 1.0, 0.5),
+        rule(1.2, 0, 0.3, 0.2),
+    ] {
+        check(&data, &[3, 4], r, "tied rows");
+    }
 }
 
 #[test]
@@ -206,4 +277,29 @@ fn test_sampling_probs_half_input_matches_f32() {
         let want = check(&wide, &[2, 257], r, &format!("{:?} upcast", half_t.dtype()));
         assert_eq!(got, want, "{:?}", half_t.dtype());
     }
+
+    // The CUDA kernel reads F16 and BF16 directly.
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|gpu_client, gpu_device| {
+        use numr::runtime::cuda::CudaRuntime;
+        let halves = [
+            (
+                Tensor::<CudaRuntime>::from_slice(&f16, &[2, 257], &gpu_device).unwrap(),
+                f16.iter().map(|x| x.to_f32()).collect::<Vec<f32>>(),
+            ),
+            (
+                Tensor::<CudaRuntime>::from_slice(&bf16, &[2, 257], &gpu_device).unwrap(),
+                bf16.iter().map(|x| x.to_f32()).collect::<Vec<f32>>(),
+            ),
+        ];
+        for (half_t, wide) in halves {
+            let what = format!("cuda {:?} input", half_t.dtype());
+            let got = gpu_client
+                .sampling_probs(&half_t, &r)
+                .unwrap()
+                .to_vec::<f32>();
+            let want = probs_on::<CpuRuntime>(&client, &device, &wide, &[2, 257], r);
+            assert_matches_cpu(&got, &want, 257, &what);
+        }
+    });
 }

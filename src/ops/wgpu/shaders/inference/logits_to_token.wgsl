@@ -2,8 +2,9 @@
 //
 // One workgroup of 256 invocations runs the whole pipeline:
 //   copy the last position's logits into `probs` → penalties →
-//   greedy argmax, or temperature → softmax → top-k → min-p → top-p →
-//   multinomial draw.
+//   greedy argmax, or the canonical filter (temperature, softmax, top-k,
+//   top-p, min-p, renormalize) and the id-order draw.
+// `FilterRule` in `ops/traits/inference/sampling_probs.rs` defines each step.
 // `sample_token` dispatches this same entry point with no penalties.
 //
 // I64 tensors reach WGSL as pairs of u32 words, low word first. Token ids
@@ -176,89 +177,99 @@ fn logits_to_token(@builtin(local_invocation_id) lid: vec3<u32>) {
     }
     let max_prob = reduce_max(tid, local_pmax);
 
-    // Step 6: top-k threshold by bisection on the probability value.
-    var topk_threshold = 0.0;
+    // Step 6: top-k. The largest bits whose count reaches k are the kth
+    // largest value, so ties at that value stay. Every probability is
+    // non-negative, so its bits order like its value.
+    let max_bits = bitcast<u32>(max_prob);
+    var keep_bits = 0u;
     if (params.top_k > 0u && params.top_k < n) {
-        var lo = 0.0;
-        var hi = max_prob;
-        for (var iter = 0u; iter < 32u; iter = iter + 1u) {
-            let mid = (lo + hi) * 0.5;
+        var lo = 0u;
+        var hi = max_bits;
+        while (lo < hi) {
+            let mid = lo + (hi - lo + 1u) / 2u;
             var count = 0.0;
             for (var i = tid; i < n; i = i + WG) {
-                if (probs[i] >= mid) {
+                if (bitcast<u32>(probs[i]) >= mid) {
                     count = count + 1.0;
                 }
             }
-            let total_count = reduce_sum(tid, count);
-            if (total_count > f32(params.top_k)) {
+            if (reduce_sum(tid, count) >= f32(params.top_k)) {
                 lo = mid;
             } else {
-                hi = mid;
+                hi = mid - 1u;
             }
         }
-        // `hi` keeps at most k tokens. `lo` always keeps more than k.
-        topk_threshold = hi;
+        keep_bits = lo;
     }
 
-    // Step 7: min-p threshold, combined with top-k.
-    var threshold = topk_threshold;
+    // Step 7: top-p. tau is the largest value whose kept mass reaches
+    // top_p times the mass top-k left.
+    if (params.top_p < 1.0) {
+        var local_mass = 0.0;
+        for (var i = tid; i < n; i = i + WG) {
+            let p = probs[i];
+            if (bitcast<u32>(p) >= keep_bits) {
+                local_mass = local_mass + p;
+            }
+        }
+        let mass_goal = params.top_p * reduce_sum(tid, local_mass);
+        var lo = keep_bits;
+        var hi = max_bits;
+        while (lo < hi) {
+            let mid = lo + (hi - lo + 1u) / 2u;
+            var above = 0.0;
+            for (var i = tid; i < n; i = i + WG) {
+                let p = probs[i];
+                if (bitcast<u32>(p) >= mid) {
+                    above = above + p;
+                }
+            }
+            if (reduce_sum(tid, above) >= mass_goal) {
+                lo = mid;
+            } else {
+                hi = mid - 1u;
+            }
+        }
+        keep_bits = lo;
+    }
+
+    // Step 8: min-p, then renormalize over the kept set.
+    var threshold = bitcast<f32>(keep_bits);
     if (params.min_p > 0.0) {
         threshold = max(threshold, params.min_p * max_prob);
     }
     var local_kept = 0.0;
     for (var i = tid; i < n; i = i + WG) {
-        if (probs[i] < threshold) {
-            probs[i] = 0.0;
+        let p = probs[i];
+        if (p >= threshold) {
+            local_kept = local_kept + p;
         } else {
-            local_kept = local_kept + probs[i];
+            probs[i] = 0.0;
         }
     }
-    var kept = reduce_sum(tid, local_kept);
-
-    // Step 8: top-p threshold by bisection on the probability value.
-    if (params.top_p < 1.0 && kept > 0.0) {
-        let mass_goal = params.top_p * kept;
-        var lo = 0.0;
-        var hi = max_prob;
-        for (var iter = 0u; iter < 32u; iter = iter + 1u) {
-            let mid = (lo + hi) * 0.5;
-            var above = 0.0;
-            for (var i = tid; i < n; i = i + WG) {
-                if (probs[i] >= mid) {
-                    above = above + probs[i];
-                }
-            }
-            let total_above = reduce_sum(tid, above);
-            if (total_above > mass_goal) {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        var local_new = 0.0;
-        for (var i = tid; i < n; i = i + WG) {
-            if (probs[i] < lo) {
-                probs[i] = 0.0;
-            } else {
-                local_new = local_new + probs[i];
-            }
-        }
-        kept = reduce_sum(tid, local_new);
+    let kept = reduce_sum(tid, local_kept);
+    var local_total = 0.0;
+    for (var i = tid; i < n; i = i + WG) {
+        let p = probs[i] / kept;
+        probs[i] = p;
+        local_total = local_total + p;
     }
+    let renormalized = reduce_sum(tid, local_total);
     storageBarrier();
 
-    // Step 9: multinomial draw. One invocation scans the kept mass.
+    // Step 9: the draw. One invocation scans in id order and skips every
+    // removed token. Rounding past the end returns the last kept token.
     if (tid == 0u) {
-        let draw_point = random_val[0] * kept;
+        let draw_point = random_val[0] * renormalized;
         var cumsum = 0.0;
-        // Rounding at the tail falls back to the last kept token.
         var sampled = 0u;
         for (var i = 0u; i < n; i = i + 1u) {
             let p = probs[i];
-            if (p > 0.0) {
-                sampled = i;
+            if (p <= 0.0) {
+                continue;
             }
             cumsum = cumsum + p;
+            sampled = i;
             if (cumsum > draw_point) {
                 break;
             }

@@ -92,6 +92,7 @@ mod tests {
             SAMPLING_PENALTIES_MODULE,
             SAMPLING_MODULE,
             LOGITS_TO_TOKEN_MODULE,
+            SAMPLING_PROBS_MODULE,
             CALIBRATION_MODULE,
             GRAMMAR_DFA_MODULE,
             PREFIX_CACHE_LOOKUP_MODULE,

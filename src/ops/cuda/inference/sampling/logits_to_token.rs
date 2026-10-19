@@ -1,12 +1,14 @@
-//! Fused logits-to-token kernel launch: penalties, temperature, top-k,
-//! top-p, min-p and the multinomial draw (or argmax) in one block.
+//! Fused logits-to-token kernel launch: penalties, then argmax or the
+//! canonical filter and the id-order draw, in one block.
 
 use crate::error::{Error, Result};
+use crate::ops::cuda::inference::sampling_probs::{kernel_dtype_code, kernel_top_k, kernel_vocab};
 use crate::ops::cuda::kernels::{self, LOGITS_TO_TOKEN_MODULE};
 use crate::ops::impl_generic::inference::sampling::{
     SamplingLogitsShape, validate_contiguous_arg, validate_sampling_logits, validate_scratch_vocab,
 };
 use crate::ops::traits::inference::sample_seed::SampleSeed;
+use crate::ops::traits::inference::sampling_probs::FilterRule;
 use crate::ops::traits::inference::sampling_scratch::SamplingScratch;
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
@@ -44,6 +46,19 @@ pub(super) fn logits_to_token_into(
     let seq_len = shape[1];
     let vocab_size = shape[2];
     validate_scratch_vocab("logits_to_token", scratch, vocab_size)?;
+    let dtype_code = kernel_dtype_code("logits_to_token", logits.dtype())?;
+    let vocab_size_i32 = kernel_vocab("logits_to_token", vocab_size)?;
+    // Temperature 0 is greedy argmax. Any other value runs the canonical filter.
+    let rule = FilterRule {
+        temperature,
+        top_k,
+        top_p,
+        min_p,
+    };
+    if temperature != 0.0 {
+        rule.check()?;
+    }
+    let top_k_i32 = kernel_top_k(&rule, vocab_size);
 
     let device_index = logits.device().id();
 
@@ -55,21 +70,6 @@ pub(super) fn logits_to_token_into(
     // (only used for non-greedy, but always drawn to avoid branching on
     // host — the kernel ignores it when temperature == 0).
     scratch.draw_random(client, seed)?;
-
-    // Determine dtype code: 0 = F32, 1 = F16, 2 = BF16.
-    let dtype_code: i32 = match logits.dtype() {
-        numr::dtype::DType::F32 => 0,
-        numr::dtype::DType::F16 => 1,
-        numr::dtype::DType::BF16 => 2,
-        other => {
-            return Err(Error::InvalidArgument {
-                arg: "logits",
-                reason: format!(
-                    "logits_to_token: unsupported dtype {other:?}, expected F32/F16/BF16"
-                ),
-            });
-        }
-    };
 
     let block_size = 1024u32;
     // Shared mem: block_size floats for reductions + block_size ints for argmax indices
@@ -88,9 +88,7 @@ pub(super) fn logits_to_token_into(
     let output_ptr = scratch.output.ptr();
     let rand_ptr = scratch.random.ptr();
     let seq_len_i32 = seq_len as i32;
-    let vocab_size_i32 = vocab_size as i32;
     let num_unique_i32 = num_unique as i32;
-    let top_k_i32 = top_k as i32;
 
     unsafe {
         let mut builder = client.stream().launch_builder(&func);

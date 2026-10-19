@@ -1,8 +1,8 @@
 //! Backend parity tests for SamplingOps.
 //!
-//! The CPU result is the reference. The stochastic chain draws a random
-//! value per backend, so those cases pin the draw with `top_k = 1` or a
-//! distribution with one dominant token.
+//! The CPU result is the reference. A seeded draw reads the backend's own
+//! uniform, then checks the token against the CPU probabilities under it.
+//! An unseeded draw checks the token stays inside the CPU kept set.
 
 #![cfg_attr(
     not(any(feature = "wgpu", feature = "cuda")),
@@ -12,6 +12,9 @@
 use super::helpers::*;
 use boostr::ops::traits::inference::sample_seed::SampleSeed;
 use boostr::ops::traits::inference::sampling::SamplingOps;
+use boostr::ops::traits::inference::sampling_probs::{FilterRule, SamplingProbsOps};
+use numr::dtype::DType;
+use numr::ops::AdvancedRandomOps;
 use numr::runtime::Runtime;
 use numr::runtime::cpu::CpuRuntime;
 use numr::tensor::Tensor;
@@ -276,5 +279,214 @@ fn test_apply_sampling_penalties_parity() {
             .apply_sampling_penalties(&logits, &ids_t, &counts_t, 1.3, 0.4, 0.2)
             .unwrap();
         assert_parity_f32(&logits.to_vec::<f32>(), &cpu, "apply_sampling_penalties");
+    });
+}
+
+/// A draw point closer than this to a CDF step is too close to call across backends.
+const DRAW_MARGIN: f32 = 1e-5;
+
+/// Logits whose softmax is `p` up to rounding. Equal entries of `p` give bitwise ties.
+fn log_probs(p: &[f32]) -> Vec<f32> {
+    p.iter().map(|x| x.ln()).collect()
+}
+
+fn rule(temperature: f32, top_k: usize, top_p: f32, min_p: f32) -> FilterRule {
+    FilterRule {
+        temperature,
+        top_k,
+        top_p,
+        min_p,
+    }
+}
+
+/// Rows with ties at the top-k or top-p threshold, each with the rule that hits them.
+fn tie_cases() -> Vec<(&'static str, Vec<f32>, FilterRule)> {
+    let vocab = 1000;
+    let mut wide = logits_data(vocab, 0.6);
+    let mut ranked: Vec<usize> = (0..vocab).collect();
+    ranked.sort_by(|&a, &b| wide[b].total_cmp(&wide[a]));
+    let kth = wide[ranked[4]];
+    for &i in &ranked[5..8] {
+        wide[i] = kth;
+    }
+    vec![
+        (
+            "top-k tie",
+            log_probs(&[0.4, 0.3, 0.3]),
+            rule(1.0, 2, 1.0, 0.0),
+        ),
+        ("large-row top-k tie", wide, rule(1.0, 5, 1.0, 0.0)),
+        (
+            "top-p tie at tau",
+            log_probs(&[0.5, 0.25, 0.25]),
+            rule(1.0, 0, 0.6, 0.0),
+        ),
+        (
+            "top-p before min-p",
+            log_probs(&[0.5, 0.2, 0.15, 0.15]),
+            rule(1.0, 0, 0.65, 0.35),
+        ),
+        (
+            "combined tie",
+            log_probs(&[0.4, 0.3, 0.3, 0.0001]),
+            rule(1.0, 2, 0.9, 0.1),
+        ),
+    ]
+}
+
+/// The CPU canonical probabilities of one logits row.
+fn cpu_probs(data: &[f32], r: FilterRule) -> Vec<f32> {
+    let (client, device) = setup_cpu();
+    let logits = Tensor::<CpuRuntime>::from_slice(data, &[data.len()], &device).unwrap();
+    client.sampling_probs(&logits, &r).unwrap().to_vec::<f32>()
+}
+
+/// The id-order draw over `probs` at uniform `u`, or `None` when `u` lies near a CDF step.
+///
+/// It skips every removed token. Rounding past the end returns the last kept token.
+fn reference_draw(probs: &[f32], u: f32) -> Option<usize> {
+    let total: f32 = probs.iter().sum();
+    let target = u * total;
+    let mut cumsum = 0.0f32;
+    let mut last_kept = 0;
+    for (i, &p) in probs.iter().enumerate() {
+        if p <= 0.0 {
+            continue;
+        }
+        cumsum += p;
+        last_kept = i;
+        if (cumsum - target).abs() < DRAW_MARGIN {
+            return None;
+        }
+        if cumsum > target {
+            return Some(i);
+        }
+    }
+    Some(last_kept)
+}
+
+/// Checks seeded `logits_to_token` on one backend against the CPU probabilities.
+///
+/// Each seed reads the backend's own uniform, so the check holds even when
+/// the backends draw different uniforms for one seed.
+fn check_seeded_tokens<R: Runtime<DType = DType>>(
+    client: &R::Client,
+    device: &R::Device,
+    backend: &str,
+) where
+    R::Client: SamplingOps<R> + AdvancedRandomOps<R>,
+{
+    for (what, data, r) in tie_cases() {
+        let probs = cpu_probs(&data, r);
+        let vocab = data.len();
+        let logits = Tensor::<R>::from_slice(&data, &[1, 1, vocab], device).unwrap();
+        let ids = Tensor::<R>::from_slice(&[0i64], &[1], device).unwrap();
+        let counts = Tensor::<R>::from_slice(&[1i32], &[1], device).unwrap();
+        let mut checked = 0;
+        for counter in 0..64u64 {
+            let seed = SampleSeed::new(11, counter);
+            let u = client
+                .philox_uniform(&[1], seed.key, seed.counter, DType::F32)
+                .unwrap()
+                .to_vec::<f32>()[0];
+            let Some(want) = reference_draw(&probs, u) else {
+                continue;
+            };
+            let token = client
+                .logits_to_token(
+                    &logits,
+                    &ids,
+                    &counts,
+                    0,
+                    1.0,
+                    0.0,
+                    0.0,
+                    r.temperature,
+                    r.top_k,
+                    r.top_p,
+                    r.min_p,
+                    Some(seed),
+                )
+                .unwrap()
+                .to_vec::<i64>()[0];
+            assert_eq!(
+                token, want as i64,
+                "{backend} {what}: seed counter {counter}, u {u}"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 32,
+            "{backend} {what}: only {checked} draws were clear of a step"
+        );
+    }
+}
+
+/// Checks unseeded `sample_token` on one backend stays inside the CPU kept set.
+///
+/// A kept set of at most 4 tokens must also see every token in 64 draws.
+fn check_unseeded_tokens<R: Runtime<DType = DType>>(
+    client: &R::Client,
+    device: &R::Device,
+    backend: &str,
+) where
+    R::Client: SamplingOps<R>,
+{
+    for (what, data, r) in tie_cases() {
+        let probs = cpu_probs(&data, r);
+        let kept: Vec<usize> = (0..probs.len()).filter(|&i| probs[i] > 0.0).collect();
+        let logits = Tensor::<R>::from_slice(&data, &[data.len()], device).unwrap();
+        let mut seen = vec![false; probs.len()];
+        for _ in 0..64 {
+            let token = client
+                .sample_token(&logits, r.temperature, r.top_k, r.top_p, r.min_p)
+                .unwrap() as usize;
+            assert!(
+                kept.contains(&token),
+                "{backend} {what}: token {token} is outside the kept set {kept:?}"
+            );
+            seen[token] = true;
+        }
+        if kept.len() <= 4 {
+            for &i in &kept {
+                assert!(seen[i], "{backend} {what}: kept token {i} never drawn");
+            }
+        }
+    }
+}
+
+#[test]
+fn test_reference_draw_matches_the_tie_rule() {
+    let probs = cpu_probs(&log_probs(&[0.4, 0.3, 0.3]), rule(1.0, 2, 1.0, 0.0));
+    assert!(probs.iter().all(|&p| p > 0.0), "{probs:?}");
+    assert_eq!(reference_draw(&probs, 0.2), Some(0));
+    assert_eq!(reference_draw(&probs, 0.55), Some(1));
+    assert_eq!(reference_draw(&probs, 0.95), Some(2));
+    assert_eq!(reference_draw(&probs, 0.4), None, "0.4 sits on a step");
+}
+
+#[test]
+fn test_logits_to_token_seeded_tie_parity() {
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|client, device| {
+        check_seeded_tokens::<numr::runtime::cuda::CudaRuntime>(&client, &device, "cuda");
+    });
+
+    #[cfg(feature = "wgpu")]
+    with_wgpu_backend(|client, device| {
+        check_seeded_tokens::<numr::runtime::wgpu::WgpuRuntime>(&client, &device, "wgpu");
+    });
+}
+
+#[test]
+fn test_sample_token_tie_parity() {
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|client, device| {
+        check_unseeded_tokens::<numr::runtime::cuda::CudaRuntime>(&client, &device, "cuda");
+    });
+
+    #[cfg(feature = "wgpu")]
+    with_wgpu_backend(|client, device| {
+        check_unseeded_tokens::<numr::runtime::wgpu::WgpuRuntime>(&client, &device, "wgpu");
     });
 }

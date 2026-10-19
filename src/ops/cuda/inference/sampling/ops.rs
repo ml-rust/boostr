@@ -3,12 +3,14 @@
 
 use super::logits_to_token;
 use crate::error::{Error, Result};
+use crate::ops::cuda::inference::sampling_probs::{kernel_dtype_code, kernel_top_k, kernel_vocab};
 use crate::ops::cuda::kernels::{self, SAMPLING_MODULE, SAMPLING_PENALTIES_MODULE};
 use crate::ops::impl_generic::inference::sampling::{
     SamplingLogitsShape, validate_contiguous_arg, validate_sampling_logits, validate_scratch_vocab,
 };
 use crate::ops::traits::inference::sample_seed::SampleSeed;
 use crate::ops::traits::inference::sampling::SamplingOps;
+use crate::ops::traits::inference::sampling_probs::FilterRule;
 use crate::ops::traits::inference::sampling_scratch::SamplingScratch;
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
@@ -89,7 +91,10 @@ impl SamplingOps<CudaRuntime> for CudaClient {
         let scratch = SamplingScratch::new(vocab_size, logits.device())?;
         self.sample_token_into(logits, temperature, top_k, top_p, min_p, &scratch)?;
         let result: Vec<i64> = scratch.output.to_vec();
-        Ok(result[0] as u32)
+        let token = result.first().ok_or_else(|| Error::KernelError {
+            reason: "sample_token: the kernel wrote no token".to_string(),
+        })?;
+        Ok(*token as u32)
     }
 
     fn sample_token_into(
@@ -104,6 +109,16 @@ impl SamplingOps<CudaRuntime> for CudaClient {
         validate_sampling_logits("sample_token", logits, SamplingLogitsShape::Vocab)?;
         let vocab_size = logits.shape()[0];
         validate_scratch_vocab("sample_token", scratch, vocab_size)?;
+        let rule = FilterRule {
+            temperature,
+            top_k,
+            top_p,
+            min_p,
+        };
+        rule.check()?;
+        let dtype_code = kernel_dtype_code("sample_token", logits.dtype())?;
+        let vocab_size_i32 = kernel_vocab("sample_token", vocab_size)?;
+        let top_k_i32 = kernel_top_k(&rule, vocab_size);
 
         let device = logits.device();
         let device_index = device.id();
@@ -115,7 +130,7 @@ impl SamplingOps<CudaRuntime> for CudaClient {
         scratch.draw_random(self, None)?;
 
         let block_size = 1024u32;
-        // shared mem: only block_size floats for reductions
+        // Shared memory holds one float per thread for the reductions.
         let shared_mem = (block_size as usize * 4) as u32;
 
         let cfg = LaunchConfig {
@@ -126,8 +141,6 @@ impl SamplingOps<CudaRuntime> for CudaClient {
 
         let logits_ptr = logits.ptr();
         let probs_ptr = scratch.probs.ptr();
-        let vocab_size_i32 = vocab_size as i32;
-        let top_k_i32 = top_k as i32;
         let rand_ptr = scratch.random.ptr();
         let output_ptr = scratch.output.ptr();
 
@@ -142,6 +155,7 @@ impl SamplingOps<CudaRuntime> for CudaClient {
             builder.arg(&min_p);
             builder.arg(&rand_ptr);
             builder.arg(&output_ptr);
+            builder.arg(&dtype_code);
             builder.launch(cfg).map_err(|e| Error::KernelError {
                 reason: format!("sample_token_kernel launch failed: {:?}", e),
             })?;

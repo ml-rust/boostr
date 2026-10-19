@@ -411,6 +411,12 @@ fn compile_cuda_kernels() {
         ),
         k!(
             "src/ops/cuda/kernels/inference",
+            "sampling_probs.cu",
+            "sm_75",
+            true
+        ),
+        k!(
+            "src/ops/cuda/kernels/inference",
             "grammar_dfa.cu",
             "sm_75",
             true

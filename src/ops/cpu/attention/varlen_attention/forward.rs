@@ -5,14 +5,14 @@ use crate::error::Result;
 use numr::runtime::cpu::CpuRuntime;
 use numr::tensor::Tensor;
 
+/// Inputs are contiguous F32. `cu_q` and `cu_k` are checked host offsets.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn varlen_attention_fwd_cpu(
     q: &Tensor<CpuRuntime>,
     k: &Tensor<CpuRuntime>,
     v: &Tensor<CpuRuntime>,
-    cu_seqlens_q: &Tensor<CpuRuntime>,
-    cu_seqlens_k: &Tensor<CpuRuntime>,
-    batch_size: usize,
+    cu_q: &[i32],
+    cu_k: &[i32],
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
@@ -22,15 +22,14 @@ pub(super) fn varlen_attention_fwd_cpu(
     // For MHA num_kv_heads == num_heads so the ratio is 1 and the mapping is
     // the identity: kv_h = q_h / 1 = q_h.
     let gqa_ratio = num_heads / num_kv_heads;
+    let batch_size = cu_q.len().saturating_sub(1);
 
     let total_tokens_q = q.shape()[0];
     let device = q.device();
 
-    let q_data = q.to_vec::<f32>();
-    let k_data = k.to_vec::<f32>();
-    let v_data = v.to_vec::<f32>();
-    let cu_q = cu_seqlens_q.to_vec::<i32>();
-    let cu_k = cu_seqlens_k.to_vec::<i32>();
+    let q_data = q.try_to_vec::<f32>()?;
+    let k_data = k.try_to_vec::<f32>()?;
+    let v_data = v.try_to_vec::<f32>()?;
 
     let mut out = vec![0.0f32; total_tokens_q * num_heads * head_dim];
     let mut lse = vec![0.0f32; total_tokens_q * num_heads];

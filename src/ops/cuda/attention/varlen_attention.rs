@@ -10,6 +10,7 @@
 
 use crate::error::Result;
 use crate::ops::traits::VarLenAttentionOps;
+use crate::ops::traits::attention::packed_segments::validate_host_cu_seqlens;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
@@ -59,6 +60,8 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
         lse: &Tensor<CudaRuntime>,
         cu_seqlens_q: &Tensor<CudaRuntime>,
         cu_seqlens_k: &Tensor<CudaRuntime>,
+        host_cu_seqlens_q: &[i32],
+        host_cu_seqlens_k: &[i32],
         batch_size: usize,
         num_heads: usize,
         num_kv_heads: usize,
@@ -71,6 +74,12 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
         Tensor<CudaRuntime>,
         Tensor<CudaRuntime>,
     )> {
+        // The kernels read the device offsets. The host copies are checked
+        // against the batch shape so a mismatched pair fails before launch.
+        let tokens = |t: &Tensor<_>| t.shape().first().copied().unwrap_or(0);
+        let (total_q, total_k) = (tokens(q), tokens(k));
+        validate_host_cu_seqlens("host_cu_seqlens_q", host_cu_seqlens_q, batch_size, total_q)?;
+        validate_host_cu_seqlens("host_cu_seqlens_k", host_cu_seqlens_k, batch_size, total_k)?;
         varlen_attention_bwd_impl(
             self,
             dout,

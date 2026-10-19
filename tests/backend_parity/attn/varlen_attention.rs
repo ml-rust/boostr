@@ -148,6 +148,8 @@ fn test_varlen_attention_bwd_parity() {
             &lse,
             &cu_seqlens_q,
             &cu_seqlens_k,
+            &cu_data,
+            &cu_data,
             batch_size,
             num_heads,
             num_heads, // MHA: num_kv_heads == num_heads
@@ -199,8 +201,8 @@ fn test_varlen_attention_bwd_parity() {
         .unwrap();
         let (dq, dk, dv) = cuda_client
             .varlen_attention_bwd(
-                &dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, &csq, &csk, batch_size, num_heads,
-                num_heads, max_seqlen, max_seqlen, head_dim, false,
+                &dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, &csq, &csk, &cu_data, &cu_data,
+                batch_size, num_heads, num_heads, max_seqlen, max_seqlen, head_dim, false,
             )
             .unwrap();
         assert_parity_f32_relaxed(
@@ -258,8 +260,8 @@ fn test_varlen_attention_bwd_parity() {
         .unwrap();
         let (dq, dk, dv) = wgpu_client
             .varlen_attention_bwd(
-                &dout_w, &q_w, &k_w, &v_w, &out_w, &lse_w, &csq, &csk, batch_size, num_heads,
-                num_heads, max_seqlen, max_seqlen, head_dim, false,
+                &dout_w, &q_w, &k_w, &v_w, &out_w, &lse_w, &csq, &csk, &cu_data, &cu_data,
+                batch_size, num_heads, num_heads, max_seqlen, max_seqlen, head_dim, false,
             )
             .unwrap();
         assert_parity_f32_relaxed(
@@ -676,6 +678,8 @@ fn test_varlen_causal_unequal_seqlens_bwd_reaches_all_keys() {
             &lse,
             &cu_seqlens_q,
             &cu_seqlens_k,
+            &cu_q_data,
+            &cu_k_data,
             batch_size,
             num_heads,
             num_heads,
@@ -742,6 +746,8 @@ fn test_varlen_causal_unequal_seqlens_bwd_reaches_all_keys() {
                 &lse_c,
                 &csq,
                 &csk,
+                &cu_q_data,
+                &cu_k_data,
                 batch_size,
                 num_heads,
                 num_heads,

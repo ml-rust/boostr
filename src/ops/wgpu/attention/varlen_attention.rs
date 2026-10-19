@@ -6,6 +6,7 @@
 use crate::error::{Error, Result};
 use crate::ops::impl_generic::attention::{StandardAttnConfig, standard_attention_bwd};
 use crate::ops::traits::VarLenAttentionOps;
+use crate::ops::traits::attention::packed_segments::validate_host_cu_seqlens;
 use numr::dtype::DType;
 use numr::ops::ShapeOps;
 use numr::runtime::wgpu::{WgpuClient, WgpuRuntime, get_buffer};
@@ -225,8 +226,10 @@ impl VarLenAttentionOps<WgpuRuntime> for WgpuClient {
         v: &Tensor<WgpuRuntime>,
         output: &Tensor<WgpuRuntime>,
         _lse: &Tensor<WgpuRuntime>,
-        cu_seqlens_q: &Tensor<WgpuRuntime>,
-        cu_seqlens_k: &Tensor<WgpuRuntime>,
+        _cu_seqlens_q: &Tensor<WgpuRuntime>,
+        _cu_seqlens_k: &Tensor<WgpuRuntime>,
+        host_cu_seqlens_q: &[i32],
+        host_cu_seqlens_k: &[i32],
         batch_size: usize,
         num_heads: usize,
         num_kv_heads: usize,
@@ -246,11 +249,14 @@ impl VarLenAttentionOps<WgpuRuntime> for WgpuClient {
 
         // Each packed sequence is sliced out, reshaped to the dense
         // `[1, H, s, D]` layout, and run through the shared standard-attention
-        // backward (same algorithm as every other backend). The cu_seqlens are
-        // small i32 offset tables — reading them host-side is metadata access,
-        // not a GPU↔CPU transfer of the attention payload.
-        let cu_q = cu_seqlens_q.to_vec::<i32>();
-        let cu_k = cu_seqlens_k.to_vec::<i32>();
+        // backward (same algorithm as every other backend). The slice bounds
+        // come from the host offsets, so nothing is read back from the device.
+        let tokens = |t: &Tensor<_>| t.shape().first().copied().unwrap_or(0);
+        let (total_q, total_k) = (tokens(q), tokens(k));
+        validate_host_cu_seqlens("host_cu_seqlens_q", host_cu_seqlens_q, batch_size, total_q)?;
+        validate_host_cu_seqlens("host_cu_seqlens_k", host_cu_seqlens_k, batch_size, total_k)?;
+        let cu_q = host_cu_seqlens_q;
+        let cu_k = host_cu_seqlens_k;
         let d = head_dim;
 
         let mut dq_parts = Vec::with_capacity(batch_size);
@@ -262,7 +268,19 @@ impl VarLenAttentionOps<WgpuRuntime> for WgpuClient {
             let s_q = cu_q[b + 1] as usize - sq_start;
             let sk_start = cu_k[b] as usize;
             let s_k = cu_k[b + 1] as usize - sk_start;
+            // One empty side gives zero gradients on the other side's tokens.
+            // Pushing them keeps every token range present in the concatenation.
             if s_q == 0 || s_k == 0 {
+                let device = q.device();
+                if s_q > 0 {
+                    let dq_shape = [s_q, num_heads, d];
+                    dq_parts.push(Tensor::<WgpuRuntime>::zeros(&dq_shape, DType::F32, device)?);
+                }
+                if s_k > 0 {
+                    let kv_shape = [s_k, num_kv_heads, d];
+                    dk_parts.push(Tensor::<WgpuRuntime>::zeros(&kv_shape, DType::F32, device)?);
+                    dv_parts.push(Tensor::<WgpuRuntime>::zeros(&kv_shape, DType::F32, device)?);
+                }
                 continue;
             }
 

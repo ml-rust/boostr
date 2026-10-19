@@ -9,7 +9,7 @@ pub mod training;
 pub use architecture::{GatedDeltaNetOps, GdnGrads, MoEOps};
 pub use attention::{
     AttentionOps, AttnOutLayout, FlashAlibiOps, FlashAttentionOps, FusedQkvOps, KvSeqLen, MlaOps,
-    PagedAttentionOps, VarLenAttentionOps,
+    PackedSegments, PagedAttentionOps, VarLenAttentionOps,
 };
 pub use cache::{Int4GroupSize, KvCacheOps, KvCacheQuantOps, KvQuantMode};
 pub use inference::{

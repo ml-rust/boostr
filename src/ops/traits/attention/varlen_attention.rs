@@ -6,8 +6,8 @@ use numr::tensor::Tensor;
 
 /// Variable-length Flash Attention — packed sequences with cu_seqlens indexing
 ///
-/// Eliminates padding waste by packing sequences of different lengths into
-/// a single 1D buffer. 30-50% memory savings for variable-length batches.
+/// Packs sequences of different lengths into one buffer with no padding.
+/// The softmax scale is fixed at `1 / sqrt(head_dim)`.
 ///
 /// Supports both MHA (`num_kv_heads == num_heads`) and GQA
 /// (`num_kv_heads < num_heads`, where `num_heads % num_kv_heads == 0`).
@@ -64,6 +64,11 @@ pub trait VarLenAttentionOps<R: Runtime> {
     /// `[total_tokens_k, num_kv_heads, head_dim]`.  For MHA set
     /// `num_kv_heads == num_heads`.  `num_heads % num_kv_heads` must be zero.
     ///
+    /// `host_cu_seqlens_q` and `host_cu_seqlens_k` are host copies of the two
+    /// offset tensors and must hold the same values. A backend that loops per
+    /// segment on the host reads them, so it never reads offsets from the
+    /// device. [`super::PackedSegments`] carries both copies.
+    ///
     /// Returns `(dq, dk, dv)`.
     fn varlen_attention_bwd(
         &self,
@@ -75,6 +80,8 @@ pub trait VarLenAttentionOps<R: Runtime> {
         lse: &Tensor<R>,
         cu_seqlens_q: &Tensor<R>,
         cu_seqlens_k: &Tensor<R>,
+        host_cu_seqlens_q: &[i32],
+        host_cu_seqlens_k: &[i32],
         batch_size: usize,
         num_heads: usize,
         num_kv_heads: usize,

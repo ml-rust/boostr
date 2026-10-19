@@ -5,6 +5,7 @@ use crate::error::Result;
 use numr::runtime::cpu::CpuRuntime;
 use numr::tensor::Tensor;
 
+/// Inputs are contiguous F32, `lse` included. `cu_q` and `cu_k` are checked host offsets.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn varlen_attention_bwd_cpu(
     dout: &Tensor<CpuRuntime>,
@@ -13,9 +14,8 @@ pub(super) fn varlen_attention_bwd_cpu(
     v: &Tensor<CpuRuntime>,
     output: &Tensor<CpuRuntime>,
     lse: &Tensor<CpuRuntime>,
-    cu_seqlens_q: &Tensor<CpuRuntime>,
-    cu_seqlens_k: &Tensor<CpuRuntime>,
-    batch_size: usize,
+    cu_q: &[i32],
+    cu_k: &[i32],
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
@@ -25,19 +25,18 @@ pub(super) fn varlen_attention_bwd_cpu(
     // dK and dV accumulate contributions from all Q heads mapping to the same
     // KV head — the serial += across the h-loop is the scalar analog of atomicAdd.
     let gqa_ratio = num_heads / num_kv_heads;
+    let batch_size = cu_q.len().saturating_sub(1);
 
     let total_tokens_q = q.shape()[0];
     let total_tokens_k = k.shape()[0];
     let device = q.device();
 
-    let q_data = q.to_vec::<f32>();
-    let k_data = k.to_vec::<f32>();
-    let v_data = v.to_vec::<f32>();
-    let o_data = output.to_vec::<f32>();
-    let lse_data = lse.to_vec::<f32>();
-    let do_data = dout.to_vec::<f32>();
-    let cu_q = cu_seqlens_q.to_vec::<i32>();
-    let cu_k = cu_seqlens_k.to_vec::<i32>();
+    let q_data = q.try_to_vec::<f32>()?;
+    let k_data = k.try_to_vec::<f32>()?;
+    let v_data = v.try_to_vec::<f32>()?;
+    let o_data = output.try_to_vec::<f32>()?;
+    let lse_data = lse.try_to_vec::<f32>()?;
+    let do_data = dout.try_to_vec::<f32>()?;
 
     let mut dq = vec![0.0f32; total_tokens_q * num_heads * head_dim];
     let mut dk = vec![0.0f32; total_tokens_k * num_kv_heads * head_dim];
@@ -161,7 +160,22 @@ mod tests {
 
         let (dq, dk, dv) = client
             .varlen_attention_bwd(
-                &dout, &q, &k, &v, &out, &lse, &cu, &cu, 2, num_heads, num_heads, 3, 3, head_dim,
+                &dout,
+                &q,
+                &k,
+                &v,
+                &out,
+                &lse,
+                &cu,
+                &cu,
+                &cu_seqlens,
+                &cu_seqlens,
+                2,
+                num_heads,
+                num_heads,
+                3,
+                3,
+                head_dim,
                 false,
             )
             .unwrap();
@@ -287,6 +301,8 @@ mod tests {
                 &lse_gqa,
                 &cu,
                 &cu,
+                &cu_seqlens,
+                &cu_seqlens,
                 batch_size,
                 num_heads,
                 num_kv_heads,
@@ -306,8 +322,23 @@ mod tests {
             .unwrap();
         let (dq_exp, dk_exp, dv_exp) = client
             .varlen_attention_bwd(
-                &dout, &q, &k_exp, &v_exp, &out_exp, &lse_exp, &cu, &cu, batch_size, num_heads,
-                num_heads, max_seqlen, max_seqlen, head_dim, false,
+                &dout,
+                &q,
+                &k_exp,
+                &v_exp,
+                &out_exp,
+                &lse_exp,
+                &cu,
+                &cu,
+                &cu_seqlens,
+                &cu_seqlens,
+                batch_size,
+                num_heads,
+                num_heads,
+                max_seqlen,
+                max_seqlen,
+                head_dim,
+                false,
             )
             .unwrap();
 

@@ -12,4 +12,5 @@ pub mod mqa_gqa_attention;
 pub mod paged_attention;
 pub mod paged_decode_per_row;
 pub mod paged_decode_split;
+pub mod var_varlen_attention;
 pub mod varlen_attention;

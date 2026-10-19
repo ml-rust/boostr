@@ -9,6 +9,7 @@
 //! - Decoupled RoPE: applied only to q_pe and k_pe portions
 //! - Attention: Q=[q_nope, q_pe], K=[k_nope, k_pe], V=v
 
+mod alias;
 mod config;
 mod model;
 mod parameter_identity;

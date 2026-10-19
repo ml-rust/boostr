@@ -1,345 +1,147 @@
-//! Backend parity tests for SpeculativeOps.
+//! Backend parity for `SpeculativeOps::speculative_verify`.
+//!
+//! Every probability is a multiple of 2^-16, so every running sum is exact in F32.
+//! The uniforms are inputs. So each backend must return the CPU's `(m, next)` exactly.
 
 use super::helpers::*;
 use boostr::ops::traits::inference::speculative::SpeculativeOps;
+use numr::dtype::DType;
+use numr::ops::AdvancedRandomOps;
+use numr::runtime::Runtime;
 use numr::runtime::cpu::CpuRuntime;
 use numr::tensor::Tensor;
 
-/// Create test probability distributions that are valid (sum to ~1 per position).
-fn make_test_probs(
-    batch: usize,
-    positions: usize,
-    vocab: usize,
-    device: &numr::runtime::cpu::CpuDevice,
-    offset: f32,
-) -> Tensor<CpuRuntime> {
-    let n = batch * positions * vocab;
-    let mut data: Vec<f32> = (0..n)
-        .map(|i| ((i as f32 * 0.1 + offset).sin() * 0.5 + 1.0).max(0.01))
-        .collect();
+/// One verify call on host data.
+struct Case {
+    name: &'static str,
+    /// `[B, K, V]`.
+    bkv: [usize; 3],
+    p: Vec<f32>,
+    q: Option<Vec<f32>>,
+    d: Vec<i32>,
+    u: Vec<f32>,
+}
 
-    // Normalize each [vocab_size] slice to sum to 1
-    for b in 0..batch {
-        for p in 0..positions {
-            let start = (b * positions + p) * vocab;
-            let end = start + vocab;
-            let sum: f32 = data[start..end].iter().sum();
-            for val in &mut data[start..end] {
-                *val /= sum;
+const UNIT: f32 = 1.0 / 65536.0;
+
+/// The draft id of run `r` at position `i`.
+fn draft_id(r: usize, i: usize, v: usize, salt: usize) -> i32 {
+    ((r * 31 + i * 17 + salt) % v) as i32
+}
+
+/// `rows` dyadic rows of `v` entries. Even runs get a spike of 1/2 on the draft id.
+fn rows(b: usize, n: usize, k: usize, v: usize, salt: usize, spike: f32) -> Vec<f32> {
+    let mut out = vec![0.0f32; b * n * v];
+    for r in 0..b {
+        for i in 0..n {
+            let base = (r * n + i) * v;
+            for j in 0..v {
+                out[base + j] = ((j * 7 + i * 3 + r * 5 + salt) % 9) as f32 * UNIT;
+            }
+            if i < k && r % 2 == 0 {
+                out[base + draft_id(r, i, v, 0) as usize] = spike;
             }
         }
     }
-
-    Tensor::<CpuRuntime>::from_slice(&data, &[batch, positions, vocab], device).unwrap()
+    out
 }
 
-#[test]
-fn test_verify_speculative_tokens_parity() {
-    let (cpu_client, cpu_device) = setup_cpu();
-    let batch = 2;
-    let k = 4;
-    let vocab = 32;
-    let seed = 42u64;
-
-    let draft_probs = make_test_probs(batch, k, vocab, &cpu_device, 0.0);
-    let target_probs = make_test_probs(batch, k + 1, vocab, &cpu_device, 0.3);
-
-    // Create draft tokens (pick token with highest draft prob for high acceptance)
-    let dp_data = draft_probs.to_vec::<f32>();
-    let mut tokens = Vec::new();
-    for b in 0..batch {
-        for p in 0..k {
-            let off = (b * k + p) * vocab;
-            let best = dp_data[off..off + vocab]
-                .iter()
-                .enumerate()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                .unwrap()
-                .0;
-            tokens.push(best as i32);
-        }
-    }
-    let draft_tokens = Tensor::<CpuRuntime>::from_slice(&tokens, &[batch, k], &cpu_device).unwrap();
-
-    let cpu_results = cpu_client
-        .verify_speculative_tokens(&draft_probs, &target_probs, &draft_tokens, seed)
-        .unwrap();
-
-    assert_eq!(cpu_results.len(), batch);
-    for (b, result) in cpu_results.iter().enumerate() {
-        assert!(
-            result.num_accepted <= k,
-            "batch {}: accepted {} > K={}",
-            b,
-            result.num_accepted,
-            k
-        );
-        assert_eq!(result.accepted_tokens.len(), result.num_accepted);
-        assert!(
-            (result.bonus_token as usize) < vocab,
-            "batch {}: bonus_token {} >= vocab {}",
-            b,
-            result.bonus_token,
-            vocab
-        );
-    }
-
-    #[cfg(feature = "cuda")]
-    with_cuda_backend(|cuda_client, cuda_device| {
-        use boostr::ops::traits::inference::speculative::SpeculativeOps as _;
-
-        let dp_c = Tensor::from_slice(
-            &draft_probs.to_vec::<f32>(),
-            &[batch, k, vocab],
-            &cuda_device,
-        )
-        .unwrap();
-        let tp_c = Tensor::from_slice(
-            &target_probs.to_vec::<f32>(),
-            &[batch, k + 1, vocab],
-            &cuda_device,
-        )
-        .unwrap();
-        let dt_c = Tensor::from_slice(&tokens, &[batch, k], &cuda_device).unwrap();
-
-        let cuda_results = cuda_client
-            .verify_speculative_tokens(&dp_c, &tp_c, &dt_c, seed)
-            .unwrap();
-
-        assert_eq!(cpu_results.len(), cuda_results.len());
-        // All backends use philox_uniform — exact parity expected
-        for (b, (cpu_r, cuda_r)) in cpu_results.iter().zip(cuda_results.iter()).enumerate() {
-            assert_eq!(
-                cpu_r.num_accepted, cuda_r.num_accepted,
-                "CUDA batch {}: num_accepted mismatch",
-                b
-            );
-            assert_eq!(
-                cpu_r.accepted_tokens, cuda_r.accepted_tokens,
-                "CUDA batch {}: accepted_tokens mismatch",
-                b
-            );
-            assert_eq!(
-                cpu_r.bonus_token, cuda_r.bonus_token,
-                "CUDA batch {}: bonus_token mismatch",
-                b
-            );
-        }
-    });
-
-    #[cfg(feature = "wgpu")]
-    with_wgpu_backend(|wgpu_client, wgpu_device| {
-        use boostr::ops::traits::inference::speculative::SpeculativeOps as _;
-
-        let dp_w = Tensor::from_slice(
-            &draft_probs.to_vec::<f32>(),
-            &[batch, k, vocab],
-            &wgpu_device,
-        )
-        .unwrap();
-        let tp_w = Tensor::from_slice(
-            &target_probs.to_vec::<f32>(),
-            &[batch, k + 1, vocab],
-            &wgpu_device,
-        )
-        .unwrap();
-        let dt_w = Tensor::from_slice(&tokens, &[batch, k], &wgpu_device).unwrap();
-
-        let wgpu_results = wgpu_client
-            .verify_speculative_tokens(&dp_w, &tp_w, &dt_w, seed)
-            .unwrap();
-
-        // All backends use philox_uniform — exact parity expected
-        for (b, (cpu_r, wgpu_r)) in cpu_results.iter().zip(wgpu_results.iter()).enumerate() {
-            assert_eq!(
-                cpu_r.num_accepted, wgpu_r.num_accepted,
-                "WGPU batch {}: num_accepted mismatch",
-                b
-            );
-            assert_eq!(
-                cpu_r.accepted_tokens, wgpu_r.accepted_tokens,
-                "WGPU batch {}: accepted_tokens mismatch",
-                b
-            );
-            assert_eq!(
-                cpu_r.bonus_token, wgpu_r.bonus_token,
-                "WGPU batch {}: bonus_token mismatch",
-                b
-            );
-        }
-    });
-}
-
-#[test]
-fn test_compute_acceptance_probs_parity() {
-    let (cpu_client, cpu_device) = setup_cpu();
-    let batch = 2;
-    let k = 3;
-    let vocab = 16;
-
-    let draft = make_test_probs(batch, k, vocab, &cpu_device, 0.0);
-    let target = make_test_probs(batch, k, vocab, &cpu_device, 0.5);
-
-    let (acceptance, residual) = cpu_client
-        .compute_acceptance_probs(&draft, &target)
-        .unwrap();
-
-    let cpu_acc_vec = acceptance.to_vec::<f32>();
-    let cpu_res_vec = residual.to_vec::<f32>();
-
-    for (i, &a) in cpu_acc_vec.iter().enumerate() {
-        assert!(
-            (0.0..=1.0 + 1e-6).contains(&a),
-            "acceptance[{}]={} not in [0,1]",
-            i,
-            a
-        );
-    }
-    for (i, &r) in cpu_res_vec.iter().enumerate() {
-        assert!(r >= -1e-7, "residual[{}]={} is negative", i, r);
-    }
-
-    #[cfg(feature = "cuda")]
-    with_cuda_backend(|cuda_client, cuda_device| {
-        use boostr::ops::traits::inference::speculative::SpeculativeOps as _;
-
-        let dp_c =
-            Tensor::from_slice(&draft.to_vec::<f32>(), &[batch, k, vocab], &cuda_device).unwrap();
-        let tp_c =
-            Tensor::from_slice(&target.to_vec::<f32>(), &[batch, k, vocab], &cuda_device).unwrap();
-
-        let (cuda_acc, cuda_res) = cuda_client.compute_acceptance_probs(&dp_c, &tp_c).unwrap();
-
-        assert_parity_f32(
-            &cuda_acc.to_vec::<f32>(),
-            &cpu_acc_vec,
-            "compute_acceptance_probs CUDA vs CPU",
-        );
-        assert_parity_f32(
-            &cuda_res.to_vec::<f32>(),
-            &cpu_res_vec,
-            "compute_residual_probs CUDA vs CPU",
-        );
-    });
-
-    #[cfg(feature = "wgpu")]
-    with_wgpu_backend(|wgpu_client, wgpu_device| {
-        use boostr::ops::traits::inference::speculative::SpeculativeOps as _;
-
-        let dp_w =
-            Tensor::from_slice(&draft.to_vec::<f32>(), &[batch, k, vocab], &wgpu_device).unwrap();
-        let tp_w =
-            Tensor::from_slice(&target.to_vec::<f32>(), &[batch, k, vocab], &wgpu_device).unwrap();
-
-        let (wgpu_acc, wgpu_res) = wgpu_client.compute_acceptance_probs(&dp_w, &tp_w).unwrap();
-
-        assert_parity_f32(
-            &wgpu_acc.to_vec::<f32>(),
-            &cpu_acc_vec,
-            "compute_acceptance_probs WGPU vs CPU",
-        );
-        assert_parity_f32(
-            &wgpu_res.to_vec::<f32>(),
-            &cpu_res_vec,
-            "compute_residual_probs WGPU vs CPU",
-        );
-    });
-}
-
-#[test]
-fn test_compute_expected_tokens_parity() {
-    let (cpu_client, cpu_device) = setup_cpu();
-    let batch = 4;
-    let k = 6;
-
-    let rates: Vec<f32> = (0..batch * k)
-        .map(|i| 0.5 + 0.4 * (i as f32 * 0.3).sin())
+fn case(name: &'static str, [b, k, v]: [usize; 3], general: bool, key: u64) -> Case {
+    let (client, _) = setup_cpu();
+    let u = client
+        .philox_uniform(&[b, k + 1], key, 0, DType::F32)
+        .expect("uniforms")
+        .to_vec::<f32>();
+    let d = (0..b * k)
+        .map(|x| draft_id(x / k.max(1), x % k.max(1), v, 0))
         .collect();
-    let rates_tensor = Tensor::<CpuRuntime>::from_slice(&rates, &[batch, k], &cpu_device).unwrap();
-
-    let cpu_expected = cpu_client.compute_expected_tokens(&rates_tensor).unwrap();
-    let cpu_vec = cpu_expected.to_vec::<f32>();
-
-    assert_eq!(cpu_vec.len(), batch);
-
-    // Analytical check for uniform rate=0.8 case
-    let uniform_rates: Vec<f32> = vec![0.8; batch * k];
-    let uniform_tensor =
-        Tensor::<CpuRuntime>::from_slice(&uniform_rates, &[batch, k], &cpu_device).unwrap();
-    let uniform_expected = cpu_client.compute_expected_tokens(&uniform_tensor).unwrap();
-    let uniform_vec = uniform_expected.to_vec::<f32>();
-    let analytical = (1..=k).fold(0.0f32, |acc, i| acc + 0.8f32.powi(i as i32)) + 1.0;
-    for (b, &val) in uniform_vec.iter().enumerate() {
-        assert!(
-            (val - analytical).abs() < 1e-4,
-            "batch {}: expected {} got {}",
-            b,
-            analytical,
-            val
-        );
+    Case {
+        name,
+        bkv: [b, k, v],
+        p: rows(b, k + 1, k, v, 1, 0.5),
+        q: general.then(|| rows(b, k, k, v, 4, 0.25)),
+        d,
+        u,
     }
+}
 
-    #[cfg(feature = "cuda")]
-    with_cuda_backend(|cuda_client, cuda_device| {
-        use boostr::ops::traits::inference::speculative::SpeculativeOps as _;
+fn cases() -> Vec<Case> {
+    let mut out_of_range = case("out of range drafts", [4, 3, 32], false, 6);
+    out_of_range.d[1] = 35;
+    out_of_range.d[3] = -1;
+    out_of_range.d[7] = i32::MAX;
+    vec![
+        case("one-hot", [8, 4, 32], false, 1),
+        case("general", [8, 4, 32], true, 2),
+        case("one-hot wide vocab", [4, 3, 5003], false, 3),
+        case("general wide vocab", [4, 3, 5003], true, 4),
+        case("zero drafts", [4, 0, 5003], false, 5),
+        out_of_range,
+    ]
+}
 
-        let rates_c = Tensor::from_slice(&rates, &[batch, k], &cuda_device).unwrap();
-        let cuda_expected = cuda_client.compute_expected_tokens(&rates_c).unwrap();
-
-        assert_parity_f32(
-            &cuda_expected.to_vec::<f32>(),
-            &cpu_vec,
-            "compute_expected_tokens CUDA vs CPU",
-        );
-    });
-
-    #[cfg(feature = "wgpu")]
-    with_wgpu_backend(|wgpu_client, wgpu_device| {
-        use boostr::ops::traits::inference::speculative::SpeculativeOps as _;
-
-        let rates_w = Tensor::from_slice(&rates, &[batch, k], &wgpu_device).unwrap();
-        let wgpu_expected = wgpu_client.compute_expected_tokens(&rates_w).unwrap();
-
-        assert_parity_f32(
-            &wgpu_expected.to_vec::<f32>(),
-            &cpu_vec,
-            "compute_expected_tokens WGPU vs CPU",
-        );
-    });
+fn run<R: Runtime<DType = numr::dtype::DType>, C: SpeculativeOps<R>>(
+    client: &C,
+    device: &R::Device,
+    c: &Case,
+) -> Vec<i32> {
+    let [b, k, v] = c.bkv;
+    let p = Tensor::<R>::from_slice(&c.p, &[b, k + 1, v], device).expect("target_probs");
+    let q =
+        c.q.as_ref()
+            .map(|q| Tensor::<R>::from_slice(q, &[b, k, v], device).expect("draft_probs"));
+    let d = Tensor::<R>::from_slice(&c.d, &[b, k], device).expect("draft_tokens");
+    let u = Tensor::<R>::from_slice(&c.u, &[b, k + 1], device).expect("uniforms");
+    client
+        .speculative_verify(&p, q.as_ref(), &d, &u)
+        .unwrap_or_else(|e| panic!("{}: {e}", c.name))
+        .to_vec::<i32>()
 }
 
 #[test]
-fn test_verify_deterministic() {
+fn test_speculative_verify_parity() {
     let (cpu_client, cpu_device) = setup_cpu();
-    let batch = 2;
-    let k = 4;
-    let vocab = 32;
-    let seed = 12345u64;
+    let cases = cases();
+    let reference: Vec<Vec<i32>> = cases
+        .iter()
+        .map(|c| run::<CpuRuntime, _>(&cpu_client, &cpu_device, c))
+        .collect();
 
-    let draft_probs = make_test_probs(batch, k, vocab, &cpu_device, 0.0);
-    let target_probs = make_test_probs(batch, k + 1, vocab, &cpu_device, 0.3);
-    let tokens: Vec<i32> = (0..batch * k).map(|i| (i % vocab) as i32).collect();
-    let draft_tokens = Tensor::<CpuRuntime>::from_slice(&tokens, &[batch, k], &cpu_device).unwrap();
-
-    let r1 = cpu_client
-        .verify_speculative_tokens(&draft_probs, &target_probs, &draft_tokens, seed)
-        .unwrap();
-    let r2 = cpu_client
-        .verify_speculative_tokens(&draft_probs, &target_probs, &draft_tokens, seed)
-        .unwrap();
-
-    for (a, b) in r1.iter().zip(r2.iter()) {
-        assert_eq!(
-            a.num_accepted, b.num_accepted,
-            "determinism: num_accepted differs"
-        );
-        assert_eq!(
-            a.accepted_tokens, b.accepted_tokens,
-            "determinism: accepted_tokens differ"
-        );
-        assert_eq!(
-            a.bonus_token, b.bonus_token,
-            "determinism: bonus_token differs"
-        );
+    let (mut any_accept, mut any_reject) = (false, false);
+    for (c, out) in cases.iter().zip(&reference) {
+        let [b, k, v] = c.bkv;
+        assert_eq!(out.len(), b * 2, "{}: result shape", c.name);
+        for r in 0..b {
+            let (m, next) = (out[2 * r] as usize, out[2 * r + 1] as usize);
+            assert!(m <= k, "{} row {r}: m {m} > K {k}", c.name);
+            assert!(next < v, "{} row {r}: next {next} >= V {v}", c.name);
+            assert!(
+                c.p[(r * (k + 1) + m) * v + next] > 0.0,
+                "{} row {r}: next {next} has no target mass",
+                c.name
+            );
+            any_accept |= m > 0;
+            any_reject |= m < k;
+        }
     }
+    assert!(
+        any_accept && any_reject,
+        "the cases must cover accepts and rejects"
+    );
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|client, device| {
+        for (c, want) in cases.iter().zip(&reference) {
+            let got = run::<numr::runtime::cuda::CudaRuntime, _>(&client, &device, c);
+            assert_eq!(&got, want, "CUDA vs CPU: {}", c.name);
+        }
+    });
+
+    #[cfg(feature = "wgpu")]
+    with_wgpu_backend(|client, device| {
+        for (c, want) in cases.iter().zip(&reference) {
+            let got = run::<numr::runtime::wgpu::WgpuRuntime, _>(&client, &device, c);
+            assert_eq!(&got, want, "WGPU vs CPU: {}", c.name);
+        }
+    });
 }

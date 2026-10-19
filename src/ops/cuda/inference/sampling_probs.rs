@@ -57,7 +57,7 @@ pub(crate) fn kernel_dtype_code(op: &'static str, dtype: DType) -> Result<i32> {
 }
 
 /// The power-of-two block size for a row of `vocab` tokens, from 32 to 1024.
-fn block_size(vocab: usize) -> u32 {
+pub(crate) fn block_size(vocab: usize) -> u32 {
     vocab.next_power_of_two().clamp(32, 1024) as u32
 }
 

@@ -1,93 +1,63 @@
-//! Speculative decoding operations trait
+//! Sampled verification for speculative decoding (Leviathan et al., 2023).
 //!
-//! Token-level verification for speculative decoding (Leviathan et al., 2023).
-//! Given draft model probabilities and target model probabilities, determines
-//! which draft tokens to accept and samples a bonus token from the residual
-//! distribution.
+//! One call checks K draft tokens against the target distributions of one step.
+//! The result stays on the device.
 
 use crate::error::Result;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
-/// Result of speculative token verification.
-#[derive(Debug, Clone)]
-pub struct VerificationResult {
-    /// Number of tokens accepted (0..=K)
-    pub num_accepted: usize,
-    /// The accepted token IDs
-    pub accepted_tokens: Vec<u32>,
-    /// Bonus token from residual sampling (always present)
-    pub bonus_token: u32,
-    /// First rejection position (-1 if all accepted)
-    pub first_rejection_pos: i32,
-}
-
-/// Speculative decoding token verification.
+/// Device-side sampled verification of draft tokens.
 ///
-/// Compares draft and target model probability distributions to accept/reject
-/// draft tokens, then samples a bonus token from the residual or next-position
-/// distribution.
-///
-/// This is a sampled-verification kernel set over probabilities. The greedy
-/// `boostr::inference::speculative::SpeculativeGenerator` does not call it.
+/// The output distribution equals the target distribution, whatever the drafter.
+/// The greedy `boostr::inference::speculative::SpeculativeGenerator` does not call it.
 pub trait SpeculativeOps<R: Runtime> {
-    /// Verify draft tokens against target model probabilities.
-    ///
-    /// Implements the acceptance/rejection algorithm:
-    /// - For each draft token t_i at position i:
-    ///   - accept_prob = min(1, p_target(t_i) / p_draft(t_i))
-    ///   - Accept if uniform() < accept_prob, else reject and stop
-    /// - If rejected at position i: sample bonus from max(0, p_target - p_draft)
-    /// - If all accepted: sample bonus from target's K+1 position
+    /// Accepts the longest valid draft prefix and draws the token after it.
     ///
     /// # Layout
     ///
-    /// - `draft_probs`: `[batch, K, vocab_size]` F32 — draft model probabilities
-    /// - `target_probs`: `[batch, K+1, vocab_size]` F32 — target model probabilities
-    /// - `draft_tokens`: `[batch, K]` I32 — draft token IDs
-    /// - `seed`: RNG seed for reproducibility
+    /// - `target_probs`: `[B, K+1, V]` F32. Each row is already filtered and normalized.
+    /// - `draft_probs`: `[B, K, V]` F32, or `None` for a deterministic drafter.
+    ///   `None` means each draft distribution is one-hot on its draft token.
+    /// - `draft_tokens`: `[B, K]` I32 draft token ids. I32 is native on every backend.
+    /// - `uniforms`: `[B, K+1]` F32 draws in `[0, 1)`.
+    ///
+    /// K can be 0. Then the call draws one token from target row 0.
+    ///
+    /// # Algorithm
+    ///
+    /// - Draft `i` is accepted iff `u_i * q_i(d_i) < p_i(d_i)`. No division runs.
+    /// - A draft with `q_i(d_i) == 0` is rejected. The drafter can not emit it.
+    /// - A draft id outside `[0, V)` is rejected. Checking it on the host needs a device read.
+    /// - `m` counts the leading accepted drafts. The scan stops at the first reject.
+    /// - If `m < K`, `next` is drawn from `max(0, p_m - q_m)`, normalized.
+    ///   A one-hot `q_m` zeroes `p_m` at `d_m`. A zero residual falls back to `p_m`.
+    /// - If `m == K`, `next` is drawn from `p_K`.
+    ///
+    /// The single categorical draw always uses `u_K`. No accept test reads `u_K`.
+    /// So the draw is independent of every accept decision.
+    ///
+    /// The draw takes the first id, in id order, whose running sum exceeds `u_K * sum(row)`.
+    /// It never returns a zero-probability id. Float rounding at the tail returns
+    /// the last id with mass.
+    ///
+    /// The caller must keep `uniforms` in `[0, 1)` and give each target row positive mass.
+    /// Checking either on the host needs a device read.
     ///
     /// # Returns
     ///
-    /// One `VerificationResult` per batch element.
-    fn verify_speculative_tokens(
+    /// `[B, 2]` I32. Row `b` holds `(m, next)`. The caller emits
+    /// `d_0 .. d_{m-1}`, then `next`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidArgument` naming the argument for a wrong rank,
+    /// shape or dtype, or for `V` above `2^24`.
+    fn speculative_verify(
         &self,
-        draft_probs: &Tensor<R>,
         target_probs: &Tensor<R>,
+        draft_probs: Option<&Tensor<R>>,
         draft_tokens: &Tensor<R>,
-        seed: u64,
-    ) -> Result<Vec<VerificationResult>>;
-
-    /// Compute acceptance probabilities for analysis/diagnostics.
-    ///
-    /// For each (batch, position, vocab) entry, computes:
-    /// - acceptance_prob = min(1, p_target / p_draft)
-    /// - residual_prob = max(0, p_target - p_draft)
-    ///
-    /// # Layout
-    ///
-    /// - `draft_probs`: `[batch, K, vocab_size]` F32
-    /// - `target_probs`: `[batch, K, vocab_size]` F32
-    ///
-    /// # Returns
-    ///
-    /// `(acceptance_probs, residual_probs)` both `[batch, K, vocab_size]` F32
-    fn compute_acceptance_probs(
-        &self,
-        draft_probs: &Tensor<R>,
-        target_probs: &Tensor<R>,
-    ) -> Result<(Tensor<R>, Tensor<R>)>;
-
-    /// Compute expected tokens per verification step for adaptive depth.
-    ///
-    /// Expected tokens = sum_{i=1}^{K} prod_{j=1}^{i} accept_rate_j + 1 (bonus)
-    ///
-    /// # Layout
-    ///
-    /// - `acceptance_rates`: `[batch, K]` F32 — per-position acceptance rates
-    ///
-    /// # Returns
-    ///
-    /// `[batch]` F32 — expected tokens per batch element
-    fn compute_expected_tokens(&self, acceptance_rates: &Tensor<R>) -> Result<Tensor<R>>;
+        uniforms: &Tensor<R>,
+    ) -> Result<Tensor<R>>;
 }

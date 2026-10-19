@@ -15,7 +15,4 @@ pub use attention::{
     multi_head_attention_impl, scaled_dot_product_attention_impl,
     segmented_scaled_dot_product_attention_impl,
 };
-pub use inference::{
-    HalfLogits, compute_acceptance_probs_impl, compute_expected_tokens_impl,
-    grammar_mask_any_float_impl, verify_speculative_tokens_impl,
-};
+pub use inference::{HalfLogits, grammar_mask_any_float_impl, speculative_verify_impl};

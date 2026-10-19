@@ -20,8 +20,8 @@ pub(super) enum Phase {
 
 /// Speculative generation over a target model and a drafter.
 ///
-/// Without a sampled rule, the output equals plain greedy decoding of the
-/// same model token for token. With [`SpeculativeConfig::sampled_rule`] set,
+/// With a greedy rule, the output equals plain greedy decoding of the same
+/// model token for token, penalties included. With a temperature above 0,
 /// every emitted token follows the target's filtered distribution exactly.
 /// Each [`step`](Self::step) costs one target forward and emits one or more
 /// tokens.
@@ -32,7 +32,7 @@ pub(super) enum Phase {
 /// `numr::random::next_call_seed` value. So `manual_seed` and `with_seed`
 /// make an unseeded run repeatable. Step `s` draws at
 /// [`Draw::for_step`](crate::inference::speculative::Draw::for_step)`(key, s)`.
-/// Two steps never share a Philox counter. The greedy path draws no seed.
+/// Two steps never share a Philox counter. A greedy rule draws no seed.
 ///
 /// # Cache invariant
 ///
@@ -94,7 +94,7 @@ impl<M: SpeculativeModel, D: Drafter> SpeculativeGenerator<M, D> {
     /// Reset the model cache and prefill every prompt token except the last.
     ///
     /// The stats restart from zero. A one-token prompt needs no forward. On
-    /// the sampled path the Philox key is fixed here and the step count
+    /// the sampled path the Philox key is fixed here. The step count
     /// restarts from zero.
     ///
     /// # Errors
@@ -134,7 +134,7 @@ impl<M: SpeculativeModel, D: Drafter> SpeculativeGenerator<M, D> {
         self.prompt_len = prompt.len();
         self.stats = SpeculativeStats::default();
         self.step_index = 0;
-        if let Some(rule) = self.config.sampled_rule() {
+        if let Some(rule) = self.config.sampled_rule().filter(|rule| !rule.is_greedy()) {
             self.key = rule.seed.unwrap_or_else(numr::random::next_call_seed);
         }
         self.phase = Phase::Running;

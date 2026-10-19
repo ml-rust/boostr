@@ -24,8 +24,9 @@ impl<M: SpeculativeModel, D: Drafter> SpeculativeGenerator<M, D> {
     /// is cut at its first id outside the vocabulary. One forward feeds the
     /// last committed token `x` and the drafts `d_1..d_k`. The greedy path
     /// keeps the longest prefix where each draft equals the target's argmax.
-    /// The sampled path accepts drafts by rejection sampling at the
-    /// [`Draw`] of this step. Either path keeps `m` drafts and one next
+    /// With a penalty that argmax runs over penalized logits. The sampled
+    /// path accepts drafts by rejection sampling at the [`Draw`] of this
+    /// step. Either path keeps `m` drafts and one next
     /// token. The step emits `d_1..d_m` and then that token. The output
     /// ends after the first EOS token or at `max_tokens`. With no drafts the
     /// step is one plain decode.

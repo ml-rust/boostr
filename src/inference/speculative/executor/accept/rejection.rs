@@ -494,4 +494,28 @@ mod tests {
             vocab: V8,
         });
     }
+
+    #[test]
+    fn windowed_penalties_follow_the_windowed_distribution() {
+        for last_n in [2, 5] {
+            let rule = SampleRule {
+                repeat_penalty: 1.3,
+                frequency_penalty: 0.2,
+                presence_penalty: 0.4,
+                penalty_last_n: last_n,
+                ..SampleRule::new(filter(1.0, 0, 1.0, 0.05))
+            };
+            let whole = SampleRule {
+                penalty_last_n: 0,
+                ..rule
+            };
+            assert_ne!(
+                joint_reference(&rule),
+                joint_reference(&whole),
+                "window {last_n} gives the whole-prefix distribution; the test is vacuous"
+            );
+            let name = format!("penalty window {last_n}");
+            check_distribution(&name, rule, true, || HashDrafter { salt: 9, vocab: V8 });
+        }
+    }
 }

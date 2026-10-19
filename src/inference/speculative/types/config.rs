@@ -18,7 +18,7 @@ pub struct SpeculativeConfig {
     pub max_tokens: usize,
     /// Tokens that end generation. The EOS token is part of the output.
     pub eos_token_ids: Vec<u32>,
-    /// The sampled acceptance rule. `None` or temperature 0 runs the greedy path.
+    /// The acceptance rule. `None`, or temperature 0 without a penalty, runs the plain greedy path.
     pub sampling: Option<SampleRule>,
 }
 
@@ -33,9 +33,13 @@ impl SpeculativeConfig {
         }
     }
 
-    /// The rule of the sampled path, or `None` when the greedy path runs.
+    /// The rule that `extend_sampled` verifies with, or `None` when the plain greedy path runs.
+    ///
+    /// A greedy rule with a penalty returns `Some`: its argmax runs over penalized logits.
     pub fn sampled_rule(&self) -> Option<&SampleRule> {
-        self.sampling.as_ref().filter(|rule| !rule.is_greedy())
+        self.sampling
+            .as_ref()
+            .filter(|rule| !rule.is_greedy() || rule.has_penalties())
     }
 
     /// Check every field against a model with `vocab_size` tokens.
@@ -169,5 +173,25 @@ mod tests {
         };
         assert!(sampled.sampled_rule().is_some());
         assert!(SpeculativeConfig::new(4).sampled_rule().is_none());
+    }
+
+    #[test]
+    fn greedy_with_a_penalty_selects_the_verify_path() {
+        let rule = SampleRule {
+            repeat_penalty: 1.1,
+            penalty_last_n: 64,
+            ..SampleRule::new(FilterRule {
+                temperature: 0.0,
+                ..FilterRule::temperature_only(1.0)
+            })
+        };
+        let config = SpeculativeConfig {
+            sampling: Some(rule),
+            ..SpeculativeConfig::new(4)
+        };
+        config
+            .check(10)
+            .expect("temperature 0 with a penalty is valid");
+        assert_eq!(config.sampled_rule(), Some(&rule));
     }
 }

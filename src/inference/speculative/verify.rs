@@ -1,15 +1,15 @@
-//! Sampled verification of one step from the target logits.
+//! Verification of one step from the target logits, greedy or sampled.
 
+use super::client::SpeculativeClient;
+use super::executor::accept::greedy::match_drafts;
+use super::penalty::penalized_logits;
 use super::types::{Draw, SampleRule, Verdict};
 use crate::error::{Error, Result};
-use crate::ops::traits::inference::{SamplingOps, SamplingProbsOps, SpeculativeOps};
 use numr::dtype::DType;
-use numr::ops::{AdvancedRandomOps, BinaryOps, ShapeOps, TypeConversionOps};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
-use std::collections::BTreeMap;
 
-/// Verify `drafts` against the target logits of one step and draw the next token.
+/// Verify `drafts` against the target logits of one step and pick the next token.
 ///
 /// - `logits`: `[1, M, V]` in any float dtype, `M = drafts.len() + 1`.
 ///   Row `i` scores the prefix `context ++ drafts[..i]`.
@@ -17,12 +17,21 @@ use std::collections::BTreeMap;
 /// - `drafts`: the draft ids. The drafter is deterministic, so each draft
 ///   distribution is one-hot.
 ///
-/// Row `i` takes the penalties of `rule` over the counts of its prefix. The
+/// Row `i` takes the penalties of `rule` over the penalty window of its
+/// prefix: its last `rule.penalty_last_n` tokens, or all of it for 0. The
 /// penalties run per row on the device through
-/// [`SamplingOps::apply_sampling_penalties`]. The filter runs through
-/// [`SamplingProbsOps::sampling_probs`]. The `M` uniforms come from
-/// `philox_uniform(draw.key, draw.counter)`. Only the `[1, 2]` result of
-/// [`SpeculativeOps::speculative_verify`] crosses to the host.
+/// [`SamplingOps::apply_sampling_penalties`](crate::ops::traits::inference::SamplingOps::apply_sampling_penalties).
+///
+/// A greedy rule takes the argmax of each row on the device. Ties break to
+/// the lowest id. It keeps the longest draft prefix equal to those ids. Only
+/// the `M` ids cross to the host. It draws no uniform and ignores `draw`.
+///
+/// A sampled rule filters through
+/// [`SamplingProbsOps::sampling_probs`](crate::ops::traits::inference::SamplingProbsOps::sampling_probs).
+/// The `M` uniforms come from `philox_uniform(draw.key, draw.counter)`. Only the
+/// `[1, 2]` result of
+/// [`SpeculativeOps::speculative_verify`](crate::ops::traits::inference::SpeculativeOps::speculative_verify)
+/// crosses to the host.
 ///
 /// # Errors
 ///
@@ -39,13 +48,7 @@ pub fn verify_logits<R, C>(
 ) -> Result<Verdict>
 where
     R: Runtime<DType = DType>,
-    C: SamplingProbsOps<R>
-        + SpeculativeOps<R>
-        + SamplingOps<R>
-        + AdvancedRandomOps<R>
-        + BinaryOps<R>
-        + ShapeOps<R>
-        + TypeConversionOps<R>,
+    C: SpeculativeClient<R>,
 {
     rule.check()?;
     let rows = drafts.len() + 1;
@@ -61,13 +64,28 @@ where
     }
     let vocab = shape[2];
     let device = logits.device();
-
-    let probs = if rule.has_penalties() {
-        let penalized = penalized_logits(client, logits, context, drafts, rule, vocab)?;
-        client.sampling_probs(&penalized, &rule.filter)?
+    let penalized = if rule.has_penalties() {
+        Some(penalized_logits(
+            client, logits, context, drafts, rule, vocab,
+        )?)
     } else {
-        client.sampling_probs(logits, &rule.filter)?
+        None
     };
+    let scores = penalized.as_ref().unwrap_or(logits);
+
+    if rule.is_greedy() {
+        // [1, M, V] -> [1, M] ids on the device; M ids cross to the host.
+        let ids: Vec<u32> = client
+            .argmax(scores, 2, false)?
+            .contiguous()?
+            .to_vec::<i64>()
+            .into_iter()
+            .map(|id| u32::try_from(id).unwrap_or(u32::MAX))
+            .collect();
+        return match_drafts(drafts, &ids, vocab, "argmax");
+    }
+
+    let probs = client.sampling_probs(scores, &rule.filter)?;
 
     let ids: Vec<i32> = drafts
         .iter()
@@ -100,63 +118,6 @@ where
             ),
         }),
     }
-}
-
-/// `[1, M, V]` F32 logits with row `i` penalized by the counts of `context ++ drafts[..i]`.
-fn penalized_logits<R, C>(
-    client: &C,
-    logits: &Tensor<R>,
-    context: &[u32],
-    drafts: &[u32],
-    rule: &SampleRule,
-    vocab: usize,
-) -> Result<Tensor<R>>
-where
-    R: Runtime<DType = DType>,
-    C: SamplingOps<R> + BinaryOps<R> + ShapeOps<R> + TypeConversionOps<R>,
-{
-    let rows = drafts.len() + 1;
-    let device = logits.device();
-    let f32_logits = if logits.dtype() == DType::F32 {
-        logits.contiguous()?
-    } else {
-        client.cast(logits, DType::F32)?.contiguous()?
-    };
-    let flat = f32_logits.reshape(&[rows, vocab])?;
-
-    let mut counts: BTreeMap<u32, i32> = BTreeMap::new();
-    for &t in context {
-        *counts.entry(t).or_insert(0) += 1;
-    }
-    let mut penalized = Vec::with_capacity(rows);
-    for i in 0..rows {
-        if i > 0 {
-            *counts.entry(drafts[i - 1]).or_insert(0) += 1;
-        }
-        // A fresh buffer per row: the penalty writes in place, never into the caller's logits.
-        let row = Tensor::<R>::empty(&[vocab], DType::F32, device)?;
-        client.copy_into(&row, &flat.narrow(0, i, 1)?.reshape(&[vocab])?)?;
-        let (ids, row_counts): (Vec<i64>, Vec<i32>) = counts
-            .iter()
-            .filter(|&(&t, _)| (t as usize) < vocab)
-            .map(|(&t, &c)| (i64::from(t), c))
-            .unzip();
-        if !ids.is_empty() {
-            let ids_t = Tensor::<R>::from_slice(&ids, &[ids.len()], device)?;
-            let counts_t = Tensor::<R>::from_slice(&row_counts, &[row_counts.len()], device)?;
-            client.apply_sampling_penalties(
-                &row,
-                &ids_t,
-                &counts_t,
-                rule.repeat_penalty,
-                rule.frequency_penalty,
-                rule.presence_penalty,
-            )?;
-        }
-        penalized.push(row.reshape(&[1, vocab])?);
-    }
-    let refs: Vec<&Tensor<R>> = penalized.iter().collect();
-    Ok(client.cat(&refs, 0)?.reshape(&[1, rows, vocab])?)
 }
 
 #[cfg(test)]
@@ -230,6 +191,27 @@ mod tests {
             }
         );
         assert_eq!(l.to_vec::<f32>()[..V], [0.0, 2.0, 1.5, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn greedy_argmax_counts_only_the_penalty_window() {
+        let (client, _) = cpu_setup();
+        let l = logits(&[[0.0, 2.0, 1.5, 0.0, 0.0], [0.0, 2.0, 1.5, 0.0, 0.0]]);
+        let mut rule = SampleRule {
+            frequency_penalty: 0.3,
+            ..top1()
+        };
+        rule.filter.temperature = 0.0;
+        // Window 1 counts token 1 once: 1.7 beats 1.5. Windows 0 and 2 count it twice: 1.4.
+        for (n, accepted, next) in [(1, 1, 1), (0, 0, 2), (2, 0, 2)] {
+            let rule = SampleRule {
+                penalty_last_n: n,
+                ..rule
+            };
+            let draw = Draw::for_step(0, n as u64);
+            let got = verify_logits(&client, &l, &[1, 1], &[1], &rule, draw).expect("verify");
+            assert_eq!(got, Verdict { accepted, next }, "window {n}");
+        }
     }
 
     #[test]

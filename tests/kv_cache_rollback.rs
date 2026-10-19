@@ -1,4 +1,4 @@
-//! KV cache rollback for speculative verification, end to end on CPU.
+//! KV cache rollback for speculative verification, end to end on CPU and CUDA.
 //!
 //! A tiny random GQA Llama runs three ways over the same tokens:
 //!
@@ -9,7 +9,8 @@
 //!
 //! The multi-token forward at an offset must give the one-at-a-time rows.
 //! The forward after a rollback must give the rows of a fresh cache that
-//! never held the rejected tokens. Both hold to 1e-4 relative.
+//! never held the rejected tokens. Both hold to 1e-4 relative. With the
+//! `cuda` feature the offset forward also runs on CUDA device 0.
 
 mod common;
 
@@ -243,6 +244,76 @@ fn chained_rounds_on_one_cache_match_one_at_a_time() {
     kept.extend_from_slice(&next);
     let reference = one_at_a_time(&model, &kept, &device);
     assert_rows_close(&got, &reference[base..], "final step after rollbacks");
+}
+
+/// The multi-token forward at an offset on CUDA, against one token per CUDA forward.
+#[cfg(feature = "cuda")]
+mod cuda {
+    use super::{INITIAL_CAPACITY, MAX_SEQ_LEN, SEED, assert_rows_close, tokens};
+    use crate::common::llama_tiny::{HEAD_DIM, KV_HEADS, LAYERS, VOCAB, tiny_llama};
+    use boostr::inference::LayeredKvCache;
+    use boostr::model::LoadedModel;
+    use numr::dtype::DType;
+    use numr::runtime::cuda::{CudaDevice, CudaRuntime};
+    use numr::tensor::Tensor;
+
+    fn cache(device: &CudaDevice) -> LayeredKvCache<CudaRuntime> {
+        LayeredKvCache::new_positional(
+            LAYERS,
+            1,
+            KV_HEADS,
+            INITIAL_CAPACITY,
+            MAX_SEQ_LEN,
+            HEAD_DIM,
+            DType::F32,
+            device,
+        )
+        .expect("cache")
+    }
+
+    /// One forward over `ids` at `position`; one logits row per token, read back for the check.
+    fn forward(
+        model: &LoadedModel<CudaRuntime>,
+        kv: &mut LayeredKvCache<CudaRuntime>,
+        ids: &[i64],
+        position: usize,
+        device: &CudaDevice,
+    ) -> Vec<Vec<f32>> {
+        let input = Tensor::<CudaRuntime>::from_slice(ids, &[1, ids.len()], device).expect("ids");
+        let logits = model
+            .forward_with_kv_cache(&input, kv, position)
+            .expect("forward");
+        assert_eq!(logits.shape(), &[1, ids.len(), VOCAB]);
+        let all = logits.contiguous().expect("contiguous").to_vec::<f32>();
+        all.chunks(VOCAB).map(<[f32]>::to_vec).collect()
+    }
+
+    #[test]
+    fn cuda_multi_token_forward_at_an_offset_matches_one_at_a_time() {
+        let device = CudaDevice::new(0);
+        let model = tiny_llama(&device, SEED, DType::F32);
+        for n in [1usize, 3, 7] {
+            for m in [1usize, 2, 4, 6] {
+                let ids = tokens(100 + (n * 10 + m) as u64, n + m);
+                let mut one = cache(&device);
+                let mut reference = Vec::with_capacity(ids.len());
+                for (pos, &id) in ids.iter().enumerate() {
+                    reference.extend(forward(&model, &mut one, &[id], pos, &device));
+                }
+
+                let mut kv = cache(&device);
+                let prefill = forward(&model, &mut kv, &ids[..n], 0, &device);
+                assert_rows_close(&prefill, &reference[..n], &format!("CUDA N={n}: prefill"));
+                let verify = forward(&model, &mut kv, &ids[n..], n, &device);
+                assert_eq!(kv.seq_len(), n + m);
+                assert_rows_close(
+                    &verify,
+                    &reference[n..],
+                    &format!("CUDA N={n} M={m}: verify forward"),
+                );
+            }
+        }
+    }
 }
 
 /// A rollback past the cache length is refused and the cache still

@@ -55,16 +55,18 @@ pub trait SpeculativeModel {
     /// An error when the forward fails, for example past the cache capacity.
     fn extend_greedy(&mut self, tokens: &[u32]) -> Result<Vec<u32>>;
 
-    /// Feed `tokens` in one forward and verify the drafts by sampling.
+    /// Feed `tokens` in one forward and verify the drafts under `rule`.
     ///
-    /// `tokens` is the last committed token, then the drafts. The cache grows
-    /// by `tokens.len()` positions. The generator truncates it afterwards.
+    /// The generator calls it for a temperature above 0, or for temperature 0
+    /// with a penalty. `tokens` is the last committed token, then the drafts.
+    /// The cache grows by `tokens.len()` positions. The generator truncates it
+    /// afterwards.
     ///
     /// Row `i` scores the prefix that ends with `tokens[i]`. Its penalties
-    /// count every token of that prefix, the cached ones included. An
-    /// implementation passes its logits to
+    /// count the penalty window of that prefix, the cached tokens included.
+    /// An implementation passes its logits to
     /// [`verify_logits`](crate::inference::speculative::verify_logits).
-    /// Only the verdict crosses to the host.
+    /// Only the verdict or the argmax ids cross to the host.
     ///
     /// The default refuses the call, for a greedy-only model.
     ///
@@ -76,7 +78,7 @@ pub trait SpeculativeModel {
         let _ = (tokens, rule, draw);
         Err(Error::InferenceError {
             reason: "this model implements only greedy verification; implement \
-                     SpeculativeModel::extend_sampled, or set temperature 0"
+                     SpeculativeModel::extend_sampled, or set temperature 0 with no penalty"
                 .into(),
         })
     }

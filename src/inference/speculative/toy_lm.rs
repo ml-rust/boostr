@@ -145,21 +145,25 @@ impl SpeculativeModel for ToyLm {
     }
 }
 
-/// The exact target distribution after `prefix`, in f64.
+/// The toy logits after `prefix`, penalized as `apply_sampling_penalties` does, in f32.
 ///
-/// It applies the penalties as `apply_sampling_penalties` does, in f32,
-/// then the canonical filter of `FilterRule` in f64, ties kept. The second
-/// value is the smallest gap between a filter threshold and a value it
-/// tests. A tiny gap means f32 and f64 can keep different sets.
-pub(crate) fn reference_probs(
+/// The counts cover the last `rule.penalty_last_n` tokens of `prefix`, or all
+/// of it for 0.
+pub(crate) fn reference_penalized(
     seed: u64,
     vocab: usize,
     prefix: &[u32],
     rule: &SampleRule,
-) -> (Vec<f64>, f64) {
+) -> Vec<f32> {
     let mut logits = toy_logits(seed, vocab, prefix);
+    let n = rule.penalty_last_n;
+    let window = if n == 0 || n >= prefix.len() {
+        prefix
+    } else {
+        &prefix[prefix.len() - n..]
+    };
     let mut counts = std::collections::BTreeMap::<u32, i32>::new();
-    for &t in prefix {
+    for &t in window {
         *counts.entry(t).or_insert(0) += 1;
     }
     for (&t, &c) in &counts {
@@ -174,6 +178,39 @@ pub(crate) fn reference_probs(
         *l -= rule.frequency_penalty * c as f32;
         *l -= rule.presence_penalty;
     }
+    logits
+}
+
+/// The lowest id with the largest penalized toy logit after `prefix`.
+pub(crate) fn reference_penalized_argmax(
+    seed: u64,
+    vocab: usize,
+    prefix: &[u32],
+    rule: &SampleRule,
+) -> u32 {
+    let logits = reference_penalized(seed, vocab, prefix, rule);
+    let mut best = 0;
+    for (j, &l) in logits.iter().enumerate() {
+        if l > logits[best] {
+            best = j;
+        }
+    }
+    best as u32
+}
+
+/// The exact target distribution after `prefix`, in f64.
+///
+/// It takes [`reference_penalized`], then the canonical filter of
+/// `FilterRule` in f64, ties kept. The second value is the smallest gap
+/// between a filter threshold and a value it tests. A tiny gap means f32 and
+/// f64 can keep different sets.
+pub(crate) fn reference_probs(
+    seed: u64,
+    vocab: usize,
+    prefix: &[u32],
+    rule: &SampleRule,
+) -> (Vec<f64>, f64) {
+    let logits = reference_penalized(seed, vocab, prefix, rule);
     let f = rule.filter;
     let scaled: Vec<f64> = logits
         .iter()

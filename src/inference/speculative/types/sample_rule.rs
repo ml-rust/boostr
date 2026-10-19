@@ -16,11 +16,13 @@ pub const COUNTERS_PER_STEP: u64 = (MAX_NUM_DRAFT_TOKENS as u64 + 1).div_ceil(PH
 /// The sampling config of speculative generation.
 ///
 /// The target distribution of each position is the canonical filter of
-/// [`FilterRule`] over penalized logits. The penalties count every token of
-/// the prefix that ends at that position, the prompt included.
+/// [`FilterRule`] over penalized logits. The penalties count the penalty
+/// window: the last `penalty_last_n` tokens of the prefix that ends at that
+/// position, the prompt included. `penalty_last_n == 0` counts the whole prefix.
 ///
-/// Temperature 0 selects the greedy path. That path applies no penalty, so
-/// [`check`](Self::check) refuses temperature 0 with an active penalty.
+/// Temperature 0 selects the greedy rule. Each next token is the argmax of
+/// the penalized logits. Ties break to the lowest id. Top-k, top-p and min-p
+/// change no argmax.
 ///
 /// Mirostat, DRY, typical-p and grammar constraints have no field here. A
 /// caller that needs them must decode through the plain sampler instead.
@@ -34,23 +36,26 @@ pub struct SampleRule {
     pub frequency_penalty: f32,
     /// Subtracted once per distinct token. 0 disables it.
     pub presence_penalty: f32,
+    /// Tokens of the penalty window, counted back from the position. 0 counts the whole prefix.
+    pub penalty_last_n: usize,
     /// The Philox key. `None` takes one seed from `numr::random` at start.
     pub seed: Option<u64>,
 }
 
 impl SampleRule {
-    /// A rule with `filter`, no penalty and no fixed seed.
+    /// A rule with `filter`, no penalty, a whole-prefix window and no fixed seed.
     pub const fn new(filter: FilterRule) -> Self {
         Self {
             filter,
             repeat_penalty: 1.0,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
+            penalty_last_n: 0,
             seed: None,
         }
     }
 
-    /// Temperature 0: the generator runs the greedy path.
+    /// Temperature 0: every next token is an argmax.
     pub fn is_greedy(&self) -> bool {
         self.filter.temperature == 0.0
     }
@@ -61,6 +66,8 @@ impl SampleRule {
     }
 
     /// Check every field against its range.
+    ///
+    /// A greedy rule still checks its top-k, top-p and min-p.
     ///
     /// # Errors
     ///
@@ -92,21 +99,6 @@ impl SampleRule {
             return Err(Error::InvalidArgument {
                 arg,
                 reason: format!("got {value}; pass a finite value, or 0.0 to disable it"),
-            });
-        }
-        if self.is_greedy() && self.has_penalties() {
-            let arg = if self.repeat_penalty != 1.0 {
-                "repeat_penalty"
-            } else if self.frequency_penalty != 0.0 {
-                "frequency_penalty"
-            } else {
-                "presence_penalty"
-            };
-            return Err(Error::InvalidArgument {
-                arg,
-                reason: "temperature 0 runs the greedy path, which applies no penalty; set a \
-                         temperature above 0 or disable the penalty"
-                    .into(),
             });
         }
         Ok(())
@@ -215,18 +207,52 @@ mod tests {
     }
 
     #[test]
-    fn greedy_with_a_penalty_is_refused() {
+    fn greedy_with_a_penalty_is_valid() {
         let mut rule = SampleRule {
+            repeat_penalty: 1.1,
+            frequency_penalty: 0.3,
             presence_penalty: 0.5,
+            penalty_last_n: 64,
             ..base()
         };
         rule.filter.temperature = 0.0;
-        assert_eq!(arg_of(rule), "presence_penalty");
+        assert!(rule.is_greedy() && rule.has_penalties());
+        rule.check().expect("greedy with penalties");
+        for p in [0.0, f32::NAN] {
+            assert_eq!(
+                arg_of(SampleRule {
+                    repeat_penalty: p,
+                    ..rule
+                }),
+                "repeat_penalty"
+            );
+        }
+        let bad = SampleRule {
+            frequency_penalty: f32::NEG_INFINITY,
+            ..rule
+        };
+        assert_eq!(arg_of(bad), "frequency_penalty");
+        let bad = SampleRule {
+            presence_penalty: f32::NAN,
+            ..rule
+        };
+        assert_eq!(arg_of(bad), "presence_penalty");
         rule.filter.top_p = 0.0;
         assert_eq!(
             arg_of(rule),
             "top_p",
             "a greedy rule still checks the filter"
         );
+    }
+
+    #[test]
+    fn the_default_window_is_the_whole_prefix() {
+        assert_eq!(base().penalty_last_n, 0);
+        let windowed = SampleRule {
+            penalty_last_n: 1,
+            ..base()
+        };
+        windowed.check().expect("any window is valid");
+        assert!(!windowed.has_penalties(), "a window alone changes no logit");
     }
 }

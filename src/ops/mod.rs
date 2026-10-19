@@ -22,8 +22,8 @@ pub use traits::{
     AlibiOps, AttentionOps, AttnOutLayout, CalibrationOps, DeviceGrammarDfa, FlashAttentionOps,
     FusedFp8TrainingOps, FusedOptimizerOps, FusedQkvOps, GatedDeltaNetOps, GdnGrads, GrammarDfaOps,
     Int4GroupSize, KvCacheOps, KvCacheQuantOps, KvQuantMode, KvSeqLen, MRopeOps, MlaOps, MoEOps,
-    PackedSegments, PagedAttentionOps, RoPEOps, RoPEPackedOps, SamplingOps, SamplingScratch,
-    SpeculativeOps, VarLenAttentionOps,
+    PackedSegments, PagedAttentionOps, RoPEOps, RoPEPackedOps, SampleSeed, SamplingOps,
+    SamplingScratch, SpeculativeOps, VarLenAttentionOps,
 };
 
 // Re-export numr's TensorOps which bundles all operation traits

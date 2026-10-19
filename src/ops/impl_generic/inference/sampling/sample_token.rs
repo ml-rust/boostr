@@ -29,7 +29,7 @@ pub fn sample_token_impl<R: Runtime<DType = DType>>(
     min_p: f32,
 ) -> Result<u32>
 where
-    R::Client: RandomOps<R>,
+    R::Client: RandomOps<R> + numr::ops::AdvancedRandomOps<R> + numr::ops::BinaryOps<R>,
 {
     let vocab_size = logits.shape().first().copied().unwrap_or(1);
     let scratch = SamplingScratch::new(vocab_size, logits.device())?;
@@ -55,7 +55,7 @@ pub fn sample_token_into_impl<R: Runtime<DType = DType>>(
     scratch: &SamplingScratch<R>,
 ) -> Result<()>
 where
-    R::Client: RandomOps<R>,
+    R::Client: RandomOps<R> + numr::ops::AdvancedRandomOps<R> + numr::ops::BinaryOps<R>,
 {
     validate_sampling_logits("sample_token", logits, SamplingLogitsShape::Vocab)?;
     validate_scratch_vocab("sample_token", scratch, logits.shape()[0])?;

@@ -6,6 +6,7 @@ use super::validate::{
     SamplingLogitsShape, validate_contiguous_arg, validate_sampling_logits, validate_scratch_vocab,
 };
 use crate::error::Result;
+use crate::ops::traits::inference::sample_seed::SampleSeed;
 use crate::ops::traits::inference::sampling_scratch::SamplingScratch;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
@@ -34,10 +35,13 @@ pub fn logits_to_token_impl<R: Runtime<DType = numr::dtype::DType>>(
     top_k: usize,
     top_p: f32,
     min_p: f32,
-    seed: Option<u64>,
+    seed: Option<SampleSeed>,
 ) -> Result<Tensor<R>>
 where
-    R::Client: numr::ops::RandomOps<R> + numr::ops::TypeConversionOps<R>,
+    R::Client: numr::ops::RandomOps<R>
+        + numr::ops::AdvancedRandomOps<R>
+        + numr::ops::BinaryOps<R>
+        + numr::ops::TypeConversionOps<R>,
 {
     let vocab_size = logits.shape().last().copied().unwrap_or(1);
     let scratch = SamplingScratch::new(vocab_size, logits.device())?;
@@ -81,11 +85,14 @@ pub fn logits_to_token_into_impl<R: Runtime<DType = numr::dtype::DType>>(
     top_k: usize,
     top_p: f32,
     min_p: f32,
-    seed: Option<u64>,
+    seed: Option<SampleSeed>,
     scratch: &SamplingScratch<R>,
 ) -> Result<()>
 where
-    R::Client: numr::ops::RandomOps<R> + numr::ops::TypeConversionOps<R>,
+    R::Client: numr::ops::RandomOps<R>
+        + numr::ops::AdvancedRandomOps<R>
+        + numr::ops::BinaryOps<R>
+        + numr::ops::TypeConversionOps<R>,
 {
     validate_sampling_logits(
         "logits_to_token",
@@ -162,9 +169,8 @@ where
     } else {
         let indexed = filter_distribution(&mut last_logits, temperature, top_k, top_p, min_p);
 
-        // Draw into scratch.random instead of allocating a fresh tensor
-        // (seeded for reproducibility if seed is provided), then read back
-        // the scalar it was just fully overwritten with.
+        // Draw into scratch.random (the Philox uniform at the seed's key and
+        // counter when seeded), then read back the scalar it now holds.
         scratch.draw_random(client, seed)?;
         let random_val: f32 = scratch
             .random
@@ -350,7 +356,7 @@ mod tests {
                 0,
                 1.0,
                 0.0,
-                Some(seed),
+                Some(SampleSeed::new(seed, 0)),
             )
             .expect("fresh alloc path");
             logits_to_token_into_impl::<CpuRuntime>(
@@ -366,7 +372,7 @@ mod tests {
                 0,
                 1.0,
                 0.0,
-                Some(seed),
+                Some(SampleSeed::new(seed, 0)),
                 &scratch,
             )
             .expect("scratch path");
@@ -376,8 +382,8 @@ mod tests {
         }
     }
 
-    /// Two successive calls with the same seed, through one reused scratch,
-    /// draw the same random value and produce the same token both times —
+    /// Two successive calls with the same seed and counter, through one
+    /// reused scratch, draw the same random value and produce the same token both times —
     /// the first draw does not leak into or bias the second.
     #[test]
     fn same_seed_through_one_reused_scratch_repeats_the_token() {
@@ -401,7 +407,7 @@ mod tests {
             0,
             1.0,
             0.0,
-            Some(7),
+            Some(SampleSeed::new(7, 0)),
             &scratch,
         )
         .expect("first scratch call");
@@ -420,7 +426,7 @@ mod tests {
             0,
             1.0,
             0.0,
-            Some(7),
+            Some(SampleSeed::new(7, 0)),
             &scratch,
         )
         .expect("second scratch call");

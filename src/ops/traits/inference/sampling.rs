@@ -4,6 +4,7 @@
 //! during autoregressive inference. Prevents degenerate repetition by penalizing
 //! tokens that have recently appeared.
 
+use super::sample_seed::SampleSeed;
 use super::sampling_scratch::SamplingScratch;
 use crate::error::Result;
 use numr::runtime::Runtime;
@@ -122,7 +123,9 @@ pub trait SamplingOps<R: Runtime> {
     /// - `logits`: `[1, seq_len, vocab_size]` any dtype
     /// - `token_ids`: `[num_unique]` I64 — penalty token IDs
     /// - `token_counts`: `[num_unique]` I32 — penalty counts
-    /// - `seed`: optional RNG seed for reproducible sampling (`None` = non-deterministic)
+    /// - `seed`: the Philox key and counter of the draw (`None` = non-deterministic).
+    ///   The draw is a pure function of the pair. A decode loop must advance
+    ///   `counter` every step, or every step draws the same uniform.
     ///
     /// `logits` must be contiguous: every backend computes the last
     /// position's offset from `seq_len` and `vocab_size` and reads through
@@ -146,17 +149,18 @@ pub trait SamplingOps<R: Runtime> {
         top_k: usize,
         top_p: f32,
         min_p: f32,
-        seed: Option<u64>,
+        seed: Option<SampleSeed>,
     ) -> Result<Tensor<R>>;
 
     /// Like [`logits_to_token`](Self::logits_to_token), but writes the
     /// sampled token into `scratch.output` instead of allocating, and (on
     /// backends that use it) fills `scratch.probs` in place instead of
-    /// allocating a probability buffer. numr has no `rand_into`, so the
-    /// per-call random draw still allocates a fresh `[1]` tensor. Every
-    /// buffer this call does write is fully overwritten before it returns,
-    /// so `scratch` is safe to reuse on the next call, but not to share
-    /// between two calls that could run at once.
+    /// allocating a probability buffer. An unseeded draw writes into
+    /// `scratch.random` in place. A seeded draw allocates a `[1]` Philox
+    /// tensor and copies it into `scratch.random`. Every buffer this call
+    /// does write is fully overwritten before it returns, so `scratch` is
+    /// safe to reuse on the next call, but not to share between two calls
+    /// that could run at once.
     ///
     /// `logits` must be contiguous, exactly as
     /// [`logits_to_token`](Self::logits_to_token) requires.
@@ -179,7 +183,7 @@ pub trait SamplingOps<R: Runtime> {
         top_k: usize,
         top_p: f32,
         min_p: f32,
-        seed: Option<u64>,
+        seed: Option<SampleSeed>,
         scratch: &SamplingScratch<R>,
     ) -> Result<()>;
 }

@@ -10,6 +10,7 @@
 )]
 
 use super::helpers::*;
+use boostr::ops::traits::inference::sample_seed::SampleSeed;
 use boostr::ops::traits::inference::sampling::SamplingOps;
 use numr::runtime::Runtime;
 use numr::runtime::cpu::CpuRuntime;
@@ -50,7 +51,7 @@ fn logits_to_token_on<R: Runtime<DType = numr::dtype::DType>>(
     counts: &[i32],
     temperature: f32,
     top_k: usize,
-    seed: Option<u64>,
+    seed: Option<SampleSeed>,
 ) -> i64
 where
     R::Client: SamplingOps<R>,
@@ -173,7 +174,7 @@ fn test_logits_to_token_top_k_one_matches_greedy() {
         &counts,
         0.8,
         1,
-        Some(7),
+        Some(SampleSeed::new(7, 0)),
     );
     assert_eq!(cpu, greedy);
 
@@ -188,7 +189,7 @@ fn test_logits_to_token_top_k_one_matches_greedy() {
             &counts,
             0.8,
             1,
-            Some(7),
+            Some(SampleSeed::new(7, 0)),
         );
         assert_eq!(gpu, greedy, "wgpu top_k = 1 sample");
     });

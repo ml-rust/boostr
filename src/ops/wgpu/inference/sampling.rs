@@ -15,6 +15,7 @@ use crate::error::{Error, Result};
 use crate::ops::impl_generic::inference::sampling::{
     SamplingLogitsShape, validate_contiguous_arg, validate_sampling_logits, validate_scratch_vocab,
 };
+use crate::ops::traits::inference::sample_seed::SampleSeed;
 use crate::ops::traits::inference::sampling::SamplingOps;
 use crate::ops::traits::inference::sampling_scratch::SamplingScratch;
 use numr::dtype::DType;
@@ -378,7 +379,7 @@ impl SamplingOps<WgpuRuntime> for WgpuClient {
         top_k: usize,
         top_p: f32,
         min_p: f32,
-        seed: Option<u64>,
+        seed: Option<SampleSeed>,
     ) -> Result<Tensor<WgpuRuntime>> {
         validate_sampling_logits(
             "logits_to_token",
@@ -418,7 +419,7 @@ impl SamplingOps<WgpuRuntime> for WgpuClient {
         top_k: usize,
         top_p: f32,
         min_p: f32,
-        seed: Option<u64>,
+        seed: Option<SampleSeed>,
         scratch: &SamplingScratch<WgpuRuntime>,
     ) -> Result<()> {
         validate_sampling_logits(

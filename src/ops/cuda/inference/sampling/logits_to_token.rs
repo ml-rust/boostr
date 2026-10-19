@@ -6,6 +6,7 @@ use crate::ops::cuda::kernels::{self, LOGITS_TO_TOKEN_MODULE};
 use crate::ops::impl_generic::inference::sampling::{
     SamplingLogitsShape, validate_contiguous_arg, validate_sampling_logits, validate_scratch_vocab,
 };
+use crate::ops::traits::inference::sample_seed::SampleSeed;
 use crate::ops::traits::inference::sampling_scratch::SamplingScratch;
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
@@ -29,7 +30,7 @@ pub(super) fn logits_to_token_into(
     top_k: usize,
     top_p: f32,
     min_p: f32,
-    seed: Option<u64>,
+    seed: Option<SampleSeed>,
     scratch: &SamplingScratch<CudaRuntime>,
 ) -> Result<()> {
     validate_sampling_logits(
@@ -123,6 +124,7 @@ mod tests {
     use super::super::test_support::{
         non_contiguous_batch_seq_vocab, non_contiguous_counts, non_contiguous_ids,
     };
+    use crate::ops::traits::inference::sample_seed::SampleSeed;
     use crate::ops::traits::inference::sampling::SamplingOps;
     use crate::ops::traits::inference::sampling_scratch::SamplingScratch;
     use crate::test_utils::cuda_setup;
@@ -240,7 +242,7 @@ mod tests {
                     0,
                     1.0,
                     0.0,
-                    Some(seed),
+                    Some(SampleSeed::new(seed, 0)),
                 )
                 .expect("fresh alloc path");
             client
@@ -256,7 +258,7 @@ mod tests {
                     0,
                     1.0,
                     0.0,
-                    Some(seed),
+                    Some(SampleSeed::new(seed, 0)),
                     &scratch,
                 )
                 .expect("scratch path");
@@ -266,8 +268,8 @@ mod tests {
         }
     }
 
-    /// Two successive calls with the same seed, through one reused scratch,
-    /// draw the same random value and produce the same token both times —
+    /// Two successive calls with the same seed and counter, through one
+    /// reused scratch, draw the same random value and produce the same token both times —
     /// the first draw does not leak into or bias the second.
     #[test]
     fn same_seed_through_one_reused_scratch_repeats_the_token() {
@@ -292,7 +294,7 @@ mod tests {
                 0,
                 1.0,
                 0.0,
-                Some(7),
+                Some(SampleSeed::new(7, 0)),
                 &scratch,
             )
             .expect("first scratch call");
@@ -311,7 +313,7 @@ mod tests {
                 0,
                 1.0,
                 0.0,
-                Some(7),
+                Some(SampleSeed::new(7, 0)),
                 &scratch,
             )
             .expect("second scratch call");

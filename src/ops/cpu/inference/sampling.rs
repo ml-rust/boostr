@@ -5,6 +5,7 @@ use crate::ops::impl_generic::inference::sampling::{
     apply_sampling_penalties_impl, logits_to_token_impl, logits_to_token_into_impl,
     sample_token_impl, sample_token_into_impl,
 };
+use crate::ops::traits::inference::sample_seed::SampleSeed;
 use crate::ops::traits::inference::sampling::SamplingOps;
 use crate::ops::traits::inference::sampling_scratch::SamplingScratch;
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
@@ -75,7 +76,7 @@ impl SamplingOps<CpuRuntime> for CpuClient {
         top_k: usize,
         top_p: f32,
         min_p: f32,
-        seed: Option<u64>,
+        seed: Option<SampleSeed>,
     ) -> Result<Tensor<CpuRuntime>> {
         logits_to_token_impl::<CpuRuntime>(
             self,
@@ -107,7 +108,7 @@ impl SamplingOps<CpuRuntime> for CpuClient {
         top_k: usize,
         top_p: f32,
         min_p: f32,
-        seed: Option<u64>,
+        seed: Option<SampleSeed>,
         scratch: &SamplingScratch<CpuRuntime>,
     ) -> Result<()> {
         logits_to_token_into_impl::<CpuRuntime>(

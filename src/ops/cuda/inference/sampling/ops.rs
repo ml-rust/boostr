@@ -7,6 +7,7 @@ use crate::ops::cuda::kernels::{self, SAMPLING_MODULE, SAMPLING_PENALTIES_MODULE
 use crate::ops::impl_generic::inference::sampling::{
     SamplingLogitsShape, validate_contiguous_arg, validate_sampling_logits, validate_scratch_vocab,
 };
+use crate::ops::traits::inference::sample_seed::SampleSeed;
 use crate::ops::traits::inference::sampling::SamplingOps;
 use crate::ops::traits::inference::sampling_scratch::SamplingScratch;
 use cudarc::driver::PushKernelArg;
@@ -162,7 +163,7 @@ impl SamplingOps<CudaRuntime> for CudaClient {
         top_k: usize,
         top_p: f32,
         min_p: f32,
-        seed: Option<u64>,
+        seed: Option<SampleSeed>,
     ) -> Result<Tensor<CudaRuntime>> {
         validate_sampling_logits(
             "logits_to_token",
@@ -202,7 +203,7 @@ impl SamplingOps<CudaRuntime> for CudaClient {
         top_k: usize,
         top_p: f32,
         min_p: f32,
-        seed: Option<u64>,
+        seed: Option<SampleSeed>,
         scratch: &SamplingScratch<CudaRuntime>,
     ) -> Result<()> {
         logits_to_token::logits_to_token_into(

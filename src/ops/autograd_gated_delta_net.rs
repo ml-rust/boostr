@@ -145,7 +145,7 @@ where
         return Ok((Var::new(output, false), state_out));
     }
     let grad_fn = GdnChunkBackward {
-        input_ids: inputs.map(|x| x.id()),
+        input_ids: inputs.map(|x| x.graph_id()),
         saved_tensors: saved,
         input_grad_fns: inputs.map(|x| x.grad_fn().cloned()),
         requires_grad,

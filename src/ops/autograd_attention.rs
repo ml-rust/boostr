@@ -190,7 +190,7 @@ where
 
     if needs_grad {
         let grad_fn = FlashAttentionBackward {
-            input_ids: [q.id(), k.id(), v.id()],
+            input_ids: [q.graph_id(), k.graph_id(), v.graph_id()],
             saved_tensors: vec![
                 q.tensor().clone(),
                 k.tensor().clone(),

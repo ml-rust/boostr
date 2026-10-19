@@ -226,7 +226,7 @@ where
         return Ok(Var::new(output, false));
     }
     let grad_fn = VarLenAttentionBackward {
-        input_ids: [q_scaled.id(), k.id(), v.id()],
+        input_ids: [q_scaled.graph_id(), k.graph_id(), v.graph_id()],
         saved_tensors: vec![q_t, k_t, v_t, output.clone(), lse],
         input_grad_fns: [
             q_scaled.grad_fn().cloned(),

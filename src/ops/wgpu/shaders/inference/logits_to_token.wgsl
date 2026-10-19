@@ -108,14 +108,18 @@ fn logits_to_token(@builtin(local_invocation_id) lid: vec3<u32>) {
     }
     storageBarrier();
 
-    // Step 3: greedy argmax. The lowest index wins a tie, as on the CPU.
+    // Step 3: greedy argmax, matching numr's `argmax`.
+    // - The lowest index wins a tie. Each merge compares the index on a tie.
+    // - NaN never wins. A row of only NaN returns id 0.
+    // WGSL leaves NaN comparisons to the implementation, so the scan tests NaN bits.
     if (params.greedy == 1u) {
         var best = NEG_BIG;
         var best_i = 0u;
         var seen = false;
         for (var i = tid; i < n; i = i + WG) {
             let v = probs[i];
-            if (!seen || v > best) {
+            let is_nan = (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u;
+            if (!is_nan && (!seen || v > best)) {
                 best = v;
                 best_i = i;
                 seen = true;
@@ -143,7 +147,7 @@ fn logits_to_token(@builtin(local_invocation_id) lid: vec3<u32>) {
             workgroupBarrier();
         }
         if (tid == 0u) {
-            out_token[0] = red_idx[0];
+            out_token[0] = select(red_idx[0], 0u, red_idx[0] == 0xffffffffu);
             out_token[1] = 0u;
         }
         return;

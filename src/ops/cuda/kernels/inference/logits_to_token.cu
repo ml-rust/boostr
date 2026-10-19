@@ -70,35 +70,42 @@ extern "C" __global__ void logits_to_token_kernel(
         __syncthreads();
     }
 
-    // Step 3: Greedy argmax path
+    // Step 3: Greedy argmax path, matching numr's `argmax`.
+    // - Equal logits resolve to the lowest id. Thread `tid` scans tid, tid + nthreads, ...
+    //   so each merge compares the id on a tie.
+    // - NaN never wins: it fails `>` and `==`. A row of only NaN returns id 0.
     if (temperature == 0.0f) {
-        // Parallel argmax reduction
-        float local_max = -1e30f;
-        int local_idx = 0;
+        const int no_id = 0x7fffffff;  // Lane holds no candidate. Every real id is lower.
+        float local_max = __uint_as_float(0xff800000u);  // -inf
+        int local_idx = no_id;
         for (int i = tid; i < vocab_size; i += nthreads) {
-            if (probs[i] > local_max) {
-                local_max = probs[i];
+            float v = probs[i];
+            if (v > local_max || (v == local_max && i < local_idx)) {
+                local_max = v;
                 local_idx = i;
             }
         }
 
-        // Store (max_val, idx) in shared mem — use scratch for vals, reinterpret upper half for indices
+        // Values in scratch[0, nthreads), ids in the upper half reinterpreted as int.
+        int* ids = (int*)scratch + nthreads;
         scratch[tid] = local_max;
-        ((int*)scratch)[nthreads + tid] = local_idx;
+        ids[tid] = local_idx;
         __syncthreads();
 
         for (int s = nthreads / 2; s > 0; s >>= 1) {
             if (tid < s) {
-                if (scratch[tid + s] > scratch[tid]) {
-                    scratch[tid] = scratch[tid + s];
-                    ((int*)scratch)[nthreads + tid] = ((int*)scratch)[nthreads + tid + s];
+                float v = scratch[tid + s];
+                int id = ids[tid + s];
+                if (v > scratch[tid] || (v == scratch[tid] && id < ids[tid])) {
+                    scratch[tid] = v;
+                    ids[tid] = id;
                 }
             }
             __syncthreads();
         }
 
         if (tid == 0) {
-            output[0] = (int64_t)((int*)scratch)[nthreads];
+            output[0] = ids[0] == no_id ? 0 : (int64_t)ids[0];
         }
         return;
     }

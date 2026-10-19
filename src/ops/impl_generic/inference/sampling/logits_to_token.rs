@@ -166,16 +166,19 @@ where
 
     // 3. Greedy or stochastic
     let token_id = if temperature == 0.0 {
-        // Argmax
-        let mut best_idx = 0usize;
-        let mut best_val = f32::NEG_INFINITY;
+        // Argmax, matching numr's `argmax`: equal logits resolve to the lowest id.
+        // NaN never wins. A row of only NaN returns id 0.
+        let mut best: Option<(f32, usize)> = None;
         for (i, &v) in last_logits.iter().enumerate() {
-            if v > best_val {
-                best_val = v;
-                best_idx = i;
+            if v.is_nan() {
+                continue;
+            }
+            match best {
+                Some((b, _)) if v <= b => {}
+                _ => best = Some((v, i)),
             }
         }
-        best_idx as i64
+        best.map_or(0, |(_, i)| i as i64)
     } else {
         let rule = FilterRule {
             temperature,

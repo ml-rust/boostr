@@ -4,5 +4,6 @@ pub use super::helpers;
 
 pub mod grammar;
 pub mod sampling;
+pub mod sampling_greedy_ties;
 pub mod sampling_probs;
 pub mod speculative;

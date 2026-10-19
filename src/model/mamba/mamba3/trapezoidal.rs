@@ -111,41 +111,11 @@ impl<R: Runtime> Mamba3<R> {
         let mut outputs: Vec<Var<R>> = Vec::with_capacity(seq_len);
 
         for t in 0..seq_len {
-            let x_t = var_contiguous(
-                &var_reshape(
-                    &var_narrow(hidden_states, 1, t, 1).map_err(Error::Numr)?,
-                    &[batch, nheads, headdim],
-                )
-                .map_err(Error::Numr)?,
-            )?;
-            let b_t = var_contiguous(
-                &var_reshape(
-                    &var_narrow(b, 1, t, 1).map_err(Error::Numr)?,
-                    &[batch, nheads, d_state],
-                )
-                .map_err(Error::Numr)?,
-            )?;
-            let c_t = var_contiguous(
-                &var_reshape(
-                    &var_narrow(c, 1, t, 1).map_err(Error::Numr)?,
-                    &[batch, nheads, d_state],
-                )
-                .map_err(Error::Numr)?,
-            )?;
-            let dt_t = var_contiguous(
-                &var_reshape(
-                    &var_narrow(dt, 1, t, 1).map_err(Error::Numr)?,
-                    &[batch, nheads, 1, 1],
-                )
-                .map_err(Error::Numr)?,
-            )?;
-            let lambda_t = var_contiguous(
-                &var_reshape(
-                    &var_narrow(lambda, 1, t, 1).map_err(Error::Numr)?,
-                    &[batch, nheads, 1, 1],
-                )
-                .map_err(Error::Numr)?,
-            )?;
+            let x_t = time_step(hidden_states, t, &[batch, nheads, headdim])?;
+            let b_t = time_step(b, t, &[batch, nheads, d_state])?;
+            let c_t = time_step(c, t, &[batch, nheads, d_state])?;
+            let dt_t = time_step(dt, t, &[batch, nheads, 1, 1])?;
+            let lambda_t = time_step(lambda, t, &[batch, nheads, 1, 1])?;
 
             let dt_a = var_mul(&dt_t, &a_broad, client).map_err(Error::Numr)?;
             let alpha = var_exp(&dt_a, client).map_err(Error::Numr)?;
@@ -195,6 +165,18 @@ impl<R: Runtime> Mamba3<R> {
         let output_refs: Vec<&Var<R>> = outputs.iter().collect();
         var_cat(&output_refs, 1, client).map_err(Error::Numr)
     }
+}
+
+/// Step `t` of a `[batch, seq_len, ..]` input, packed and reshaped to `shape`.
+///
+/// The step view is strided when `batch > 1`, so it is packed before the reshape.
+fn time_step<R>(input: &Var<R>, t: usize, shape: &[usize]) -> Result<Var<R>>
+where
+    R: Runtime<DType = DType>,
+    R::Client: TensorOps<R>,
+{
+    let step = var_contiguous(&var_narrow(input, 1, t, 1).map_err(Error::Numr)?)?;
+    var_reshape(&step, shape).map_err(Error::Numr)
 }
 
 #[cfg(test)]
@@ -264,6 +246,82 @@ mod tests {
                 (*actual as f64 - expected).abs() < 2e-5,
                 "idx={i}: actual={actual}, expected={expected}"
             );
+        }
+    }
+
+    /// Each step of a two-row batch is a strided view. Each row matches the
+    /// one-row reference on its own data.
+    #[test]
+    fn test_trapezoidal_two_row_batch_matches_f64_reference() {
+        let (client, device) = cpu_setup();
+        let config = Mamba3Config::new(2)
+            .with_nheads(1)
+            .with_expand(1)
+            .with_d_state(2)
+            .with_dt_softplus(false)
+            .with_use_dt_bias(false)
+            .with_use_d(true);
+        let mut mamba = tiny_mamba3(config);
+        mamba.a_log = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&[0.5f32.ln()], &[1], &device).unwrap(),
+            false,
+        );
+        mamba.d_param = Some(Var::new(
+            Tensor::<CpuRuntime>::from_slice(&[0.1f32], &[1], &device).unwrap(),
+            false,
+        ));
+
+        let x_rows = [
+            [1.0f32, 0.5, -0.25, 2.0, 0.75, -1.0],
+            [-0.5f32, 1.5, 0.25, -2.0, 1.25, 0.4],
+        ];
+        let b_rows = [
+            [0.5f32, -0.2, 0.1, 0.3, -0.4, 0.25],
+            [-0.3f32, 0.6, 0.2, -0.1, 0.35, 0.05],
+        ];
+        let c_rows = [
+            [1.0f32, 0.5, -0.25, 0.75, 0.6, -0.1],
+            [0.2f32, -0.8, 0.45, 0.3, -0.6, 0.9],
+        ];
+        let dt_rows = [[0.2f32, 0.4, 0.3], [0.5f32, 0.1, 0.25]];
+        let lambda_rows = [[0.7f32, 0.2, 0.9], [0.3f32, 0.6, 0.1]];
+
+        let input = |rows: &[&[f32]], shape: &[usize]| {
+            let data: Vec<f32> = rows.concat();
+            Var::new(
+                Tensor::<CpuRuntime>::from_slice(&data, shape, &device).unwrap(),
+                false,
+            )
+        };
+        let x = input(&[&x_rows[0], &x_rows[1]], &[2, 3, 1, 2]);
+        let b = input(&[&b_rows[0], &b_rows[1]], &[2, 3, 1, 2]);
+        let c = input(&[&c_rows[0], &c_rows[1]], &[2, 3, 1, 2]);
+        let dt = input(&[&dt_rows[0], &dt_rows[1]], &[2, 3, 1]);
+        let lambda = input(&[&lambda_rows[0], &lambda_rows[1]], &[2, 3, 1]);
+
+        let out = mamba
+            .trapezoidal_ssm_forward(&client, &x, &b, &c, &dt, &lambda)
+            .unwrap();
+        assert_eq!(out.shape(), &[2, 3, 1, 2]);
+        let data: Vec<f32> = out.tensor().contiguous().unwrap().to_vec();
+
+        for row in 0..2 {
+            let expected = trapezoidal_reference(
+                &x_rows[row],
+                &b_rows[row],
+                &c_rows[row],
+                &dt_rows[row],
+                &lambda_rows[row],
+                -0.5,
+                0.1,
+            );
+            for (i, expected) in expected.iter().enumerate() {
+                let actual = data[row * 6 + i];
+                assert!(
+                    (actual as f64 - expected).abs() < 2e-5,
+                    "row={row} idx={i}: actual={actual}, expected={expected}"
+                );
+            }
         }
     }
 

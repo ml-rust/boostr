@@ -194,6 +194,7 @@ fn run_flash_entry(case: &Case, sliding_window: usize) -> Vec<f32> {
         Some(rope.cos_cache()),
         Some(rope.sin_cache()),
         &spec,
+        None,
     )
     .unwrap_or_else(|e| panic!("{}: attention_core_flash failed: {e}", case.name));
 

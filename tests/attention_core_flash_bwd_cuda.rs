@@ -160,6 +160,7 @@ fn run_case(num_heads: usize, num_kv_heads: usize, dtype: DType, label: &str) {
         Some(rope.cos_cache()),
         Some(rope.sin_cache()),
         &spec,
+        None,
     )
     .unwrap_or_else(|e| panic!("{label}: attention_core_flash forward failed: {e}"));
 

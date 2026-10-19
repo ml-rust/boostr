@@ -25,13 +25,16 @@
 //! one rule, one file, shared by every architecture.
 
 use super::mask::prefill_attention_mask;
+use super::segmented::segmented_flash_attention;
 use super::spec::{AttentionCoreSpec, AttentionKernel};
 use super::stages::{attention_epilogue, attention_epilogue_token_major, attention_prologue};
 use crate::error::{Error, Result};
 use crate::nn::var_ops::{repeat_kv, var_contiguous};
 use crate::ops::impl_generic::attention::{multi_head_attention_impl, softcapped_attention_impl};
 use crate::ops::traits::position::alibi::AlibiOps;
-use crate::ops::traits::{AttnOutLayout, FlashAttentionOps, RoPEOps};
+use crate::ops::traits::{
+    AttnOutLayout, FlashAttentionOps, PackedSegments, RoPEOps, VarLenAttentionOps,
+};
 use crate::ops::var_flash_attention;
 use numr::autograd::Var;
 use numr::dtype::DType;
@@ -78,8 +81,9 @@ use numr::runtime::{Runtime, RuntimeClient};
 ///
 /// This entry point carries the UNION of both kernels' bounds, including
 /// `LinalgOps<R>` and `AlibiOps<R>` (needed only by `Masked`) and
-/// `R::Client: FlashAttentionOps<R>` (needed only by `Flash`, whose backward
-/// node resolves its client from the runtime). A caller that only ever runs
+/// `R::Client: FlashAttentionOps<R> + VarLenAttentionOps<R>` (needed only by
+/// `Flash`, whose backward node resolves its client from the runtime). This
+/// dispatcher passes no segments. A caller that only ever runs
 /// one kernel should call the narrower entry point instead:
 /// [`attention_core_masked`] for callers that avoid `FlashAttentionOps<R>` —
 /// notably `LlamaAttention`, which sits under the [`crate::model::Model`]
@@ -106,11 +110,11 @@ where
         + RoPEOps<R>
         + AlibiOps<R>
         + TensorOps<R>,
-    R::Client: TensorOps<R> + ScalarOps<R> + FlashAttentionOps<R>,
+    R::Client: TensorOps<R> + ScalarOps<R> + FlashAttentionOps<R> + VarLenAttentionOps<R>,
 {
     match spec.kernel {
         AttentionKernel::Masked => attention_core_masked(client, q, k, v, cos, sin, spec),
-        AttentionKernel::Flash => attention_core_flash(client, q, k, v, cos, sin, spec),
+        AttentionKernel::Flash => attention_core_flash(client, q, k, v, cos, sin, spec, None),
     }
 }
 
@@ -131,6 +135,23 @@ where
 /// `apply_rotary_if_needed` gate as `Masked`,
 /// so a rotating spec (`skip_rope` false) given `None` returns
 /// [`Error::InvalidArgument`] rather than silently skipping the rotation.
+///
+/// # Document masking
+///
+/// `segments` splits the flattened `B * S` tokens into documents. `None` runs the
+/// unsegmented flash kernel. `Some` runs packed varlen attention, causal inside each
+/// document, and no token attends across a document boundary.
+///
+/// - Coverage: the segments must cover exactly `B * S` tokens.
+/// - Rows: every row start must also start a segment. A segment never spans two rows.
+/// - Lengths: `S_q` must equal `S_k`. A KV-cached block passes `None`.
+/// - Window: `spec.sliding_window` must be `0`. Varlen attention has no window.
+/// - Backend: the CUDA varlen kernel takes F32/F16 with head_dim 64/128/256 only.
+///
+/// RoPE needs no position reset per document. Rotated scores depend only on
+/// the offset `i - j`. A document at row offset `p` gets the scores it gets at
+/// offset `0`, up to float rounding.
+#[allow(clippy::too_many_arguments)]
 pub fn attention_core_flash<R, C>(
     client: &C,
     q: &Var<R>,
@@ -139,11 +160,12 @@ pub fn attention_core_flash<R, C>(
     cos: Option<&Var<R>>,
     sin: Option<&Var<R>>,
     spec: &AttentionCoreSpec<'_, R>,
+    segments: Option<&PackedSegments<R>>,
 ) -> Result<Var<R>>
 where
     R: Runtime<DType = DType>,
     C: RuntimeClient<R> + NormalizationOps<R> + RoPEOps<R>,
-    R::Client: TensorOps<R> + ScalarOps<R> + FlashAttentionOps<R>,
+    R::Client: TensorOps<R> + ScalarOps<R> + FlashAttentionOps<R> + VarLenAttentionOps<R>,
 {
     if spec.softcap.is_some() {
         return Err(Error::InvalidArgument {
@@ -168,6 +190,10 @@ where
     }
     let (q, k, v) = attention_prologue(client, q, k, v, cos, sin, spec)?;
     let batch = q.shape()[0];
+    if let Some(segments) = segments {
+        let attn_out = segmented_flash_attention(&q, &k, &v, segments, spec)?;
+        return attention_epilogue_token_major(&attn_out, batch, spec);
+    }
     // Flash reads V directly; the permuted view is not contiguous.
     let v = var_contiguous(&v)?;
     let attn_out = var_flash_attention(

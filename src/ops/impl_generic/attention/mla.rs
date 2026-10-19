@@ -3,11 +3,13 @@
 //! Allows different K and V last dimensions (needed for MLA's decoupled RoPE).
 //! Q@K^T uses D_k, output has D_v from V.
 
+use super::document_mask::document_mask_bias;
 use crate::error::{Error, Result};
 use numr::autograd::{Var, var_add, var_matmul, var_mul_scalar, var_softmax, var_transpose};
 use numr::dtype::DType;
-use numr::ops::ScalarOps;
+use numr::ops::{CompareOps, ConditionalOps, ScalarOps};
 use numr::runtime::{Runtime, RuntimeClient};
+use numr::tensor::Tensor;
 
 /// Scaled dot-product attention: softmax(Q @ K^T * scale + mask) @ V
 ///
@@ -31,9 +33,122 @@ where
     C: RuntimeClient<R> + ScalarOps<R>,
     R::Client: ScalarOps<R>,
 {
-    let q_shape = q.tensor().shape().to_vec();
-    let k_shape = k.tensor().shape().to_vec();
-    let v_shape = v.tensor().shape().to_vec();
+    check_shapes(q, k, v)?;
+    let mask = if causal {
+        Some(top_left_causal_mask(q, k)?)
+    } else {
+        None
+    };
+    scaled_dot_product_attention_masked_impl(client, q, k, v, scale, mask.as_ref())
+}
+
+/// [`scaled_dot_product_attention_impl`] with an optional document mask.
+///
+/// `segment_ids` is `[B, S]` I32 with `S == S_kv`. Equal ids in one row mark one document.
+/// No query attends to a key of another document. `causal` applies inside each document.
+/// `None` runs [`scaled_dot_product_attention_impl`] unchanged.
+///
+/// RoPE needs no position reset per document. Rotated scores depend only on
+/// the offset `i - j`.
+///
+/// The mask builds on the device from `segment_ids`. Scores must be F32, like the causal mask.
+pub fn segmented_scaled_dot_product_attention_impl<R, C>(
+    client: &C,
+    q: &Var<R>,
+    k: &Var<R>,
+    v: &Var<R>,
+    scale: f64,
+    causal: bool,
+    segment_ids: Option<&Tensor<R>>,
+) -> Result<Var<R>>
+where
+    R: Runtime<DType = DType>,
+    C: RuntimeClient<R> + ScalarOps<R> + CompareOps<R> + ConditionalOps<R>,
+    R::Client: ScalarOps<R>,
+{
+    let Some(segment_ids) = segment_ids else {
+        return scaled_dot_product_attention_impl(client, q, k, v, scale, causal);
+    };
+    check_shapes(q, k, v)?;
+    let (batch, seq_q, seq_kv) = (q.shape()[0], q.shape()[2], k.shape()[2]);
+    if seq_q != seq_kv {
+        return Err(Error::InvalidArgument {
+            arg: "segment_ids",
+            reason: format!(
+                "segment_ids need equal query and key lengths, got q {seq_q} and k {seq_kv}; \
+                 pass segment_ids None for a KV-cached block"
+            ),
+        });
+    }
+    let bias = document_mask_bias(client, segment_ids, batch, seq_q, causal)?;
+    scaled_dot_product_attention_masked_impl(client, q, k, v, scale, Some(&bias))
+}
+
+/// softmax(Q @ K^T * scale + mask) @ V with a caller-built additive mask.
+///
+/// `mask` broadcasts against the `[B, H, S, S_kv]` scores and must share their dtype.
+/// `None` adds no mask. The mask takes no gradient.
+pub fn scaled_dot_product_attention_masked_impl<R, C>(
+    client: &C,
+    q: &Var<R>,
+    k: &Var<R>,
+    v: &Var<R>,
+    scale: f64,
+    mask: Option<&Tensor<R>>,
+) -> Result<Var<R>>
+where
+    R: Runtime<DType = DType>,
+    C: RuntimeClient<R> + ScalarOps<R>,
+    R::Client: ScalarOps<R>,
+{
+    check_shapes(q, k, v)?;
+
+    // Q @ K^T → [B, H, S, S_kv]
+    let k_t = var_transpose(k).map_err(Error::Numr)?;
+    let scores = var_matmul(q, &k_t, client).map_err(Error::Numr)?;
+
+    // Scale
+    let scores = var_mul_scalar(&scores, scale, client).map_err(Error::Numr)?;
+
+    let scores = match mask {
+        Some(mask) => {
+            let mask = Var::new(mask.clone(), false);
+            var_add(&scores, &mask, client).map_err(Error::Numr)?
+        }
+        None => scores,
+    };
+
+    // Softmax over last dim
+    let weights = var_softmax(&scores, -1, client).map_err(Error::Numr)?;
+
+    // Weights @ V → [B, H, S, D_v]
+    var_matmul(&weights, v, client).map_err(Error::Numr)
+}
+
+/// `[1, 1, S, S_kv]` F32 causal mask: key `j > i` holds `-inf`.
+///
+/// Query `i` aligns with key `i`, the same rule as the CUDA SDPA kernel.
+fn top_left_causal_mask<R: Runtime<DType = DType>>(q: &Var<R>, k: &Var<R>) -> Result<Tensor<R>> {
+    let s_q = q.shape()[2];
+    let s_kv = k.shape()[2];
+    let mut mask_data = vec![0.0f32; s_q * s_kv];
+    for i in 0..s_q {
+        for j in (i + 1)..s_kv {
+            mask_data[i * s_kv + j] = f32::NEG_INFINITY;
+        }
+    }
+    Ok(Tensor::<R>::from_slice(
+        &mask_data,
+        &[1, 1, s_q, s_kv],
+        q.tensor().device(),
+    )?)
+}
+
+/// Check the `[B, H, S, D_k]`, `[B, H, S_kv, D_k]`, `[B, H, S_kv, D_v]` layout.
+fn check_shapes<R: Runtime>(q: &Var<R>, k: &Var<R>, v: &Var<R>) -> Result<()> {
+    let q_shape = q.tensor().shape();
+    let k_shape = k.tensor().shape();
+    let v_shape = v.tensor().shape();
 
     if q_shape.len() != 4 || k_shape.len() != 4 || v_shape.len() != 4 {
         return Err(Error::InvalidArgument {
@@ -63,40 +178,7 @@ where
             reason: format!("D_k mismatch: q D={}, k D={}", q_shape[3], k_shape[3]),
         });
     }
-
-    // Q @ K^T → [B, H, S, S_kv]
-    let k_t = var_transpose(k).map_err(Error::Numr)?;
-    let scores = var_matmul(q, &k_t, client).map_err(Error::Numr)?;
-
-    // Scale
-    let scores = var_mul_scalar(&scores, scale, client).map_err(Error::Numr)?;
-
-    // Causal mask
-    let scores = if causal {
-        let s_q = q_shape[2];
-        let s_kv = k_shape[2];
-        let mut mask_data = vec![0.0f32; s_q * s_kv];
-        for i in 0..s_q {
-            for j in (i + 1)..s_kv {
-                mask_data[i * s_kv + j] = f32::NEG_INFINITY;
-            }
-        }
-        let mask_tensor = numr::tensor::Tensor::<R>::from_slice(
-            &mask_data,
-            &[1, 1, s_q, s_kv],
-            q.tensor().device(),
-        )?;
-        let mask = Var::new(mask_tensor, false);
-        var_add(&scores, &mask, client).map_err(Error::Numr)?
-    } else {
-        scores
-    };
-
-    // Softmax over last dim
-    let weights = var_softmax(&scores, -1, client).map_err(Error::Numr)?;
-
-    // Weights @ V → [B, H, S, D_v]
-    var_matmul(&weights, v, client).map_err(Error::Numr)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -104,7 +186,29 @@ mod tests {
     use super::*;
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::CpuRuntime;
-    use numr::tensor::Tensor;
+
+    #[test]
+    fn segment_ids_reject_unequal_lengths() {
+        let (client, device) = cpu_setup();
+        let var = |s: usize| {
+            let t = Tensor::<CpuRuntime>::from_slice(&vec![0.1f32; s * 4], &[1, 1, s, 4], &device)
+                .unwrap();
+            Var::new(t, false)
+        };
+        let ids = Tensor::<CpuRuntime>::from_slice(&[0i32, 0], &[1, 2], &device).unwrap();
+        let e = segmented_scaled_dot_product_attention_impl(
+            &client,
+            &var(2),
+            &var(3),
+            &var(3),
+            0.5,
+            true,
+            Some(&ids),
+        )
+        .err()
+        .unwrap();
+        assert!(e.to_string().contains("equal query and key lengths"), "{e}");
+    }
 
     #[test]
     fn test_sdpa_different_kv_dims() {

@@ -4,6 +4,7 @@
 
 mod entry;
 mod mask;
+mod segmented;
 mod spec;
 mod stages;
 

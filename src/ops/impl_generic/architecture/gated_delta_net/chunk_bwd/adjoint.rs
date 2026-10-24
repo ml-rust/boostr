@@ -123,7 +123,8 @@ mod tests {
         let ds_final = mk(ds_data.clone(), &[batch * heads, s_k, s_v]);
 
         let run = |s: &Tensor<CpuRuntime>| {
-            let (o, s) = gdn_chunk_prefill_impl(&client, &q, &k, &v, &g, &beta, s, cs).unwrap();
+            let (o, s) =
+                gdn_chunk_prefill_impl(&client, &q, &k, &v, &g, &beta, s, None, cs).unwrap();
             (o.to_vec::<f64>(), s.to_vec::<f64>())
         };
         let (o0, s0) = run(&state);
@@ -133,7 +134,7 @@ mod tests {
         let want = dot(&d_o_data, &d_out) + dot(&ds_data, &d_fin);
 
         let dims = check_gdn_shapes(&q, &k, &v, &g, &beta, &state).unwrap();
-        let x = chunk_inputs(&client, &q, &k, &v, &g, &beta, dims, cs).unwrap();
+        let x = chunk_inputs(&client, &q, &k, &v, &g, &beta, None, dims, cs).unwrap();
         let d_o_c = to_chunks(
             &pad_seq(&client, &d_o, seq, x.padded).unwrap(),
             x.n,

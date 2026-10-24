@@ -76,6 +76,6 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
         let g = client.mul(&g, ssm_a).map_err(Error::Numr)?;
 
         // 8. Chunked recurrence.
-        client.gdn_chunk_prefill(&q, &k, &v, &g, &beta, ssm_state, cfg.chunk_size)
+        client.gdn_chunk_prefill(&q, &k, &v, &g, &beta, ssm_state, None, cfg.chunk_size)
     }
 }

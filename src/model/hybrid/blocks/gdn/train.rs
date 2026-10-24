@@ -110,7 +110,7 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
         let (dtype, device) = (v.tensor().dtype(), v.tensor().device());
         let state = Tensor::<R>::zeros(&[batch, h_v, s, s], dtype, device).map_err(Error::Numr)?;
         let state = Var::new(state, false);
-        let (o, _) = var_gdn_chunk(client, &q, &k, &v, &g, &beta, &state, cfg.chunk_size)?;
+        let (o, _) = var_gdn_chunk(client, &q, &k, &v, &g, &beta, &state, None, cfg.chunk_size)?;
 
         // 9. silu(z) * rms_norm(o), per head.
         let z = var_contiguous(&z)?;

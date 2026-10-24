@@ -106,7 +106,16 @@ pub trait GatedDeltaNetOps<R: Runtime> {
     ///
     /// Same result as `seq` calls to [`gdn_step`](Self::gdn_step) up to
     /// float rounding.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// `segment_ids` (I32 `[batch, seq]`) packs documents into a row. A
+    /// document starts where the id differs from the previous one. Exact
+    /// masks keep all state inside a document: `state` reaches only the
+    /// first document, later ones start from zero, and the returned state
+    /// is the last document's. `None`: one document per row.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "six forward inputs, segment ids and the chunk size"
+    )]
     fn gdn_chunk_prefill(
         &self,
         q: &Tensor<R>,
@@ -115,12 +124,14 @@ pub trait GatedDeltaNetOps<R: Runtime> {
         g: &Tensor<R>,
         beta: &Tensor<R>,
         state: &Tensor<R>,
+        segment_ids: Option<&Tensor<R>>,
         chunk_size: usize,
     ) -> Result<(Tensor<R>, Tensor<R>)>;
 
     /// Backward of [`gdn_chunk_prefill`](Self::gdn_chunk_prefill).
     ///
-    /// - `q` .. `state`, `chunk_size`: the forward arguments.
+    /// - `q` .. `state`, `segment_ids`, `chunk_size`: the forward arguments.
+    ///   With segment ids, no gradient crosses a document start.
     /// - `d_o`: `dL/do`, `[batch, seq, H, S_v]`.
     /// - `d_state_final`: `dL/dstate` of the returned state, `[batch, H, S_k, S_v]`.
     ///   `None` means zero.
@@ -129,7 +140,7 @@ pub trait GatedDeltaNetOps<R: Runtime> {
     /// A wrong `d_o` or `d_state_final` shape, or `chunk_size == 0`, is an error.
     #[allow(
         clippy::too_many_arguments,
-        reason = "six forward inputs, two output gradients and the chunk size"
+        reason = "six forward inputs, segment ids, two output gradients and the chunk size"
     )]
     fn gdn_chunk_backward(
         &self,
@@ -139,6 +150,7 @@ pub trait GatedDeltaNetOps<R: Runtime> {
         g: &Tensor<R>,
         beta: &Tensor<R>,
         state: &Tensor<R>,
+        segment_ids: Option<&Tensor<R>>,
         d_o: &Tensor<R>,
         d_state_final: Option<&Tensor<R>>,
         chunk_size: usize,

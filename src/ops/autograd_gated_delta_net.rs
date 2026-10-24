@@ -15,8 +15,8 @@ const INPUTS: usize = 6;
 
 /// Backward function for the chunked GDN prefill.
 ///
-/// Saved state: the six contiguous inputs, in input order.
-/// Computes every input gradient via `GatedDeltaNetOps::gdn_chunk_backward`.
+/// Saved state: the six contiguous inputs, in input order, and the segment
+/// ids. Computes every input gradient via `GatedDeltaNetOps::gdn_chunk_backward`.
 ///
 /// The final state is not in the autograd graph. `GradFn::backward` takes one
 /// output gradient, so `dL/dstate` of the returned state is zero here.
@@ -26,6 +26,8 @@ struct GdnChunkBackward<R: Runtime> {
     input_grad_fns: [Option<Arc<dyn GradFn<R>>>; INPUTS],
     /// `requires_grad` of each input. An input with `false` gets no gradient.
     requires_grad: [bool; INPUTS],
+    /// Document map of the forward. It is not a graph input.
+    segment_ids: Option<Tensor<R>>,
     chunk_size: usize,
 }
 
@@ -51,8 +53,9 @@ where
         let client = R::default_client(grad_output.device());
         let d_o = grad_output.contiguous()?;
         let [q, k, v, g, beta, state] = &self.saved_tensors;
+        let ids = self.segment_ids.as_ref();
         let grads = client
-            .gdn_chunk_backward(q, k, v, g, beta, state, &d_o, None, self.chunk_size)
+            .gdn_chunk_backward(q, k, v, g, beta, state, ids, &d_o, None, self.chunk_size)
             .map_err(|e| numr::error::Error::Internal(format!("gdn_chunk_backward failed: {e}")))?;
         let all = [
             grads.dq,
@@ -100,6 +103,8 @@ where
 ///
 /// Shapes and math follow [`GatedDeltaNetOps::gdn_chunk_prefill`]. `q` and `k`
 /// must already have `H` heads, so no gradient is reduced over key heads.
+/// `segment_ids` (I32 `[batch, seq]`) packs documents: no state and no
+/// gradient crosses a document start. `None` means one document per row.
 ///
 /// Returns `(o, state)`. `o` is tracked when any input requires grad. `state`
 /// is a detached tensor.
@@ -109,7 +114,7 @@ where
 /// the next segment will train with truncated backpropagation at that boundary.
 #[allow(
     clippy::too_many_arguments,
-    reason = "client, six forward inputs and the chunk size"
+    reason = "client, six forward inputs, segment ids and the chunk size"
 )]
 pub fn var_gdn_chunk<R, C>(
     client: &C,
@@ -119,6 +124,7 @@ pub fn var_gdn_chunk<R, C>(
     g: &Var<R>,
     beta: &Var<R>,
     state: &Var<R>,
+    segment_ids: Option<&Tensor<R>>,
     chunk_size: usize,
 ) -> Result<(Var<R>, Tensor<R>)>
 where
@@ -138,7 +144,7 @@ where
     ];
     let [sq, sk, sv, sg, sbeta, sstate] = &saved;
     let (output, state_out) =
-        client.gdn_chunk_prefill(sq, sk, sv, sg, sbeta, sstate, chunk_size)?;
+        client.gdn_chunk_prefill(sq, sk, sv, sg, sbeta, sstate, segment_ids, chunk_size)?;
 
     let requires_grad = inputs.map(|x| x.requires_grad());
     if !requires_grad.iter().any(|r| *r) {
@@ -149,6 +155,7 @@ where
         saved_tensors: saved,
         input_grad_fns: inputs.map(|x| x.grad_fn().cloned()),
         requires_grad,
+        segment_ids: segment_ids.cloned(),
         chunk_size,
     };
     Ok((Var::from_op(output, Arc::new(grad_fn)), state_out))
@@ -158,7 +165,7 @@ where
 mod tests {
     use super::*;
     use crate::ops::impl_generic::architecture::gated_delta_net::gdn_recurrent_backward;
-    use crate::test_utils::{Lcg, cpu_setup};
+    use crate::test_utils::{Lcg, cpu_setup, ids_for, max_abs_diff_f64};
     use numr::autograd::{GradStore, backward, var_mul, var_sum};
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 
@@ -225,11 +232,12 @@ mod tests {
         inputs: &[T; INPUTS],
         w: &T,
         requires: [bool; INPUTS],
+        ids: Option<&T>,
     ) -> ([Var<CpuRuntime>; INPUTS], GradStore<CpuRuntime>) {
         let vars: [Var<CpuRuntime>; INPUTS] =
             std::array::from_fn(|i| Var::new(inputs[i].clone(), requires[i]));
         let [q, k, v, g, beta, state] = &vars;
-        let (o, _) = var_gdn_chunk(client, q, k, v, g, beta, state, CHUNK).unwrap();
+        let (o, _) = var_gdn_chunk(client, q, k, v, g, beta, state, ids, CHUNK).unwrap();
         let w = Var::new(w.clone(), false);
         let prod = var_mul(&o, &w, client).unwrap();
         let loss = var_sum(&prod, &[0, 1, 2, 3], false, client).unwrap();
@@ -276,7 +284,7 @@ mod tests {
             inputs[0] = head_major.permute(&[0, 2, 1, 3]).unwrap();
             assert!(!inputs[0].is_contiguous());
         }
-        let (vars, grads) = var_grads(&client, &inputs, &w, requires);
+        let (vars, grads) = var_grads(&client, &inputs, &w, requires, None);
         let want = oracle(&client, &reference, &w);
         let shapes = shapes();
         for (i, var) in vars.iter().enumerate() {
@@ -325,14 +333,40 @@ mod tests {
         let vars: [Var<CpuRuntime>; INPUTS] =
             std::array::from_fn(|i| Var::new(inputs[i].clone(), false));
         let [q, k, v, g, beta, state] = &vars;
-        let (o, s) = var_gdn_chunk(&client, q, k, v, g, beta, state, CHUNK).unwrap();
+        let (o, s) = var_gdn_chunk(&client, q, k, v, g, beta, state, None, CHUNK).unwrap();
         assert!(!o.requires_grad());
         assert!(o.grad_fn().is_none());
         let [q, k, v, g, beta, state] = &inputs;
         let (want_o, want_s) = client
-            .gdn_chunk_prefill(q, k, v, g, beta, state, CHUNK)
+            .gdn_chunk_prefill(q, k, v, g, beta, state, None, CHUNK)
             .unwrap();
         assert_eq!(o.tensor().to_vec::<f64>(), want_o.to_vec::<f64>());
         assert_eq!(s.to_vec::<f64>(), want_s.to_vec::<f64>());
+    }
+
+    /// The Var path hands the segment ids to both the forward and the
+    /// backward. Row 0 holds documents of 2 and 5 tokens, row 1 of 4, 1 and
+    /// 2. The masked op math is checked against separate documents in
+    /// `chunk_mask.rs`.
+    #[test]
+    fn var_path_passes_segment_ids() {
+        let (client, device) = cpu_setup();
+        let (inputs, w) = problem(&device);
+        let id_data = [ids_for(&[2, 5]), ids_for(&[4, 1, 2])].concat();
+        let ids = T::from_slice(&id_data, &[BATCH, SEQ], &device).unwrap();
+        let (vars, grads) = var_grads(&client, &inputs, &w, ALL, Some(&ids));
+
+        let [q, k, v, g, beta, state] = &inputs;
+        let d = client
+            .gdn_chunk_backward(q, k, v, g, beta, state, Some(&ids), &w, None, CHUNK)
+            .unwrap();
+        let want = [d.dq, d.dk, d.dv, d.dg, d.dbeta, d.dstate];
+        let unmasked = oracle(&client, &inputs, &w);
+        for (i, var) in vars.iter().enumerate() {
+            let got = grads.get(var.id()).unwrap();
+            assert_close(got, &want[i], NAMES[i]);
+            let diff = max_abs_diff_f64(&got.to_vec::<f64>(), &unmasked[i].to_vec::<f64>());
+            assert!(diff > 1e-6, "{}: segment ids had no effect", NAMES[i]);
+        }
     }
 }

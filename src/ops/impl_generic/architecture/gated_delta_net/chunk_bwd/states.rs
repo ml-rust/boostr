@@ -89,7 +89,7 @@ mod tests {
         );
 
         let dims = check_gdn_shapes(&q, &k, &v, &g, &beta, &state).unwrap();
-        let x = chunk_inputs(&client, &q, &k, &v, &g, &beta, dims, cs).unwrap();
+        let x = chunk_inputs(&client, &q, &k, &v, &g, &beta, None, dims, cs).unwrap();
         let n = batch * heads;
         let s0 = state.reshape(&[n, s_k, s_v]).unwrap();
         let st = chunk_start_states(&client, &x.terms, &s0, x.n_chunks).unwrap();
@@ -110,6 +110,7 @@ mod tests {
                     &pre(&g),
                     &pre(&beta),
                     &state,
+                    None,
                     cs,
                 )
                 .unwrap();

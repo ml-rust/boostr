@@ -4,7 +4,13 @@
 //! every chunk is independent. Each product below runs once over
 //! `[N, n_chunks, ..]`. Names follow `ChunkTerms`: `G = g_cs`,
 //! `gamma = G[last]`, `Q~ = q / sqrt(S_k)`, `K_b = beta K`, `V_b = beta V`,
-//! `K_be = K_b exp(G)`, `P = kq`.
+//! `K_be = K_b e_g`, `P = kq`, `D = decay`.
+//!
+//! The exponential factors come from `ChunkTerms` and are never rebuilt
+//! here: `e_g = exp(G) pre` and `e_tail = exp(gamma - G) last`. `D` and
+//! `exp(gamma)` carry their document masks too. The masks are constants,
+//! so every product below keeps them and no gradient crosses a document
+//! start. Below, `exp(G)` stands for `e_g` and `exp(gamma - G)` for `e_tail`.
 //!
 //! ```text
 //! dV_new = P^T dO + K_g dS'        dQ_g = dO S^T
@@ -75,9 +81,7 @@ where
     let s_t = s.transpose(2, 3)?;
     let v_new = &states.v_new;
 
-    let e_g = client.exp(&t.g_cs)?.unsqueeze(3)?; // [N, n_chunks, cs, 1]
-    let g_last = t.g_cs.narrow(2, cs - 1, 1)?.contiguous()?; // [N, n_chunks, 1]
-    let e_tail = client.exp(&client.sub(&g_last, &t.g_cs)?)?.unsqueeze(3)?;
+    let (e_g, e_tail) = (&t.e_g, &t.e_tail); // [N, n_chunks, cs, 1]
     let k_g = t.k_g_t.transpose(2, 3)?; // [N, n_chunks, cs, S_k]
 
     // Output and state paths.
@@ -93,7 +97,7 @@ where
     // UT transform: U = T V_b, W = T K_be, T = (I + A)^-1.
     let k_b = client.mul(&x.k, &x.beta)?;
     let v_b = client.mul(&x.v, &x.beta)?;
-    let kbe = client.mul(&k_b, &e_g)?;
+    let kbe = client.mul(&k_b, e_g)?;
     let dt = client.add(
         &client.matmul(&dv_new, &v_b.transpose(2, 3)?)?,
         &client.matmul(&dw, &kbe.transpose(2, 3)?)?,
@@ -107,13 +111,13 @@ where
     // Through A = strict(K_b K^T D) and P = lower(Q~ K^T D).
     let dm_a = client.mul(&da, &t.decay)?;
     let dm_p = client.mul(&dp, &t.decay)?;
-    let dk_b = client.add(&client.matmul(&dm_a, &x.k)?, &client.mul(&dkbe, &e_g)?)?;
+    let dk_b = client.add(&client.matmul(&dm_a, &x.k)?, &client.mul(&dkbe, e_g)?)?;
     let dk = client.add(
         &client.matmul(&dm_a.transpose(2, 3)?, &k_b)?,
         &client.matmul(&dm_p.transpose(2, 3)?, &x.q)?,
     )?;
-    let dk = client.add(&dk, &client.mul(&dkg, &e_tail)?)?;
-    let dq = client.add(&client.matmul(&dm_p, &x.k)?, &client.mul(&dqg, &e_g)?)?;
+    let dk = client.add(&dk, &client.mul(&dkg, e_tail)?)?;
+    let dq = client.add(&client.matmul(&dm_p, &x.k)?, &client.mul(&dqg, e_g)?)?;
     let dq = client.mul_scalar(&dq, scale)?;
 
     // Gates.

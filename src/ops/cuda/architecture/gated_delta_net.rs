@@ -49,9 +49,10 @@ impl GatedDeltaNetOps<CudaRuntime> for CudaClient {
         g: &Tensor<CudaRuntime>,
         beta: &Tensor<CudaRuntime>,
         state: &Tensor<CudaRuntime>,
+        segment_ids: Option<&Tensor<CudaRuntime>>,
         chunk_size: usize,
     ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
-        gdn_chunk_prefill_impl(self, q, k, v, g, beta, state, chunk_size)
+        gdn_chunk_prefill_impl(self, q, k, v, g, beta, state, segment_ids, chunk_size)
     }
 
     fn gdn_chunk_backward(
@@ -62,6 +63,7 @@ impl GatedDeltaNetOps<CudaRuntime> for CudaClient {
         g: &Tensor<CudaRuntime>,
         beta: &Tensor<CudaRuntime>,
         state: &Tensor<CudaRuntime>,
+        segment_ids: Option<&Tensor<CudaRuntime>>,
         d_o: &Tensor<CudaRuntime>,
         d_state_final: Option<&Tensor<CudaRuntime>>,
         chunk_size: usize,
@@ -74,6 +76,7 @@ impl GatedDeltaNetOps<CudaRuntime> for CudaClient {
             g,
             beta,
             state,
+            segment_ids,
             d_o,
             d_state_final,
             chunk_size,

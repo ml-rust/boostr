@@ -11,8 +11,8 @@ use crate::ops::traits::architecture::gated_delta_net::GdnGrads;
 use numr::algorithm::linalg::LinearAlgebraAlgorithms;
 use numr::dtype::DType;
 use numr::ops::{
-    BinaryOps, CumulativeOps, LinalgOps, MatmulOps, ReduceOps, ScalarOps, ShapeOps, TensorOps,
-    UnaryOps, UtilityOps,
+    BinaryOps, CompareOps, CumulativeOps, LinalgOps, MatmulOps, ReduceOps, ScalarOps, ShapeOps,
+    TensorOps, TypeConversionOps, UnaryOps, UtilityOps,
 };
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
@@ -21,6 +21,9 @@ use numr::tensor::Tensor;
 ///
 /// `d_o` is `dL/do`: `[batch, seq, H, S_v]`. `d_state_final` is `dL/dS_T`:
 /// `[batch, H, S_k, S_v]`. `None` means the final state is not in the loss.
+/// `segment_ids` is the forward's I32 `[batch, seq]` document map. The
+/// stages read the masked chunk terms, so no gradient crosses a document
+/// start. `dstate` reaches only the first document of each row.
 ///
 /// Three stages:
 ///
@@ -39,7 +42,7 @@ use numr::tensor::Tensor;
 /// keep `n_chunks` states of `[N, S_k, S_v]`.
 #[allow(
     clippy::too_many_arguments,
-    reason = "six forward inputs, two output gradients and the chunk size"
+    reason = "six forward inputs, segment ids, two output gradients and the chunk size"
 )]
 pub fn gdn_chunk_backward_impl<R, C>(
     client: &C,
@@ -49,6 +52,7 @@ pub fn gdn_chunk_backward_impl<R, C>(
     g: &Tensor<R>,
     beta: &Tensor<R>,
     state: &Tensor<R>,
+    segment_ids: Option<&Tensor<R>>,
     d_o: &Tensor<R>,
     d_state_final: Option<&Tensor<R>>,
     chunk_size: usize,
@@ -66,7 +70,9 @@ where
         + UtilityOps<R>
         + LinalgOps<R>
         + LinearAlgebraAlgorithms<R>
-        + TensorOps<R>,
+        + TensorOps<R>
+        + CompareOps<R>
+        + TypeConversionOps<R>,
 {
     let dims = check_gdn_shapes(q, k, v, g, beta, state)?;
     let (batch, seq, heads, s_k, s_v) = (dims.batch, dims.seq, dims.heads, dims.s_k, dims.s_v);
@@ -76,7 +82,7 @@ where
         expect_shape(ds, "d_state_final", &state_shape)?;
     }
 
-    let x = chunk_inputs(client, q, k, v, g, beta, dims, chunk_size)?;
+    let x = chunk_inputs(client, q, k, v, g, beta, segment_ids, dims, chunk_size)?;
     let (n, n_chunks, padded) = (x.n, x.n_chunks, x.padded);
     // Padded tokens get a zero output gradient.
     let d_o = to_chunks(&pad_seq(client, d_o, seq, padded)?, n, n_chunks, chunk_size)?;
@@ -256,6 +262,7 @@ mod tests {
             &t[3],
             &t[4],
             &t[5],
+            None,
             &t[6],
             with_state.then_some(&t[7]),
             chunk_size,
@@ -418,7 +425,7 @@ mod tests {
         let zeros = |s: &[usize]| Tensor::<CpuRuntime>::zeros(s, DType::F64, &device).unwrap();
         let run = |d_o: &Tensor<CpuRuntime>, ds: Option<&Tensor<CpuRuntime>>, cs: usize| {
             gdn_chunk_backward_impl(
-                &client, &t[0], &t[1], &t[2], &t[3], &t[4], &t[5], d_o, ds, cs,
+                &client, &t[0], &t[1], &t[2], &t[3], &t[4], &t[5], None, d_o, ds, cs,
             )
         };
         assert!(run(&t[6], Some(&t[7]), 3).is_ok());

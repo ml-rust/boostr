@@ -3,6 +3,7 @@
 pub mod chunk;
 pub(crate) mod chunk_bwd;
 mod chunk_layout;
+mod chunk_mask;
 mod chunk_terms;
 pub mod common;
 pub mod from_conv;

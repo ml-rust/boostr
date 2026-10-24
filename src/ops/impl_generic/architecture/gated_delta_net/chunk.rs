@@ -12,8 +12,8 @@ use crate::error::Result;
 use numr::algorithm::linalg::LinearAlgebraAlgorithms;
 use numr::dtype::DType;
 use numr::ops::{
-    BinaryOps, CumulativeOps, LinalgOps, MatmulOps, ScalarOps, ShapeOps, TensorOps, UnaryOps,
-    UtilityOps,
+    BinaryOps, CompareOps, CumulativeOps, LinalgOps, MatmulOps, ScalarOps, ShapeOps, TensorOps,
+    TypeConversionOps, UnaryOps, UtilityOps,
 };
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
@@ -38,7 +38,19 @@ use numr::tensor::Tensor;
 /// S       = S * exp(g_last) + K_g^T @ V_new
 /// ```
 ///
-/// Returns `(o: [batch, seq, H, S_v], state: [batch, H, S_k, S_v])`.
+/// `segment_ids` (I32 `[batch, seq]`) marks packed documents. With it, the
+/// terms take exact 0/1 document masks:
+///
+/// - `decay` takes `same[j][i]`: tokens `i` and `j` share a document.
+/// - `exp(g_cs)` in `W` and `Q_g` takes `pre[j]`: token `j` shares the
+///   document of the token before the chunk.
+/// - `K_g` takes `last[i]`: token `i` shares the document of the last token.
+/// - `exp(g_last)` takes `pre_last`: the chunk holds one document.
+///
+/// No state crosses a document start. `None` leaves every term unmasked.
+///
+/// Returns `(o: [batch, seq, H, S_v], state: [batch, H, S_k, S_v])`. With
+/// segment ids, `state` is the state of the last document of each row.
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_chunk_prefill_impl<R, C>(
     client: &C,
@@ -48,6 +60,7 @@ pub fn gdn_chunk_prefill_impl<R, C>(
     g: &Tensor<R>,
     beta: &Tensor<R>,
     state: &Tensor<R>,
+    segment_ids: Option<&Tensor<R>>,
     chunk_size: usize,
 ) -> Result<(Tensor<R>, Tensor<R>)>
 where
@@ -62,7 +75,9 @@ where
         + UtilityOps<R>
         + LinalgOps<R>
         + LinearAlgebraAlgorithms<R>
-        + TensorOps<R>,
+        + TensorOps<R>
+        + CompareOps<R>
+        + TypeConversionOps<R>,
 {
     let dims = check_gdn_shapes(q, k, v, g, beta, state)?;
     let (batch, heads, s_k, s_v) = (dims.batch, dims.heads, dims.s_k, dims.s_v);
@@ -72,7 +87,7 @@ where
         padded,
         terms,
         ..
-    } = chunk_inputs(client, q, k, v, g, beta, dims, chunk_size)?;
+    } = chunk_inputs(client, q, k, v, g, beta, segment_ids, dims, chunk_size)?;
     let ChunkTerms {
         u,
         w,
@@ -271,7 +286,7 @@ mod tests {
         let inp = random_inputs(&device, seed, regime, batch, seq, heads, s_k, s_v);
 
         let (o_chunk, s_chunk) = gdn_chunk_prefill_impl(
-            &client, &inp.q, &inp.k, &inp.v, &inp.g, &inp.beta, &inp.state, chunk_size,
+            &client, &inp.q, &inp.k, &inp.v, &inp.g, &inp.beta, &inp.state, None, chunk_size,
         )
         .unwrap();
         assert_eq!(o_chunk.shape(), &[batch, seq, heads, s_v]);
@@ -343,7 +358,7 @@ mod tests {
         let (client, device) = cpu_setup();
         let inp = random_inputs(&device, 1, STRONG_DECAY, 1, 2, 1, 4, 4);
         let out = gdn_chunk_prefill_impl(
-            &client, &inp.q, &inp.k, &inp.v, &inp.g, &inp.beta, &inp.state, 0,
+            &client, &inp.q, &inp.k, &inp.v, &inp.g, &inp.beta, &inp.state, None, 0,
         );
         assert!(out.is_err());
     }

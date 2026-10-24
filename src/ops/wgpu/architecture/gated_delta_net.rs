@@ -33,9 +33,10 @@ impl GatedDeltaNetOps<WgpuRuntime> for WgpuClient {
         g: &Tensor<WgpuRuntime>,
         beta: &Tensor<WgpuRuntime>,
         state: &Tensor<WgpuRuntime>,
+        segment_ids: Option<&Tensor<WgpuRuntime>>,
         chunk_size: usize,
     ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
-        gdn_chunk_prefill_impl(self, q, k, v, g, beta, state, chunk_size)
+        gdn_chunk_prefill_impl(self, q, k, v, g, beta, state, segment_ids, chunk_size)
     }
 
     fn gdn_chunk_backward(
@@ -46,6 +47,7 @@ impl GatedDeltaNetOps<WgpuRuntime> for WgpuClient {
         g: &Tensor<WgpuRuntime>,
         beta: &Tensor<WgpuRuntime>,
         state: &Tensor<WgpuRuntime>,
+        segment_ids: Option<&Tensor<WgpuRuntime>>,
         d_o: &Tensor<WgpuRuntime>,
         d_state_final: Option<&Tensor<WgpuRuntime>>,
         chunk_size: usize,
@@ -58,6 +60,7 @@ impl GatedDeltaNetOps<WgpuRuntime> for WgpuClient {
             g,
             beta,
             state,
+            segment_ids,
             d_o,
             d_state_final,
             chunk_size,

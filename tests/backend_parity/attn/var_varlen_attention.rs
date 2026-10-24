@@ -56,7 +56,7 @@ where
     let segs = PackedSegments::<R>::from_offsets(&g.offsets, t, device).expect("segments");
     let scale = 1.0 / (g.d as f64).sqrt();
 
-    let out = var_varlen_attention(client, &q, &k, &v, &segs, scale, g.causal)
+    let out = var_varlen_attention(client, &q, &k, &v, &segs, scale, g.causal, 0)
         .unwrap_or_else(|e| panic!("{}: forward failed: {e}", g.label));
     let weighted = var_mul(&out, &w, client).expect("mul");
     let loss = var_sum(&weighted, &[0, 1, 2], false, client).expect("sum");

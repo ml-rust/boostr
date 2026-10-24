@@ -98,7 +98,17 @@ impl VarLenAttentionOps<WgpuRuntime> for WgpuClient {
         _max_seqlen_k: usize,
         head_dim: usize,
         causal: bool,
+        window_size: usize,
     ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
+        if window_size != 0 {
+            return Err(Error::InvalidArgument {
+                arg: "window_size",
+                reason: format!(
+                    "varlen_attention_fwd (WebGPU): varlen attention does not implement a \
+                     window yet; pass 0, got {window_size}"
+                ),
+            });
+        }
         // WebGPU WGSL shader implements MHA only.  GQA requires non-trivial shader
         // changes; guard until a shader update is provided.
         if num_kv_heads != num_heads {
@@ -237,11 +247,21 @@ impl VarLenAttentionOps<WgpuRuntime> for WgpuClient {
         _max_seqlen_k: usize,
         head_dim: usize,
         causal: bool,
+        window_size: usize,
     ) -> Result<(
         Tensor<WgpuRuntime>,
         Tensor<WgpuRuntime>,
         Tensor<WgpuRuntime>,
     )> {
+        if window_size != 0 {
+            return Err(Error::InvalidArgument {
+                arg: "window_size",
+                reason: format!(
+                    "varlen_attention_bwd (WebGPU): varlen attention does not implement a \
+                     window yet; pass 0, got {window_size}"
+                ),
+            });
+        }
         validate_f32(dout, "varlen_attention_bwd")?;
         validate_f32(q, "varlen_attention_bwd")?;
         validate_f32(k, "varlen_attention_bwd")?;

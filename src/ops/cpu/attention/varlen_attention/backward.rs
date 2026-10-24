@@ -149,7 +149,7 @@ mod tests {
 
         let (out, lse) = client
             .varlen_attention_fwd(
-                &q, &k, &v, &cu, &cu, 2, num_heads, num_heads, 3, 3, head_dim, false,
+                &q, &k, &v, &cu, &cu, 2, num_heads, num_heads, 3, 3, head_dim, false, 0,
             )
             .unwrap();
 
@@ -177,6 +177,7 @@ mod tests {
                 3,
                 head_dim,
                 false,
+                0,
             )
             .unwrap();
 
@@ -289,6 +290,7 @@ mod tests {
                 max_seqlen,
                 head_dim,
                 false,
+                0,
             )
             .unwrap();
         let (dq_gqa, dk_gqa, dv_gqa) = client
@@ -310,6 +312,7 @@ mod tests {
                 max_seqlen,
                 head_dim,
                 false,
+                0,
             )
             .unwrap();
 
@@ -317,7 +320,7 @@ mod tests {
         let (out_exp, lse_exp) = client
             .varlen_attention_fwd(
                 &q, &k_exp, &v_exp, &cu, &cu, batch_size, num_heads, num_heads, max_seqlen,
-                max_seqlen, head_dim, false,
+                max_seqlen, head_dim, false, 0,
             )
             .unwrap();
         let (dq_exp, dk_exp, dv_exp) = client
@@ -339,6 +342,7 @@ mod tests {
                 max_seqlen,
                 head_dim,
                 false,
+                0,
             )
             .unwrap();
 

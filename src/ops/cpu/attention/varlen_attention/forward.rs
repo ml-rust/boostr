@@ -137,7 +137,7 @@ mod tests {
 
         let (out, lse) = client
             .varlen_attention_fwd(
-                &q, &k, &v, &cu, &cu, 2, num_heads, num_heads, 3, 3, head_dim, false,
+                &q, &k, &v, &cu, &cu, 2, num_heads, num_heads, 3, 3, head_dim, false, 0,
             )
             .unwrap();
 
@@ -174,12 +174,12 @@ mod tests {
 
         let (out_causal, _) = client
             .varlen_attention_fwd(
-                &q, &k, &v, &cu, &cu, 1, num_heads, num_heads, 4, 4, head_dim, true,
+                &q, &k, &v, &cu, &cu, 1, num_heads, num_heads, 4, 4, head_dim, true, 0,
             )
             .unwrap();
         let (out_full, _) = client
             .varlen_attention_fwd(
-                &q, &k, &v, &cu, &cu, 1, num_heads, num_heads, 4, 4, head_dim, false,
+                &q, &k, &v, &cu, &cu, 1, num_heads, num_heads, 4, 4, head_dim, false, 0,
             )
             .unwrap();
 
@@ -286,7 +286,7 @@ mod tests {
         let (out_ref, _) = client
             .varlen_attention_fwd(
                 &q, &k_exp, &v_exp, &cu, &cu, batch_size, num_heads, num_heads, max_seqlen,
-                max_seqlen, head_dim, false,
+                max_seqlen, head_dim, false, 0,
             )
             .unwrap();
 
@@ -305,6 +305,7 @@ mod tests {
                 max_seqlen,
                 head_dim,
                 false,
+                0,
             )
             .unwrap();
 

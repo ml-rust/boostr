@@ -32,6 +32,7 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
         max_seqlen_k: usize,
         head_dim: usize,
         causal: bool,
+        window_size: usize,
     ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
         varlen_attention_fwd_impl(
             self,
@@ -47,6 +48,7 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
             max_seqlen_k,
             head_dim,
             causal,
+            window_size,
         )
     }
 
@@ -69,6 +71,7 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
         max_seqlen_k: usize,
         head_dim: usize,
         causal: bool,
+        window_size: usize,
     ) -> Result<(
         Tensor<CudaRuntime>,
         Tensor<CudaRuntime>,
@@ -97,6 +100,7 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
             max_seqlen_k,
             head_dim,
             causal,
+            window_size,
         )
     }
 }

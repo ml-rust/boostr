@@ -33,6 +33,14 @@ use numr::tensor::Tensor;
 ///
 /// `cu_seqlens[0] = 0`, `cu_seqlens[i] = sum of lengths for sequences 0..i-1`.
 /// For batch `[512, 300, 128]`: `cu_seqlens = [0, 512, 812, 940]`.
+///
+/// # Sliding window
+///
+/// `window_size` = 0 turns the window off. Otherwise key `j` is masked for
+/// query `i` when `j + window_size <= key_offset + i`. Per segment,
+/// `key_offset = max(0, seq_len_k - seq_len_q)`. This is the same bottom-right
+/// convention as the causal rule and as `FlashAttentionOps`. With
+/// `causal = false` the window still anchors at `key_offset + i`.
 #[allow(clippy::too_many_arguments)]
 pub trait VarLenAttentionOps<R: Runtime> {
     /// Variable-length attention forward pass
@@ -56,6 +64,7 @@ pub trait VarLenAttentionOps<R: Runtime> {
         max_seqlen_k: usize,
         head_dim: usize,
         causal: bool,
+        window_size: usize,
     ) -> Result<(Tensor<R>, Tensor<R>)>;
 
     /// Variable-length attention backward pass
@@ -89,5 +98,6 @@ pub trait VarLenAttentionOps<R: Runtime> {
         max_seqlen_k: usize,
         head_dim: usize,
         causal: bool,
+        window_size: usize,
     ) -> Result<(Tensor<R>, Tensor<R>, Tensor<R>)>;
 }

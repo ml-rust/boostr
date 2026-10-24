@@ -228,6 +228,7 @@ fn run(case: &Case) {
             msk,
             hd,
             case.causal,
+            0,
         )
         .expect("CUDA half varlen forward");
     let (dq, dk, dv) = match case.force_large {
@@ -248,6 +249,7 @@ fn run(case: &Case) {
             msk,
             hd,
             case.causal,
+            0,
             force_large,
         ),
         None => cuda.varlen_attention_bwd(
@@ -268,6 +270,7 @@ fn run(case: &Case) {
             msk,
             hd,
             case.causal,
+            0,
         ),
     }
     .expect("CUDA half varlen backward");
@@ -307,6 +310,7 @@ fn run(case: &Case) {
             msk,
             hd,
             case.causal,
+            0,
         )
         .expect("CPU F32 varlen backward reference");
     let (out_r, _) = cpu
@@ -323,6 +327,7 @@ fn run(case: &Case) {
             msk,
             hd,
             case.causal,
+            0,
         )
         .expect("CPU F32 varlen forward reference");
 

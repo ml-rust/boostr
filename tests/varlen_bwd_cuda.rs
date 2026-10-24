@@ -170,6 +170,7 @@ impl BwdTestCase {
                 self.max_seqlen,
                 self.head_dim,
                 false,
+                0,
             )
             .unwrap();
 
@@ -192,6 +193,7 @@ impl BwdTestCase {
                 self.max_seqlen,
                 self.head_dim,
                 false,
+                0,
             )
             .unwrap();
 
@@ -245,6 +247,7 @@ impl BwdTestCase {
                 self.max_seqlen,
                 self.head_dim,
                 false,
+                0,
             )
             .unwrap();
 
@@ -267,6 +270,7 @@ impl BwdTestCase {
                 self.max_seqlen,
                 self.head_dim,
                 false,
+                0,
             )
             .unwrap();
 
@@ -410,6 +414,7 @@ fn test_cuda_varlen_bwd_fp16_gqa_no_corruption() {
             max_seqlen,
             head_dim,
             false,
+            0,
         )
         .unwrap();
 
@@ -432,6 +437,7 @@ fn test_cuda_varlen_bwd_fp16_gqa_no_corruption() {
             max_seqlen,
             head_dim,
             false,
+            0,
         )
         .unwrap();
 

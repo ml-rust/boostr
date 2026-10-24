@@ -373,6 +373,7 @@ fn assert_varlen_bwd_parity(
             max_seqlen_k,
             head_dim,
             causal,
+            0,
         )
         .unwrap();
     let (dq_cpu, dk_cpu, dv_cpu) = cpu_client
@@ -394,6 +395,7 @@ fn assert_varlen_bwd_parity(
             max_seqlen_k,
             head_dim,
             causal,
+            0,
         )
         .unwrap();
     let dq_cpu_vec = dq_cpu.to_vec::<f32>();
@@ -414,6 +416,7 @@ fn assert_varlen_bwd_parity(
             max_seqlen_k,
             head_dim,
             causal,
+            0,
         )
         .unwrap();
     let (dq_c, dk_c, dv_c) = cuda_client
@@ -435,6 +438,7 @@ fn assert_varlen_bwd_parity(
             max_seqlen_k,
             head_dim,
             causal,
+            0,
         )
         .unwrap();
 

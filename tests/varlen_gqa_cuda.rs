@@ -181,7 +181,7 @@ fn test_cuda_gqa_equals_expanded_mha() {
     let (out_mha, _) = cuda_client
         .varlen_attention_fwd(
             &q_c, &k_exp_c, &v_exp_c, &cu_q, &cu_k, batch_size, num_heads, num_heads, max_seqlen,
-            max_seqlen, head_dim, false,
+            max_seqlen, head_dim, false, 0,
         )
         .expect("CUDA MHA fwd failed");
 
@@ -200,6 +200,7 @@ fn test_cuda_gqa_equals_expanded_mha() {
             max_seqlen,
             head_dim,
             false,
+            0,
         )
         .expect("CUDA GQA fwd failed");
 
@@ -282,6 +283,7 @@ fn test_cuda_gqa_vs_cpu_gqa() {
             max_seqlen,
             head_dim,
             false,
+            0,
         )
         .expect("CPU GQA fwd failed");
 
@@ -327,6 +329,7 @@ fn test_cuda_gqa_vs_cpu_gqa() {
             max_seqlen,
             head_dim,
             false,
+            0,
         )
         .expect("CUDA GQA fwd failed");
 
@@ -399,7 +402,7 @@ fn test_cuda_gqa_bf16_vs_expanded_mha_and_cpu() {
         cuda_client
             .varlen_attention_fwd(
                 &q_c, k, v, &cu, &cu, batch_size, num_heads, nkv, max_seqlen, max_seqlen, head_dim,
-                true,
+                true, 0,
             )
             .expect("CUDA BF16 varlen forward")
             .0
@@ -431,6 +434,7 @@ fn test_cuda_gqa_bf16_vs_expanded_mha_and_cpu() {
             max_seqlen,
             head_dim,
             true,
+            0,
         )
         .expect("CPU F32 varlen forward on BF16-rounded inputs");
     let cpu_vec = out_cpu.to_vec::<f32>();

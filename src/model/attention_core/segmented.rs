@@ -96,7 +96,7 @@ where
     let client = R::default_client(q.tensor().device());
     let scale = (spec.head_dim as f64).sqrt().recip();
     let out = var_varlen_attention(
-        &client, &q_packed, &k_packed, &v_packed, segments, scale, true,
+        &client, &q_packed, &k_packed, &v_packed, segments, scale, true, 0,
     )?;
     var_reshape(&out, &[batch, seq_q, spec.num_heads, spec.head_dim]).map_err(Error::Numr)
 }

@@ -38,6 +38,7 @@ pub(super) fn varlen_attention_bwd_impl(
     max_seqlen_k: usize,
     head_dim: usize,
     causal: bool,
+    window_size: usize,
 ) -> Result<(
     Tensor<CudaRuntime>,
     Tensor<CudaRuntime>,
@@ -60,6 +61,7 @@ pub(super) fn varlen_attention_bwd_impl(
         max_seqlen_k,
         head_dim,
         causal,
+        window_size,
         None,
     )
 }
@@ -90,6 +92,7 @@ pub fn varlen_attention_bwd_with_tile_for_test(
     max_seqlen_k: usize,
     head_dim: usize,
     causal: bool,
+    window_size: usize,
     force_large: bool,
 ) -> Result<(
     Tensor<CudaRuntime>,
@@ -113,6 +116,7 @@ pub fn varlen_attention_bwd_with_tile_for_test(
         max_seqlen_k,
         head_dim,
         causal,
+        window_size,
         Some(force_large),
     )
 }
@@ -135,12 +139,22 @@ fn varlen_attention_bwd_impl_inner(
     max_seqlen_k: usize,
     head_dim: usize,
     causal: bool,
+    window_size: usize,
     force_large: Option<bool>,
 ) -> Result<(
     Tensor<CudaRuntime>,
     Tensor<CudaRuntime>,
     Tensor<CudaRuntime>,
 )> {
+    if window_size != 0 {
+        return Err(Error::InvalidArgument {
+            arg: "window_size",
+            reason: format!(
+                "varlen_attention_bwd (CUDA): varlen attention does not implement a window yet; \
+                 pass 0, got {window_size}"
+            ),
+        });
+    }
     validate_head_dim(head_dim, "varlen attention bwd")?;
 
     let dtype = q.dtype();

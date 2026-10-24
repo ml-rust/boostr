@@ -10,7 +10,7 @@ use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;
 
 use super::backward::varlen_attention_bwd_cpu;
-use super::check::{float_dtype, head_counts, offsets_i32, packed_shape};
+use super::check::{float_dtype, head_counts, offsets_i32, packed_shape, reject_window};
 use super::forward::varlen_attention_fwd_cpu;
 
 /// Cast to F32 with contiguous storage. An F32 contiguous input is a refcount clone.
@@ -56,8 +56,10 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
         _max_seqlen_k: usize,
         head_dim: usize,
         causal: bool,
+        window_size: usize,
     ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
         const OP: &str = "varlen_attention_fwd";
+        reject_window(OP, window_size)?;
         let dtype = float_dtype(OP, &[("q", q), ("k", k), ("v", v)])?;
         let (tq, tk) = check_qkv(OP, q, k, v, num_heads, num_kv_heads, head_dim)?;
         offsets_i32(OP, "cu_seqlens_q", cu_seqlens_q)?;
@@ -101,8 +103,10 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
         _max_seqlen_k: usize,
         head_dim: usize,
         causal: bool,
+        window_size: usize,
     ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
         const OP: &str = "varlen_attention_bwd";
+        reject_window(OP, window_size)?;
         let dtype = float_dtype(
             OP,
             &[

@@ -17,6 +17,7 @@ struct VarLenAttentionConfig {
     num_kv_heads: usize,
     head_dim: usize,
     causal: bool,
+    window_size: usize,
 }
 
 /// Backward function for packed varlen attention.
@@ -74,6 +75,7 @@ where
                 segs.max_seqlen(),
                 cfg.head_dim,
                 cfg.causal,
+                cfg.window_size,
             )
             .map_err(|e| {
                 numr::error::Error::Internal(format!("varlen_attention_bwd failed: {e}"))
@@ -167,12 +169,14 @@ fn packed_heads<R: Runtime>(
 /// Inputs are `q: [T, H, D]`, `k` and `v: [T, H_kv, D]`, with
 /// `H % H_kv == 0` (GQA when `H_kv < H`). `segments` splits the `T` tokens.
 /// No token attends across a segment boundary. `causal` masks keys after
-/// the query inside each segment.
+/// the query inside each segment. `window_size` is 0 for no window. See
+/// [`VarLenAttentionOps`] for the window rule.
 ///
 /// The kernels apply `1 / sqrt(D)`. A different `scale` multiplies Q by
 /// `scale * sqrt(D)` first, on the gradient path.
 ///
 /// Returns the `[T, H, D]` output. The log-sum-exp stays inside the backward node.
+#[allow(clippy::too_many_arguments)]
 pub fn var_varlen_attention<R, C>(
     client: &C,
     q: &Var<R>,
@@ -181,6 +185,7 @@ pub fn var_varlen_attention<R, C>(
     segments: &PackedSegments<R>,
     scale: f64,
     causal: bool,
+    window_size: usize,
 ) -> Result<Var<R>>
 where
     R: Runtime,
@@ -219,6 +224,7 @@ where
         segments.max_seqlen(),
         head_dim,
         causal,
+        window_size,
     )?;
 
     let needs_grad = q_scaled.requires_grad() || k.requires_grad() || v.requires_grad();
@@ -239,6 +245,7 @@ where
             num_kv_heads,
             head_dim,
             causal,
+            window_size,
         },
     };
     Ok(Var::from_op(output, Arc::new(grad_fn)))
@@ -264,7 +271,7 @@ mod tests {
         let (client, dev) = cpu_setup();
         let q = var(5 * 2 * 4, &[5, 2, 4], true);
         let segs = PackedSegments::<CpuRuntime>::from_lengths(&[2, 2], &dev).unwrap();
-        let e = var_varlen_attention(&client, &q, &q, &q, &segs, 0.5, true)
+        let e = var_varlen_attention(&client, &q, &q, &q, &segs, 0.5, true, 0)
             .err()
             .unwrap();
         assert!(e.to_string().contains("segments cover 4 tokens"), "{e}");
@@ -276,7 +283,7 @@ mod tests {
         let q = var(4 * 3 * 4, &[4, 3, 4], true);
         let k = var(4 * 2 * 4, &[4, 2, 4], true);
         let segs = PackedSegments::<CpuRuntime>::from_lengths(&[4], &dev).unwrap();
-        let e = var_varlen_attention(&client, &q, &k, &k, &segs, 0.5, false)
+        let e = var_varlen_attention(&client, &q, &k, &k, &segs, 0.5, false, 0)
             .err()
             .unwrap();
         assert!(e.to_string().contains("non-zero multiple"), "{e}");
@@ -287,7 +294,7 @@ mod tests {
         let (client, dev) = cpu_setup();
         let q = var(4 * 2 * 4, &[4, 2, 4], false);
         let segs = PackedSegments::<CpuRuntime>::from_lengths(&[1, 3], &dev).unwrap();
-        let out = var_varlen_attention(&client, &q, &q, &q, &segs, 0.5, true).unwrap();
+        let out = var_varlen_attention(&client, &q, &q, &q, &segs, 0.5, true, 0).unwrap();
         assert!(!out.requires_grad());
         assert_eq!(out.tensor().shape(), &[4, 2, 4]);
     }
@@ -299,9 +306,9 @@ mod tests {
         let k = var(16, &[4, 1, 4], false);
         let segs = PackedSegments::<CpuRuntime>::from_lengths(&[4], &dev).unwrap();
         // scale 1.0 with D = 4 equals the native scale 0.5 on 2 * q.
-        let a = var_varlen_attention(&client, &q, &k, &k, &segs, 1.0, true).unwrap();
+        let a = var_varlen_attention(&client, &q, &k, &k, &segs, 1.0, true, 0).unwrap();
         let q2 = Var::new(client.mul_scalar(q.tensor(), 2.0).unwrap(), false);
-        let b = var_varlen_attention(&client, &q2, &k, &k, &segs, 0.5, true).unwrap();
+        let b = var_varlen_attention(&client, &q2, &k, &k, &segs, 0.5, true, 0).unwrap();
         assert_eq!(a.tensor().to_vec::<f32>(), b.tensor().to_vec::<f32>());
     }
 }

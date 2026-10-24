@@ -148,7 +148,7 @@ impl Case {
         );
         let segs = PackedSegments::<CpuRuntime>::from_offsets(&self.offsets, t, &dev)?;
         let scale = 1.0 / (d as f64).sqrt();
-        let out = var_varlen_attention(&client, &qv, &kv, &vv, &segs, scale, self.causal)?;
+        let out = var_varlen_attention(&client, &qv, &kv, &vv, &segs, scale, self.causal, 0)?;
         let loss = var_sum(&var_mul(&out, &wv, &client)?, &[0, 1, 2], false, &client)?;
         let grads = backward(&loss, &client)?;
         Ok(Grads {
@@ -323,7 +323,7 @@ fn unsupported_dtype_is_refused() -> TestResult {
         true,
     );
     let segs = PackedSegments::<CpuRuntime>::from_lengths(&[4], &dev)?;
-    let err = var_varlen_attention(&client, &q, &q, &q, &segs, 0.25, true)
+    let err = var_varlen_attention(&client, &q, &q, &q, &segs, 0.25, true, 0)
         .err()
         .ok_or("F64 input was accepted")?;
     assert!(
@@ -362,7 +362,7 @@ mod half_precision {
         let vh = Var::new(half(&v, &[t, hkv, d])?, true);
         let segs = PackedSegments::<CpuRuntime>::from_offsets(&case.offsets, t, &dev)?;
         let scale = 1.0 / (d as f64).sqrt();
-        let out = var_varlen_attention(&client, &qh, &kh, &vh, &segs, scale, true)?;
+        let out = var_varlen_attention(&client, &qh, &kh, &vh, &segs, scale, true, 0)?;
         assert_eq!(out.tensor().dtype(), dtype);
         let loss = var_sum(&out, &[0, 1, 2], false, &client)?;
         let grads = backward(&loss, &client)?;

@@ -98,13 +98,13 @@ fn run_case(head_dim: usize, causal: bool) {
 
         let (out, lse) = cuda
             .varlen_attention_fwd(
-                &q, &k, &v, &csq, &csk, batch, nh, nkv, msq, msk, head_dim, causal,
+                &q, &k, &v, &csq, &csk, batch, nh, nkv, msq, msk, head_dim, causal, 0,
             )
             .unwrap_or_else(|e| panic!("{label}: CUDA forward: {e}"));
         let (dq, dk, dv) = cuda
             .varlen_attention_bwd(
                 &dout, &q, &k, &v, &out, &lse, &csq, &csk, &cu_q, &cu_k, batch, nh, nkv, msq, msk,
-                head_dim, causal,
+                head_dim, causal, 0,
             )
             .unwrap_or_else(|e| panic!("{label}: CUDA backward: {e}"));
         for (name, t) in [("O", &out), ("dQ", &dq), ("dK", &dk), ("dV", &dv)] {
@@ -120,7 +120,7 @@ fn run_case(head_dim: usize, causal: bool) {
         let cu_k_c = det_i32_tensor(&cu_k, &[batch + 1], &cpu_dev);
         let (out_r, lse_r) = cpu
             .varlen_attention_fwd(
-                &q_c, &k_c, &v_c, &cu_q_c, &cu_k_c, batch, nh, nkv, msq, msk, head_dim, causal,
+                &q_c, &k_c, &v_c, &cu_q_c, &cu_k_c, batch, nh, nkv, msq, msk, head_dim, causal, 0,
             )
             .unwrap_or_else(|e| panic!("{label}: CPU forward: {e}"));
         assert_bf16_once(
@@ -153,6 +153,7 @@ fn run_case(head_dim: usize, causal: bool) {
                 msk,
                 head_dim,
                 causal,
+                0,
             )
             .unwrap_or_else(|e| panic!("{label}: CPU backward: {e}"));
         let grads = [("dQ", &dq, dq_r), ("dK", &dk, dk_r), ("dV", &dv, dv_r)];

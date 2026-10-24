@@ -116,6 +116,7 @@ impl<R: Runtime<DType = DType>> EncoderLayer<R> {
             ctx.max_seqlen,
             self.head_dim,
             false, // non-causal (bidirectional encoder)
+            0,     // no window
         )?;
 
         // 7. Wrap output and reshape to [total_tokens, hidden].

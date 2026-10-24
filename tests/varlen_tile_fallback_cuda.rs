@@ -168,6 +168,7 @@ fn head_dim_128_f32_fwd_and_bwd_now_succeed() {
             max_seqlen,
             head_dim,
             true,
+            0,
         )
         .expect("head_dim=128 F32 varlen forward must now succeed via the small-tile fallback");
 
@@ -190,6 +191,7 @@ fn head_dim_128_f32_fwd_and_bwd_now_succeed() {
             max_seqlen,
             head_dim,
             true,
+            0,
         )
         .expect("head_dim=128 F32 varlen backward must now succeed via the small-tile fallback");
 
@@ -277,6 +279,7 @@ fn head_dim_64_f32_large_and_small_tile_agree() {
         max_seqlen,
         head_dim,
         true,
+        0,
         false,
     )
     .expect("F32 small-tile forward must succeed at head_dim=64");
@@ -294,6 +297,7 @@ fn head_dim_64_f32_large_and_small_tile_agree() {
         max_seqlen,
         head_dim,
         true,
+        0,
         true,
     )
     .expect("F32 large-tile forward must succeed at head_dim=64");
@@ -328,6 +332,7 @@ fn head_dim_64_f32_large_and_small_tile_agree() {
         max_seqlen,
         head_dim,
         true,
+        0,
         false,
     )
     .expect("F32 small-tile backward must succeed at head_dim=64");
@@ -348,6 +353,7 @@ fn head_dim_64_f32_large_and_small_tile_agree() {
         max_seqlen,
         head_dim,
         true,
+        0,
         true,
     )
     .expect("F32 large-tile backward must succeed at head_dim=64");
@@ -435,6 +441,7 @@ fn half_hd128_large_and_small_tile_agree(dtype: DType, tol: f32) {
         max_seqlen,
         head_dim,
         true,
+        0,
         false,
     )
     .unwrap_or_else(|e| panic!("{dtype:?} small-tile forward at head_dim=128: {e:?}"));
@@ -452,6 +459,7 @@ fn half_hd128_large_and_small_tile_agree(dtype: DType, tol: f32) {
         max_seqlen,
         head_dim,
         true,
+        0,
         true,
     )
     .unwrap_or_else(|e| panic!("{dtype:?} large-tile forward at head_dim=128: {e:?}"));
@@ -494,6 +502,7 @@ fn half_hd128_large_and_small_tile_agree(dtype: DType, tol: f32) {
         max_seqlen,
         head_dim,
         true,
+        0,
         false,
     )
     .unwrap_or_else(|e| panic!("{dtype:?} small-tile backward at head_dim=128: {e:?}"));
@@ -514,6 +523,7 @@ fn half_hd128_large_and_small_tile_agree(dtype: DType, tol: f32) {
         max_seqlen,
         head_dim,
         true,
+        0,
         true,
     )
     .unwrap_or_else(|e| panic!("{dtype:?} large-tile backward at head_dim=128: {e:?}"));
@@ -621,6 +631,7 @@ fn every_accepted_head_dim_dtype_resolves_a_kernel_that_loads() {
                     max_seqlen,
                     head_dim,
                     true,
+                    0,
                 )
                 .unwrap_or_else(|e| {
                     panic!(
@@ -648,6 +659,7 @@ fn every_accepted_head_dim_dtype_resolves_a_kernel_that_loads() {
                     max_seqlen,
                     head_dim,
                     true,
+                    0,
                 )
                 .unwrap_or_else(|e| {
                     panic!(

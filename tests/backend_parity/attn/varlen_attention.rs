@@ -34,6 +34,7 @@ fn test_varlen_attention_fwd_parity() {
             max_seqlen,
             head_dim,
             false,
+            0,
         )
         .unwrap();
     let cpu_out_vec = cpu_out.to_vec::<f32>();
@@ -65,7 +66,7 @@ fn test_varlen_attention_fwd_parity() {
         let (out, _) = cuda_client
             .varlen_attention_fwd(
                 &q_c, &k_c, &v_c, &csq, &csk, batch_size, num_heads, num_heads, max_seqlen,
-                max_seqlen, head_dim, false,
+                max_seqlen, head_dim, false, 0,
             )
             .unwrap();
         assert_parity_f32(&out.to_vec::<f32>(), &cpu_out_vec, "varlen_fwd CUDA vs CPU");
@@ -98,7 +99,7 @@ fn test_varlen_attention_fwd_parity() {
         let (out, _) = wgpu_client
             .varlen_attention_fwd(
                 &q_w, &k_w, &v_w, &csq, &csk, batch_size, num_heads, num_heads, max_seqlen,
-                max_seqlen, head_dim, false,
+                max_seqlen, head_dim, false, 0,
             )
             .unwrap();
         assert_parity_f32(&out.to_vec::<f32>(), &cpu_out_vec, "varlen_fwd WGPU vs CPU");
@@ -135,6 +136,7 @@ fn test_varlen_attention_bwd_parity() {
             max_seqlen,
             head_dim,
             false,
+            0,
         )
         .unwrap();
     let dout = det_tensor(&[total_tokens, num_heads, head_dim], &cpu_device);
@@ -157,6 +159,7 @@ fn test_varlen_attention_bwd_parity() {
             max_seqlen,
             head_dim,
             false,
+            0,
         )
         .unwrap();
     let _cpu_dq_vec = cpu_dq.to_vec::<f32>();
@@ -190,7 +193,7 @@ fn test_varlen_attention_bwd_parity() {
         let (out_c, lse_c) = cuda_client
             .varlen_attention_fwd(
                 &q_c, &k_c, &v_c, &csq, &csk, batch_size, num_heads, num_heads, max_seqlen,
-                max_seqlen, head_dim, false,
+                max_seqlen, head_dim, false, 0,
             )
             .unwrap();
         let dout_c = Tensor::from_slice(
@@ -202,7 +205,7 @@ fn test_varlen_attention_bwd_parity() {
         let (dq, dk, dv) = cuda_client
             .varlen_attention_bwd(
                 &dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, &csq, &csk, &cu_data, &cu_data,
-                batch_size, num_heads, num_heads, max_seqlen, max_seqlen, head_dim, false,
+                batch_size, num_heads, num_heads, max_seqlen, max_seqlen, head_dim, false, 0,
             )
             .unwrap();
         assert_parity_f32_relaxed(
@@ -249,7 +252,7 @@ fn test_varlen_attention_bwd_parity() {
         let (out_w, lse_w) = wgpu_client
             .varlen_attention_fwd(
                 &q_w, &k_w, &v_w, &csq, &csk, batch_size, num_heads, num_heads, max_seqlen,
-                max_seqlen, head_dim, false,
+                max_seqlen, head_dim, false, 0,
             )
             .unwrap();
         let dout_w = Tensor::from_slice(
@@ -261,7 +264,7 @@ fn test_varlen_attention_bwd_parity() {
         let (dq, dk, dv) = wgpu_client
             .varlen_attention_bwd(
                 &dout_w, &q_w, &k_w, &v_w, &out_w, &lse_w, &csq, &csk, &cu_data, &cu_data,
-                batch_size, num_heads, num_heads, max_seqlen, max_seqlen, head_dim, false,
+                batch_size, num_heads, num_heads, max_seqlen, max_seqlen, head_dim, false, 0,
             )
             .unwrap();
         assert_parity_f32_relaxed(
@@ -443,6 +446,7 @@ fn test_varlen_causal_unequal_seqlens_uses_absolute_positions() {
             max_seqlen_k,
             head_dim,
             true,
+            0,
         )
         .unwrap();
     let cpu_out_vec = cpu_out.to_vec::<f32>();
@@ -477,6 +481,7 @@ fn test_varlen_causal_unequal_seqlens_uses_absolute_positions() {
                 max_seqlen_k,
                 head_dim,
                 true,
+                0,
             )
             .unwrap();
         assert_parity_f32(
@@ -512,6 +517,7 @@ fn test_varlen_causal_unequal_seqlens_uses_absolute_positions() {
                 max_seqlen_k,
                 head_dim,
                 true,
+                0,
             )
             .unwrap();
         assert_parity_f32(
@@ -570,6 +576,7 @@ fn test_varlen_causal_equal_seqlens_bit_identical_to_legacy() {
             max_seqlen,
             head_dim,
             true,
+            0,
         )
         .unwrap();
     let cpu_out_vec = cpu_out.to_vec::<f32>();
@@ -591,7 +598,7 @@ fn test_varlen_causal_equal_seqlens_bit_identical_to_legacy() {
         let (out, _) = cuda_client
             .varlen_attention_fwd(
                 &q_c, &k_c, &v_c, &csq, &csk, batch_size, num_heads, num_heads, max_seqlen,
-                max_seqlen, head_dim, true,
+                max_seqlen, head_dim, true, 0,
             )
             .unwrap();
         assert_parity_f32(
@@ -614,7 +621,7 @@ fn test_varlen_causal_equal_seqlens_bit_identical_to_legacy() {
         let (out, _) = wgpu_client
             .varlen_attention_fwd(
                 &q_w, &k_w, &v_w, &csq, &csk, batch_size, num_heads, num_heads, max_seqlen,
-                max_seqlen, head_dim, true,
+                max_seqlen, head_dim, true, 0,
             )
             .unwrap();
         assert_parity_f32(
@@ -666,6 +673,7 @@ fn test_varlen_causal_unequal_seqlens_bwd_reaches_all_keys() {
             max_seqlen_k,
             head_dim,
             true,
+            0,
         )
         .unwrap();
     let (cpu_dq, cpu_dk, cpu_dv) = cpu_client
@@ -687,6 +695,7 @@ fn test_varlen_causal_unequal_seqlens_bwd_reaches_all_keys() {
             max_seqlen_k,
             head_dim,
             true,
+            0,
         )
         .unwrap();
     let _cpu_dq_vec = cpu_dq.to_vec::<f32>();
@@ -734,6 +743,7 @@ fn test_varlen_causal_unequal_seqlens_bwd_reaches_all_keys() {
                 max_seqlen_k,
                 head_dim,
                 true,
+                0,
             )
             .unwrap();
         let (dq, dk, dv) = cuda_client
@@ -755,6 +765,7 @@ fn test_varlen_causal_unequal_seqlens_bwd_reaches_all_keys() {
                 max_seqlen_k,
                 head_dim,
                 true,
+                0,
             )
             .unwrap();
         assert_parity_f32_relaxed(

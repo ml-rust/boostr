@@ -182,6 +182,7 @@ fn test_cuda_varlen_hd256_matches_cpu() {
             max_seqlen,
             head_dim,
             false,
+            0,
         )
         .expect("CPU GQA hd256 fwd failed");
 
@@ -227,6 +228,7 @@ fn test_cuda_varlen_hd256_matches_cpu() {
             max_seqlen,
             head_dim,
             false,
+            0,
         )
         .expect("CUDA GQA hd256 fwd failed");
 
@@ -300,6 +302,7 @@ fn test_cuda_varlen_hd256_mha() {
             max_seqlen,
             head_dim,
             false,
+            0,
         )
         .expect("CPU MHA hd256 fwd failed");
 
@@ -345,6 +348,7 @@ fn test_cuda_varlen_hd256_mha() {
             max_seqlen,
             head_dim,
             false,
+            0,
         )
         .expect("CUDA MHA hd256 fwd failed");
 
@@ -405,6 +409,7 @@ fn assert_hd256_bf16_matches_cpu(num_heads: usize, num_kv_heads: usize) {
             max_seqlen,
             head_dim,
             true,
+            0,
         )
         .expect("CUDA BF16 hd256 fwd failed");
     assert_eq!(out_cuda.dtype(), DType::BF16, "hd256 BF16 output dtype");
@@ -431,6 +436,7 @@ fn assert_hd256_bf16_matches_cpu(num_heads: usize, num_kv_heads: usize) {
             max_seqlen,
             head_dim,
             true,
+            0,
         )
         .expect("CPU F32 hd256 fwd on BF16-rounded inputs failed");
     let cpu_vec = out_cpu.to_vec::<f32>();

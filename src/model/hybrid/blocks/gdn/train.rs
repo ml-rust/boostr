@@ -84,7 +84,7 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
         let ssm_a = self.decay_var(client)?;
 
         // 3. Causal conv over a zero window, then SiLU. No bias.
-        let qkv = var_causal_conv1d_silu(client, &qkv, &self.conv_weight, None, true)?;
+        let qkv = var_causal_conv1d_silu(client, &qkv, &self.conv_weight, None, true, None)?;
 
         // 4. Split.
         let q = narrow_heads(&qkv, 0, key_dim, &[batch, seq, h_k, s])?;

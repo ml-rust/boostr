@@ -33,6 +33,7 @@ pub use super::rnn::{
 };
 pub use super::rope::RoPE;
 pub use super::rotated::*;
+pub use super::segment_masks::SegmentMasks;
 pub use super::timestep_embedding::{SinusoidalPosEmb, TimestepEmbedding};
 pub use super::var_builder::VarBuilder;
 pub use super::var_ops::{repeat_kv, var_contiguous};

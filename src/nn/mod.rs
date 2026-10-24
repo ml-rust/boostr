@@ -19,6 +19,7 @@ mod regularize;
 pub mod rnn;
 pub mod rope;
 mod rotated;
+pub mod segment_masks;
 pub mod timestep_embedding;
 pub mod var_builder;
 pub mod var_ops;

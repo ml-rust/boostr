@@ -4,6 +4,7 @@ pub mod causal_conv1d;
 pub mod conv1d;
 pub mod conv2d;
 pub mod var_causal_conv1d;
+mod var_causal_conv1d_check;
 
 pub use causal_conv1d::causal_conv1d;
 pub use conv1d::Conv1d;

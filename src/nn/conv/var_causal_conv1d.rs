@@ -14,8 +14,16 @@
 //!
 //! Tap `k` multiplies the input at position `t + k - (kernel - 1)`, the same
 //! tap order as the inference conv over `[window | x]`.
+//!
+//! # Packed sequences
+//!
+//! With [`SegmentMasks`], the tap that reads `d` positions back is multiplied
+//! by a constant 1/0 mask. A token then never reads, and never sends gradient
+//! to, a token of an earlier document. `None` runs the plain conv.
 
+use super::var_causal_conv1d_check::{check_segments, check_shapes};
 use crate::error::{Error, Result};
+use crate::nn::segment_masks::SegmentMasks;
 use crate::nn::var_ops::var_contiguous;
 use numr::autograd::{Var, var_add, var_cat, var_mul, var_narrow, var_reshape, var_silu};
 use numr::dtype::DType;
@@ -29,14 +37,16 @@ use numr::tensor::Tensor;
 ///
 /// # Errors
 ///
-/// [`Error::InvalidArgument`] when a shape disagrees with the layout above
-/// or `seq` is 0.
+/// [`Error::InvalidArgument`] when a shape disagrees with the layout above,
+/// `seq` is 0, or `segments` disagrees with `x` in `[batch, seq]`, dtype or
+/// kernel coverage.
 pub fn var_causal_conv1d_silu<R, C>(
     client: &C,
     x: &Var<R>,
     weight: &Var<R>,
     bias: Option<&Var<R>>,
     apply_silu: bool,
+    segments: Option<&SegmentMasks<R>>,
 ) -> Result<Var<R>>
 where
     R: Runtime<DType = DType>,
@@ -44,6 +54,9 @@ where
     R::Client: TensorOps<R> + ShapeOps<R> + ActivationOps<R> + ScalarOps<R>,
 {
     let (batch, seq, channels, kernel) = check_shapes(x, weight, bias)?;
+    if let Some(masks) = segments {
+        check_segments(masks, batch, seq, kernel, x.tensor().dtype())?;
+    }
 
     let padded = if kernel == 1 {
         x.alias()
@@ -59,7 +72,12 @@ where
 
     let mut acc: Option<Var<R>> = None;
     for k in 0..kernel {
-        let shifted = var_narrow(&padded, 1, k, seq).map_err(Error::Numr)?;
+        let mut shifted = var_narrow(&padded, 1, k, seq).map_err(Error::Numr)?;
+        let back = kernel - 1 - k;
+        if let (Some(masks), true) = (segments, back > 0) {
+            let mask = Var::new(masks.tap(back)?.clone(), false);
+            shifted = var_mul(&shifted, &mask, client).map_err(Error::Numr)?;
+        }
         let tap = var_narrow(weight, 2, k, 1).map_err(Error::Numr)?;
         let tap = var_contiguous(&tap)?;
         let tap = var_reshape(&tap, &[1, 1, channels]).map_err(Error::Numr)?;
@@ -85,44 +103,13 @@ where
     Ok(out)
 }
 
-/// Return `(batch, seq, channels, kernel)` after checking every operand.
-fn check_shapes<R: Runtime>(
-    x: &Var<R>,
-    weight: &Var<R>,
-    bias: Option<&Var<R>>,
-) -> Result<(usize, usize, usize, usize)> {
-    let xs = x.shape();
-    if xs.len() != 3 || xs[1] == 0 {
-        return Err(Error::InvalidArgument {
-            arg: "x",
-            reason: format!("expected [batch, seq >= 1, channels], got {xs:?}"),
-        });
-    }
-    let (batch, seq, channels) = (xs[0], xs[1], xs[2]);
-    let ws = weight.shape();
-    if ws.len() != 3 || ws[0] != channels || ws[1] != 1 || ws[2] == 0 {
-        return Err(Error::InvalidArgument {
-            arg: "weight",
-            reason: format!("expected [{channels}, 1, kernel >= 1], got {ws:?}"),
-        });
-    }
-    if let Some(bias) = bias
-        && bias.shape() != [channels]
-    {
-        return Err(Error::InvalidArgument {
-            arg: "bias",
-            reason: format!("expected [{channels}], got {:?}", bias.shape()),
-        });
-    }
-    Ok((batch, seq, channels, ws[2]))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::nn::conv::causal_conv1d;
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{Lcg, cpu_setup, max_abs_diff_f64, to_f64};
     use numr::autograd::{backward, var_sum};
+    use numr::ops::BinaryOps;
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 
     fn var32(data: &[f32], shape: &[usize], device: &CpuDevice, grad: bool) -> Var<CpuRuntime> {
@@ -179,7 +166,8 @@ mod tests {
         let wv = var32(&w, &[channels, 1, kernel], &device, false);
         let bv = var32(&b, &[channels], &device, false);
         for apply_silu in [false, true] {
-            let got = var_causal_conv1d_silu(&client, &xv, &wv, Some(&bv), apply_silu).unwrap();
+            let got =
+                var_causal_conv1d_silu(&client, &xv, &wv, Some(&bv), apply_silu, None).unwrap();
             assert_eq!(got.shape(), &[batch, seq, channels]);
             let got: Vec<f32> = got.tensor().contiguous().unwrap().to_vec();
             for n in 0..batch {
@@ -213,7 +201,7 @@ mod tests {
         let xv = var64(x, &[batch, seq, channels], device, false);
         let wv = var64(w, &[channels, 1, kernel], device, false);
         let bv = var64(b, &[channels], device, false);
-        let y = var_causal_conv1d_silu(client, &xv, &wv, Some(&bv), true).unwrap();
+        let y = var_causal_conv1d_silu(client, &xv, &wv, Some(&bv), true, None).unwrap();
         let sq = var_mul(&y, &y, client).unwrap();
         let loss = var_sum(&sq, &[0, 1, 2], false, client).unwrap();
         loss.tensor().to_vec::<f64>()[0]
@@ -236,7 +224,7 @@ mod tests {
         let xv = var64(&x, &[batch, seq, channels], &device, true);
         let wv = var64(&w, &[channels, 1, kernel], &device, true);
         let bv = var64(&b, &[channels], &device, true);
-        let y = var_causal_conv1d_silu(&client, &xv, &wv, Some(&bv), true).unwrap();
+        let y = var_causal_conv1d_silu(&client, &xv, &wv, Some(&bv), true, None).unwrap();
         let sq = var_mul(&y, &y, &client).unwrap();
         let loss = var_sum(&sq, &[0, 1, 2], false, &client).unwrap();
         let grads = backward(&loss, &client).unwrap();
@@ -283,7 +271,7 @@ mod tests {
             &device,
             false,
         );
-        let y = var_causal_conv1d_silu(&client, &x, &w, None, false).unwrap();
+        let y = var_causal_conv1d_silu(&client, &x, &w, None, false, None).unwrap();
         let loss = var_sum(&y, &[0, 1, 2], false, &client).unwrap();
         let grads = backward(&loss, &client).unwrap();
         assert!(grads.get(x.id()).is_some());
@@ -298,12 +286,12 @@ mod tests {
         let w = var32(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4], &device, false);
 
         let x1 = var32(&[10.0], &[1, 1, 1], &device, false);
-        let y1 = var_causal_conv1d_silu(&client, &x1, &w, None, false).unwrap();
+        let y1 = var_causal_conv1d_silu(&client, &x1, &w, None, false, None).unwrap();
         assert_eq!(y1.shape(), &[1, 1, 1]);
         assert_eq!(y1.tensor().to_vec::<f32>(), vec![40.0]);
 
         let x2 = var32(&[10.0, 20.0], &[1, 2, 1], &device, false);
-        let y2 = var_causal_conv1d_silu(&client, &x2, &w, None, false).unwrap();
+        let y2 = var_causal_conv1d_silu(&client, &x2, &w, None, false, None).unwrap();
         assert_eq!(y2.shape(), &[1, 2, 1]);
         // t=0: 4*10. t=1: 3*10 + 4*20.
         assert_eq!(y2.tensor().to_vec::<f32>(), vec![40.0, 110.0]);
@@ -314,9 +302,186 @@ mod tests {
         let (client, device) = cpu_setup();
         let x = var32(&[0.0; 6], &[1, 3, 2], &device, false);
         let w = var32(&[0.0; 6], &[3, 1, 2], &device, false);
-        assert!(var_causal_conv1d_silu(&client, &x, &w, None, false).is_err());
+        assert!(var_causal_conv1d_silu(&client, &x, &w, None, false, None).is_err());
         let w = var32(&[0.0; 4], &[2, 1, 2], &device, false);
         let b = var32(&[0.0; 3], &[3], &device, false);
-        assert!(var_causal_conv1d_silu(&client, &x, &w, Some(&b), false).is_err());
+        assert!(var_causal_conv1d_silu(&client, &x, &w, Some(&b), false, None).is_err());
+    }
+
+    const CH: usize = 3;
+
+    fn mk(data: &[f64], shape: &[usize], dtype: DType, device: &CpuDevice) -> Var<CpuRuntime> {
+        let t = if dtype == DType::F64 {
+            Tensor::<CpuRuntime>::from_slice(data, shape, device)
+        } else {
+            let d: Vec<f32> = data.iter().map(|v| *v as f32).collect();
+            Tensor::<CpuRuntime>::from_slice(&d, shape, device)
+        };
+        Var::new(t.unwrap(), true)
+    }
+
+    fn rand_vec(n: usize, seed: u64) -> Vec<f64> {
+        let mut g = Lcg(seed);
+        (0..n)
+            .map(|_| f64::from(g.uniform_f32(-1.0, 1.0)))
+            .collect()
+    }
+
+    fn ids_for(lens: &[usize]) -> Vec<i32> {
+        let mut ids = Vec::new();
+        for (i, &n) in lens.iter().enumerate() {
+            ids.extend(std::iter::repeat_n(i as i32 * 3 + 1, n));
+        }
+        ids
+    }
+
+    struct Out {
+        y: Vec<f64>,
+        gx: Vec<f64>,
+        gw: Vec<f64>,
+        gb: Vec<f64>,
+    }
+
+    /// One row of `x.len() / CH` tokens. Loss is the sum of squared outputs.
+    fn run(dtype: DType, x: &[f64], w: &[f64], b: &[f64], ids: Option<&[i32]>) -> Out {
+        let (client, device) = cpu_setup();
+        let (seq, kernel) = (x.len() / CH, w.len() / CH);
+        let masks = ids.map(|ids| {
+            let t = Tensor::<CpuRuntime>::from_slice(ids, &[1, seq], &device).unwrap();
+            SegmentMasks::from_ids(&client, &t, kernel, dtype).unwrap()
+        });
+        let xv = mk(x, &[1, seq, CH], dtype, &device);
+        let wv = mk(w, &[CH, 1, kernel], dtype, &device);
+        let bv = mk(b, &[CH], dtype, &device);
+        let y = var_causal_conv1d_silu(&client, &xv, &wv, Some(&bv), true, masks.as_ref()).unwrap();
+        let sq = var_mul(&y, &y, &client).unwrap();
+        let loss = var_sum(&sq, &[0, 1, 2], false, &client).unwrap();
+        let g = backward(&loss, &client).unwrap();
+        let get = |v: &Var<CpuRuntime>| to_f64(g.get(v.id()).unwrap());
+        Out {
+            y: to_f64(y.tensor()),
+            gx: get(&xv),
+            gw: get(&wv),
+            gb: get(&bv),
+        }
+    }
+
+    /// Packed documents match separate runs in output, and in x, weight and
+    /// bias gradients (summed over documents for the parameters).
+    fn check_packed_vs_separate(dtype: DType, kernel: usize, lens: &[usize]) {
+        let seq: usize = lens.iter().sum();
+        let x = rand_vec(seq * CH, 1);
+        let w = rand_vec(CH * kernel, 2);
+        let b = rand_vec(CH, 3);
+        let packed = run(dtype, &x, &w, &b, Some(&ids_for(lens)));
+        let (mut y, mut gx) = (Vec::new(), Vec::new());
+        let (mut gw, mut gb) = (vec![0.0; w.len()], vec![0.0; CH]);
+        let mut at = 0;
+        for &n in lens {
+            let o = run(dtype, &x[at * CH..(at + n) * CH], &w, &b, None);
+            y.extend(o.y);
+            gx.extend(o.gx);
+            gw.iter_mut().zip(&o.gw).for_each(|(a, v)| *a += v);
+            gb.iter_mut().zip(&o.gb).for_each(|(a, v)| *a += v);
+            at += n;
+        }
+        let tol = if dtype == DType::F64 { 1e-12 } else { 1e-5 };
+        let tag = format!("{dtype:?} kernel={kernel} lens={lens:?}");
+        assert!(max_abs_diff_f64(&packed.y, &y) < tol, "y {tag}");
+        assert!(max_abs_diff_f64(&packed.gx, &gx) < tol, "gx {tag}");
+        assert!(max_abs_diff_f64(&packed.gw, &gw) < tol, "gw {tag}");
+        assert!(max_abs_diff_f64(&packed.gb, &gb) < tol, "gb {tag}");
+    }
+
+    #[test]
+    fn packed_equals_separate_runs() {
+        for dtype in [DType::F32, DType::F64] {
+            for kernel in 2..=4 {
+                check_packed_vs_separate(dtype, kernel, &[3, 4]);
+            }
+        }
+    }
+
+    /// Single-token documents and documents shorter than `kernel - 1`.
+    #[test]
+    fn short_and_single_token_documents() {
+        for dtype in [DType::F32, DType::F64] {
+            for kernel in 2..=4 {
+                check_packed_vs_separate(dtype, kernel, &[1, 2, 1, 3, 1]);
+                check_packed_vs_separate(dtype, kernel, &[1]);
+            }
+        }
+    }
+
+    /// Changing document A leaves the outputs of document B bit-identical.
+    #[test]
+    fn earlier_document_does_not_leak() {
+        for dtype in [DType::F32, DType::F64] {
+            for kernel in 2..=4 {
+                let ids = ids_for(&[3, 4]);
+                let x = rand_vec(7 * CH, 1);
+                let mut x2 = x.clone();
+                x2[..3 * CH].copy_from_slice(&rand_vec(3 * CH, 99));
+                let w = rand_vec(CH * kernel, 2);
+                let b = rand_vec(CH, 3);
+                let o1 = run(dtype, &x, &w, &b, Some(&ids));
+                let o2 = run(dtype, &x2, &w, &b, Some(&ids));
+                assert_eq!(o1.y[3 * CH..], o2.y[3 * CH..], "{dtype:?} kernel={kernel}");
+                assert_ne!(o1.y[..3 * CH], o2.y[..3 * CH]);
+            }
+        }
+    }
+
+    /// `segments: None` equals a tensor-level reference in the same op order.
+    #[test]
+    fn none_path_is_bit_identical_to_reference() {
+        let (client, device) = cpu_setup();
+        let (batch, seq, kernel) = (2usize, 6usize, 4usize);
+        for dtype in [DType::F32, DType::F64] {
+            let x = mk(
+                &rand_vec(batch * seq * CH, 5),
+                &[batch, seq, CH],
+                dtype,
+                &device,
+            );
+            let w = mk(&rand_vec(CH * kernel, 6), &[CH, 1, kernel], dtype, &device);
+            let b = mk(&rand_vec(CH, 7), &[CH], dtype, &device);
+            let got = var_causal_conv1d_silu(&client, &x, &w, Some(&b), true, None).unwrap();
+
+            let zeros = Tensor::<CpuRuntime>::zeros(&[batch, kernel - 1, CH], dtype, &device);
+            let padded = client.cat(&[&zeros.unwrap(), x.tensor()], 1).unwrap();
+            let mut acc: Option<Tensor<CpuRuntime>> = None;
+            for k in 0..kernel {
+                let sh = padded.narrow(1, k, seq).unwrap().contiguous().unwrap();
+                let wk = w.tensor().narrow(2, k, 1).unwrap().contiguous().unwrap();
+                let term = client.mul(&sh, &wk.reshape(&[1, 1, CH]).unwrap()).unwrap();
+                acc = Some(match acc {
+                    Some(s) => client.add(&s, &term).unwrap(),
+                    None => term,
+                });
+            }
+            let bias = b.tensor().reshape(&[1, 1, CH]).unwrap();
+            let want = client.add(&acc.unwrap(), &bias).unwrap();
+            let want = client.silu(&want).unwrap();
+            assert_eq!(to_f64(got.tensor()), to_f64(&want), "{dtype:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_mismatched_segments() {
+        let (client, device) = cpu_setup();
+        let x = mk(&[0.5; 6], &[1, 3, 2], DType::F32, &device);
+        let w = mk(&[0.5; 6], &[2, 1, 3], DType::F32, &device);
+        let build = |ids: &[i32], seq: usize, kernel: usize, dtype: DType| {
+            let t = Tensor::<CpuRuntime>::from_slice(ids, &[1, seq], &device).unwrap();
+            SegmentMasks::from_ids(&client, &t, kernel, dtype).unwrap()
+        };
+        let run = |m: &SegmentMasks<CpuRuntime>| {
+            var_causal_conv1d_silu(&client, &x, &w, None, false, Some(m))
+        };
+        assert!(run(&build(&[0, 0, 1], 3, 3, DType::F32)).is_ok());
+        assert!(run(&build(&[0, 0], 2, 3, DType::F32)).is_err());
+        assert!(run(&build(&[0, 0, 1], 3, 2, DType::F32)).is_err());
+        assert!(run(&build(&[0, 0, 1], 3, 3, DType::F64)).is_err());
     }
 }

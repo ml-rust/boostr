@@ -133,6 +133,21 @@ where
         })
     }
 
+    /// A text-only wrapper over `llm`, for tests that need the variant.
+    #[cfg(test)]
+    pub(crate) fn text_only(llm: LoadedModel<R>, config: UniversalConfig) -> Self {
+        Self {
+            vision_encoder: None,
+            vision_projector: None,
+            #[cfg(feature = "whisper")]
+            audio_encoder: None,
+            #[cfg(feature = "whisper")]
+            audio_projector: None,
+            llm,
+            config,
+        }
+    }
+
     /// Load vision encoder and projector from the VarBuilder.
     fn load_vision(
         vb: &mut VarBuilder<R>,

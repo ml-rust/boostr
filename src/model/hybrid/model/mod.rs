@@ -7,3 +7,6 @@ mod build;
 mod forward;
 
 pub use build::HybridModel;
+
+#[cfg(test)]
+pub(crate) use build::tests::tiny_model;

@@ -224,13 +224,35 @@ where
     ///
     /// The paged kernel adds no ALiBi bias and no score softcap. A sliding
     /// window is checked per forward instead, since it matters only past the
-    /// window length.
+    /// window length. Gated DeltaNet and SSM layers carry recurrent state
+    /// that the paged KV cache does not hold.
     pub fn paged_attention_refusal(&self) -> Option<String> {
         let config = match self {
             LoadedModel::Llama(m) => m.config(),
             LoadedModel::LlamaTp(m) => m.config(),
             LoadedModel::Multimodal(m) => return m.llm().paged_attention_refusal(),
-            _ => return None,
+            LoadedModel::Qwen35(_) => {
+                return Some(
+                    "model type 'qwen35' carries Gated DeltaNet state and has no paged KV cache; \
+                     turn paged attention off (max_batch_size > 1 serves it with CUDA lanes \
+                     without paged attention)"
+                        .to_string(),
+                );
+            }
+            LoadedModel::Hybrid(_) => {
+                return Some(
+                    "model type 'hybrid' uses SSM layers, which keep recurrent state instead of \
+                     a paged KV cache; turn paged attention off"
+                        .to_string(),
+                );
+            }
+            LoadedModel::Mamba1(_) | LoadedModel::Mamba2(_) | LoadedModel::Mamba3(_) => {
+                return Some(format!(
+                    "model type '{}' keeps SSM state and has no KV cache to page; \
+                     turn paged attention off",
+                    self.model_type()
+                ));
+            }
         };
         let feature = if config.attention.as_ref().is_some_and(|a| a.use_alibi) {
             "ALiBi"
@@ -402,5 +424,70 @@ mod tests {
         assert!(model.rope_caches().is_some());
         assert_eq!(model.dtype(), numr::dtype::DType::F32);
         assert_eq!(format!("{model:?}"), "Qwen35");
+    }
+
+    #[test]
+    fn paged_attention_is_refused_for_state_models() {
+        let (_client, device) = cpu_setup();
+        let qwen = LoadedModel::Qwen35(Box::new(tiny_model(&device, 0x3535_0101)));
+        let reason = qwen.paged_attention_refusal().unwrap();
+        assert!(reason.contains("'qwen35'"), "{reason}");
+        assert!(reason.contains("turn paged attention off"), "{reason}");
+
+        let hybrid =
+            LoadedModel::Hybrid(Box::new(crate::model::hybrid::model::tiny_model(&device)));
+        assert!(
+            hybrid
+                .paged_attention_refusal()
+                .unwrap()
+                .contains("'hybrid'")
+        );
+
+        let mamba2 =
+            LoadedModel::Mamba2(Box::new(crate::model::mamba::model::tiny_mamba2(&device)));
+        assert!(
+            mamba2
+                .paged_attention_refusal()
+                .unwrap()
+                .contains("'mamba2'")
+        );
+
+        let yaml = "model_type: llama\nvocab_size: 32\nhidden_size: 16\nnum_layers: 1\n\
+                    max_seq_len: 16\nintermediate_size: 32\nattention:\n  num_heads: 2\n";
+        let config: crate::model::config::UniversalConfig = serde_saphyr::from_str(yaml).unwrap();
+        let llama = LoadedModel::Llama(Box::new(
+            crate::model::llama::Llama::<numr::runtime::cpu::CpuRuntime>::from_config(
+                &config, &device,
+            )
+            .unwrap(),
+        ));
+        assert!(llama.paged_attention_refusal().is_none());
+
+        let alibi = yaml.replace("num_heads: 2\n", "num_heads: 2\n  use_alibi: true\n");
+        let config: crate::model::config::UniversalConfig = serde_saphyr::from_str(&alibi).unwrap();
+        let llama = LoadedModel::Llama(Box::new(
+            crate::model::llama::Llama::<numr::runtime::cpu::CpuRuntime>::from_config(
+                &config, &device,
+            )
+            .unwrap(),
+        ));
+        assert!(llama.paged_attention_refusal().unwrap().contains("ALiBi"));
+    }
+
+    #[test]
+    fn multimodal_over_qwen35_refuses_paged_attention() {
+        let (_client, device) = cpu_setup();
+        let llm = tiny_model(&device, 0x3535_0102);
+        let config = llm.config().clone();
+        let inner = LoadedModel::Qwen35(Box::new(llm));
+        let wrapped = LoadedModel::Multimodal(Box::new(
+            crate::model::multimodal::MultimodalModel::text_only(inner, config),
+        ));
+        assert!(
+            wrapped
+                .paged_attention_refusal()
+                .unwrap()
+                .contains("'qwen35'")
+        );
     }
 }

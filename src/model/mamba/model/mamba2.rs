@@ -221,7 +221,7 @@ impl<R: Runtime<DType = DType>> Mamba2Block<R> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::model::config::{SsmConfig, UniversalConfig};
     use crate::nn::VarMap;
@@ -311,6 +311,14 @@ mod tests {
                 Tensor::<CpuRuntime>::zeros(&shape, DType::F32, device).unwrap(),
             );
         }
+    }
+
+    pub(crate) fn tiny_model(device: &numr::runtime::cpu::CpuDevice) -> Mamba2Model<CpuRuntime> {
+        let config = tiny_config();
+        let mut varmap = VarMap::<CpuRuntime>::new();
+        insert_weights(&mut varmap, &config, device);
+        let mut vb = VarBuilder::new(&mut varmap, device);
+        Mamba2Model::<CpuRuntime>::from_varbuilder(&mut vb, &config).unwrap()
     }
 
     #[test]

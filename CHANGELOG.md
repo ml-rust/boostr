@@ -101,6 +101,7 @@ Adds exact-resume optimizer state export and import, keyed by parameter name. Ad
 
 ### Fixed
 
+- **`LoadedModel::paged_attention_refusal`** — returns a reason for `qwen35`, `hybrid`, `mamba1`, `mamba2` and `mamba3` models, and for a multimodal model over one of them. Gated DeltaNet and SSM layers keep recurrent state, and the paged KV cache does not hold it. The refusal was `None` for these models, so paged attention ran with wrong state.
 - **`Qwen35Model::forward_train` with `checkpoint_layers = true` over frozen weights** — the logits are untracked, as without checkpointing. Before, each checkpointed layer returned a tracked node that held its closure and inputs. The same holds for `forward_train_checkpointed` on `GdnBlock` and `Qwen35AttentionBlock`. The fix is in numr's `checkpoint_with_client`.
 - **Speculative decoding** — the old implementation produced incorrect tokens. Each draft and verify forward re-sent the whole context, so the KV cache held the context twice. It ignored the request sampling, hard-coded EOS as token 0 or 2, biased the acceptance, never checked the draft vocabulary, and its RNG stuck at seed 0. `SpeculativeGenerator` replaces it.
 - **Sampled speculative verification** — the old `SpeculativeOps` read every probability back to the host. It accepted any draft with draft probability 0, reused Philox counter 0 on every call, and could draw a zero-probability token at the tail. `speculative_verify` runs on the device and its output follows the target distribution. CUDA runs one fused kernel per call.

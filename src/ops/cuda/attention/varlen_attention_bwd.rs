@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
+use numr::ops::TypeConversionOps;
 use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
@@ -179,13 +180,16 @@ fn varlen_attention_bwd_impl_inner(
     let total_tokens_q = q.shape()[0];
     let total_tokens_k = k.shape()[0];
 
-    // dq: same head layout as Q (num_heads)
-    // dk/dv: kv head layout (num_kv_heads) — GQA: fewer heads than Q
+    // dq uses the Q head layout (num_heads) and the input dtype. One block
+    // owns each Q row, so the kernel stores it once with no atomics.
+    // dk/dv use the KV head layout (num_kv_heads). Under GQA several Q heads
+    // and every Q block add into one KV row, so both kernels accumulate dk/dv
+    // with float atomicAdd into zeroed F32 buffers. The F16 path casts them
+    // after the launch.
     let dq = Tensor::<CudaRuntime>::zeros(&[total_tokens_q, num_heads, head_dim], dtype, device)?;
-    let dk =
-        Tensor::<CudaRuntime>::zeros(&[total_tokens_k, num_kv_heads, head_dim], dtype, device)?;
-    let dv =
-        Tensor::<CudaRuntime>::zeros(&[total_tokens_k, num_kv_heads, head_dim], dtype, device)?;
+    let kv_grad_shape = [total_tokens_k, num_kv_heads, head_dim];
+    let dk_acc = Tensor::<CudaRuntime>::zeros(&kv_grad_shape, DType::F32, device)?;
+    let dv_acc = Tensor::<CudaRuntime>::zeros(&kv_grad_shape, DType::F32, device)?;
 
     let num_q_blocks_per_batch = max_seqlen_q.div_ceil(block_m);
     let num_q_blocks = num_q_blocks_per_batch * batch_size;
@@ -215,8 +219,8 @@ fn varlen_attention_bwd_impl_inner(
     let cu_q_ptr = cu_seqlens_q.ptr();
     let cu_k_ptr = cu_seqlens_k.ptr();
     let dq_ptr = dq.ptr();
-    let dk_ptr = dk.ptr();
-    let dv_ptr = dv.ptr();
+    let dk_ptr = dk_acc.ptr();
+    let dv_ptr = dv_acc.ptr();
     let scale = (head_dim as f32).sqrt().recip();
     let batch_i32 = batch_size as i32;
     let nh_i32 = num_heads as i32;
@@ -246,17 +250,22 @@ fn varlen_attention_bwd_impl_inner(
         builder.arg(&scale);
         builder.arg(&causal_i32);
         builder.launch(cfg).map_err(|e| Error::KernelError {
-            reason: format!("varlen attention bwd launch failed: {e:?}"),
+            reason: format!(
+                "varlen attention bwd: launch of `{kernel_name}` failed ({e:?}); \
+                 check the CUDA device state and the kernel module build"
+            ),
         })?;
     }
 
-    // Sync stream: BWD uses atomicAdd so must complete before results are read
-    client
-        .stream()
-        .synchronize()
-        .map_err(|e| Error::KernelError {
-            reason: format!("varlen attention bwd sync failed: {e:?}"),
-        })?;
+    // No stream sync here. Every atomicAdd completes inside the kernel. The
+    // cast below, every later boostr/numr kernel and every device-to-host
+    // copy run on this same compute stream, so stream order covers each
+    // reader. A host sync is also illegal inside CUDA graph capture.
+    if dtype == DType::F32 {
+        return Ok((dq, dk_acc, dv_acc));
+    }
+    let dk = client.cast(&dk_acc, dtype)?;
+    let dv = client.cast(&dv_acc, dtype)?;
 
     Ok((dq, dk, dv))
 }

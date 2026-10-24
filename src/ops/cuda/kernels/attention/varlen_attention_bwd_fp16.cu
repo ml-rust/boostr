@@ -1,8 +1,7 @@
 // VarLen (packed) flash-attention backward — FP16 path.
 //
-// `varlen_attention_bwd.cu` holds the FP32 path. Compiled as its own
-// module (VARLEN_ATTENTION_BWD_FP16_MODULE); the FP16 kernel symbols are
-// unchanged so the Rust dispatcher loads them by the same names.
+// `varlen_attention_bwd.cu` holds the FP32 path. This file compiles as its
+// own module (VARLEN_ATTENTION_BWD_FP16_MODULE).
 //
 // Causal convention: ABSOLUTE (bottom-right) alignment, per sequence.
 // Within sequence s, seq_len_q = cu_seqlens_q[s+1] - cu_seqlens_q[s] and
@@ -19,26 +18,23 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <stdint.h>
-#include "atomics.cuh"
 
 // ============================================================================
-// VarLen Attention Backward - FP16, full GQA, fixed atomics
+// VarLen Attention Backward - FP16 inputs, full GQA
 // ============================================================================
 //
-// All computation is done in fp32 per-thread.  Only the final dQ write and
-// the dK/dV atomic scatters involve half-precision conversion.
-// atomicAddHalf from atomics.cuh is used for dK/dV (replaces the broken
-// `atomicAdd(reinterpret_cast<float*>(__half_ptr), val)` from the old code).
+// Every thread computes in fp32. Q, K, V, O and dO are half. dQ is stored
+// once as half. dK and dV are FLOAT buffers: the launcher allocates them as
+// zeroed F32 scratch and casts them to F16 after the launch. No partial sum
+// is rounded to half before the full reduction ends.
 //
 // Two-phase tile loop. Phase 1 gives each thread one Q token row of the tile
-// and accumulates dQ locally (no atomics: each Q row is owned by exactly one
-// block). Phase 2 transposes ownership — each thread takes one K row of the
-// tile, sweeps the tile's Q rows into fp32 registers, and emits ONE
-// atomicAddHalf per (k_row, head_dim element) for each of dK and dV. The half
-// storage is therefore rounded once per tile per element rather than once per
-// (q_row, k_row, element). Atomics cannot be dropped: under GQA several Q
-// heads scatter into the same KV head, and each Q block of the sequence
-// contributes to the same K rows.
+// and accumulates dQ locally. It needs no atomics: one block owns each Q row.
+// Phase 2 transposes ownership. Each thread takes one K row of the tile,
+// sweeps the tile's Q rows into fp32 registers, and emits ONE float atomicAdd
+// per (k_row, head_dim element) for each of dK and dV. Atomics stay: under
+// GQA several Q heads scatter into the same KV head, and each Q block of the
+// sequence adds to the same K rows.
 
 template<int HEAD_DIM, int BLOCK_M, int BLOCK_N>
 __device__ void varlen_flash_attention_bwd_fp16_impl(
@@ -51,8 +47,8 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
     const int*    __restrict__ cu_seqlens_q,
     const int*    __restrict__ cu_seqlens_k,
     __half* __restrict__ grad_Q,
-    __half* __restrict__ grad_K,
-    __half* __restrict__ grad_V,
+    float*  __restrict__ grad_K,   // F32 scratch, zeroed by the launcher
+    float*  __restrict__ grad_V,   // F32 scratch, zeroed by the launcher
     const int batch_size,
     const int num_heads,
     const int num_kv_heads,
@@ -109,8 +105,8 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
     const __half* O_head  = O      + head_idx    * HEAD_DIM;
     const __half* dO_head = grad_O + head_idx    * HEAD_DIM;
     __half*       dQ_head = grad_Q + head_idx    * HEAD_DIM;
-    __half*       dK_head = grad_K + kv_head_idx * HEAD_DIM;
-    __half*       dV_head = grad_V + kv_head_idx * HEAD_DIM;
+    float*        dK_head = grad_K + kv_head_idx * HEAD_DIM;
+    float*        dV_head = grad_V + kv_head_idx * HEAD_DIM;
 
     // Load Q and grad_O tiles
     for (int i = tid; i < q_tile_size * HEAD_DIM; i += blockDim.x) {
@@ -200,28 +196,13 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
             }
         }
 
-        // grad_K/grad_V phase: ownership transposes — this thread owns K row
-        // `k_row` of the tile and sweeps the tile's Q rows, summing into fp32
-        // registers and emitting ONE atomicAddHalf per (k_row, head_dim
-        // element) for each of dK and dV, instead of one per (q_row, k_row,
-        // head_dim element). Two wins over the old inner-loop scatter: the tile
-        // is summed at full fp32 precision and rounded to half once, and the
-        // atomic traffic drops by the Q-tile factor.
-        // The scores are recomputed here rather than staged in shared memory:
-        // staging P and dS as BLOCK_M x BLOCK_N floats would break the
-        // shared-memory budget the `_small` tiles exist to respect, while
-        // recomputing costs only the score dot-product flops and no extra
-        // shared memory.
-        // Atomics remain required: under GQA several Q heads scatter into the
-        // same KV head, and each Q block of the sequence adds its own share.
-        //
-        // The guard below tracks `atomicAddHalf`, which `atomics.cuh` defines
-        // only from arch 700. `build.rs` compiles this file at sm_75, so the
-        // branch is always taken. There is deliberately no `#else`: lowering
-        // that arch floor would drop dK/dV accumulation silently, with no
-        // compile error and no failing launch, leaving the gradients simply
-        // wrong. Change the floor only together with a fallback here.
-#if __CUDA_ARCH__ >= 700
+        // grad_K/grad_V phase: ownership transposes. This thread owns K row
+        // `k_row` of the tile and sweeps the tile's Q rows into fp32
+        // registers. It emits ONE float atomicAdd per (k_row, head_dim
+        // element) for each of dK and dV. The scores are recomputed here.
+        // Staging P and dS as BLOCK_M x BLOCK_N floats breaks the
+        // shared-memory budget that the `_small` tiles respect. Recomputing
+        // costs only the score dot-product flops.
         for (int k_row = tid; k_row < k_tile_size; k_row += blockDim.x) {
             const int k_idx = k_start + k_row;
 
@@ -263,17 +244,10 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
             const int global_k_pos = seq_start_k + k_idx;
             #pragma unroll
             for (int d = 0; d < HEAD_DIM; ++d) {
-                atomicAddHalf(
-                    &dK_head[global_k_pos * num_kv_heads * HEAD_DIM + d],
-                    __float2half(dK_local[d])
-                );
-                atomicAddHalf(
-                    &dV_head[global_k_pos * num_kv_heads * HEAD_DIM + d],
-                    __float2half(dV_local[d])
-                );
+                atomicAdd(&dK_head[global_k_pos * num_kv_heads * HEAD_DIM + d], dK_local[d]);
+                atomicAdd(&dV_head[global_k_pos * num_kv_heads * HEAD_DIM + d], dV_local[d]);
             }
         }
-#endif
         __syncthreads();
     }
 
@@ -299,7 +273,7 @@ extern "C" __global__ void varlen_flash_attention_bwd_64_fp16(
     const __half* Q, const __half* K, const __half* V,
     const __half* O, const float* L, const __half* grad_O,
     const int* cu_seqlens_q, const int* cu_seqlens_k,
-    __half* grad_Q, __half* grad_K, __half* grad_V,
+    __half* grad_Q, float* grad_K, float* grad_V,
     int batch_size, int num_heads, int num_kv_heads,
     int max_seqlen_q, int max_seqlen_k, float scale, int causal
 ) {
@@ -316,7 +290,7 @@ extern "C" __global__ void varlen_flash_attention_bwd_128_fp16(
     const __half* Q, const __half* K, const __half* V,
     const __half* O, const float* L, const __half* grad_O,
     const int* cu_seqlens_q, const int* cu_seqlens_k,
-    __half* grad_Q, __half* grad_K, __half* grad_V,
+    __half* grad_Q, float* grad_K, float* grad_V,
     int batch_size, int num_heads, int num_kv_heads,
     int max_seqlen_q, int max_seqlen_k, float scale, int causal
 ) {
@@ -342,7 +316,7 @@ extern "C" __global__ void varlen_flash_attention_bwd_128_fp16_small(
     const __half* Q, const __half* K, const __half* V,
     const __half* O, const float* L, const __half* grad_O,
     const int* cu_seqlens_q, const int* cu_seqlens_k,
-    __half* grad_Q, __half* grad_K, __half* grad_V,
+    __half* grad_Q, float* grad_K, float* grad_V,
     int batch_size, int num_heads, int num_kv_heads,
     int max_seqlen_q, int max_seqlen_k, float scale, int causal
 ) {
@@ -360,7 +334,7 @@ extern "C" __global__ void varlen_flash_attention_bwd_256_fp16(
     const __half* Q, const __half* K, const __half* V,
     const __half* O, const float* L, const __half* grad_O,
     const int* cu_seqlens_q, const int* cu_seqlens_k,
-    __half* grad_Q, __half* grad_K, __half* grad_V,
+    __half* grad_Q, float* grad_K, float* grad_V,
     int batch_size, int num_heads, int num_kv_heads,
     int max_seqlen_q, int max_seqlen_k, float scale, int causal
 ) {

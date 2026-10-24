@@ -3,7 +3,7 @@
 //! Validates:
 //!   1. CUDA bwd GQA (hd=64) matches CPU bwd GQA (dq/dk/dv).
 //!   2. CUDA bwd hd=256 GQA matches CPU bwd hd=256 GQA.
-//!   3. FP16 CUDA bwd GQA (hd=64) does not corrupt memory (atomicAddHalf fix).
+//!   3. FP16 CUDA bwd GQA (hd=64) matches CPU bwd and stays finite.
 //!
 //! Run with:
 //!   cd boostr && cargo test --features cuda --test varlen_bwd_cuda
@@ -338,7 +338,7 @@ fn test_cuda_varlen_bwd_hd256() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: FP16 CUDA bwd GQA hd=64 — proves atomicAddHalf works (no corruption)
+// Test 3: FP16 CUDA bwd GQA hd=64 — matches CPU bwd and stays finite
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "f16")]
@@ -469,7 +469,7 @@ fn test_cuda_varlen_bwd_fp16_gqa_no_corruption() {
     );
     let (dq_cpu, dk_cpu, dv_cpu) = tc.run_cpu();
 
-    // Looser tolerance for fp16 (quantisation + atomicAddHalf precision)
+    // Looser tolerance for fp16: the CPU reference reads unrounded F32 inputs.
     assert_close(&dq_f32, &dq_cpu, "dQ fp16 GQA vs CPU ref", 2e-2);
     assert_close(&dk_f32, &dk_cpu, "dK fp16 GQA vs CPU ref", 2e-2);
     assert_close(&dv_f32, &dv_cpu, "dV fp16 GQA vs CPU ref", 2e-2);

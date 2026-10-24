@@ -457,7 +457,7 @@ fn compile_cuda_kernels() {
     // Shared headers are not compilation units, so the `.cu` paths above do not
     // cover them. Emit every `.cuh` under the kernel source roots instead of
     // guessing one from the `.cu` stem: that guess matched only same-stem pairs
-    // and left `dtype_traits.cuh`, `attention/atomics.cuh`, `gemm/common.cuh`
+    // and left `dtype_traits.cuh`, `attention/paged_attention.cuh`, `gemm/common.cuh`
     // and `gemv/common.cuh` untracked. Scanning `#include` lines is not an
     // option either — it misses transitive includes. `fatbin_up_to_date` reads
     // the same roots, so cargo's rerun set and the per-kernel skip agree.

@@ -644,12 +644,12 @@ fn mqa_gqa_bwd_mqa_hd64_causal_f16_parity() {
 // Backward cross-block accumulation rounding (dQ/dK/dV atomic re-rounding)
 // ============================================================================
 //
-// `mqa_gqa_bwd.cu`'s F16/BF16 paths accumulate dQ/dK/dV gradients ACROSS CUDA
-// BLOCKS with `atomicAdd`/`atomicAddHalf` directly into `__half`/
-// `__nv_bfloat16` storage: every atomic is a read-modify-write that re-rounds
-// the running sum to the storage dtype's mantissa (10 bits f16, 7 bits bf16).
-// The F32 path accumulates into `float*` with an exact-to-FP32 `atomicAdd`,
-// so it has no such defect — this is the section's control, not a case here.
+// `mqa_gqa_bwd.cu` accumulates dQ/dK/dV ACROSS CUDA BLOCKS with float
+// `atomicAdd` into zeroed F32 buffers for every dtype. The launcher casts
+// them to the storage dtype once, after the kernel. A kernel that added into
+// `__half`/`__nv_bfloat16` storage instead would re-round the running sum to
+// the storage mantissa (10 bits f16, 7 bits bf16) on every atomic. These
+// cases guard against that regression. The F32 path is the control.
 //
 // This is NOT a Q/K/V-input-rounding test (that is already covered by
 // `bwd_tol()` above). Both sides below run the SAME already-rounded inputs:
@@ -1416,8 +1416,8 @@ fn run_bwd_defect_case(case: Case, dtype: TestDType, dq_roundings: usize, dkv_ro
     with_cuda_backend(|cuda_client, cuda_device| {
         ran = true;
 
-        // Low-precision path: native storage dtype, so mqa_gqa_bwd.cu's
-        // atomicAdd/atomicAddHalf re-rounds into it on every cross-block add.
+        // Low-precision path: native storage dtype. The kernel must still
+        // accumulate every cross-block add in F32 and round once at the end.
         let q_low = to_cuda(&q_data, &q_shape, &cuda_device, dtype);
         let k_low = to_cuda(&k_data, &kv_shape, &cuda_device, dtype);
         let v_low = to_cuda(&v_data, &kv_shape, &cuda_device, dtype);

@@ -2,15 +2,12 @@
 //! `tests/varlen_bwd_cuda.rs` and `tests/varlen_tile_fallback_cuda.rs` leave
 //! uncovered.
 //!
-//! The dK/dV accumulation in `varlen_attention_bwd.cu` /
-//! `varlen_attention_bwd_fp16.cu` was just restructured from an `atomicAdd`
-//! per `(q_row, k_idx, d)` straight into output storage, to FP32 register
-//! accumulation per K-row within a tile with ONE atomic per `(k_row, d)` per
-//! Q-block. The identical defect class in the paged-attention backward
-//! kernel (see `tests/backend_parity/attn/paged_attention.rs`) produced up to 83%
-//! relative error on dK/dV while every prior test still passed — that was
-//! caught only by comparing against a CPU reference at half precision. This
-//! file does the same for varlen.
+//! `varlen_attention_bwd.cu` / `varlen_attention_bwd_fp16.cu` sum each K row's
+//! dK/dV over a Q tile in FP32 registers. They then issue ONE float
+//! `atomicAdd` per `(k_row, d)` per Q block into an F32 buffer. The F16 launcher
+//! casts that buffer to F16 once. This file checks dQ/dK/dV against a CPU
+//! reference at each dtype. `tests/varlen_f16_accum_cuda.rs` holds the tighter
+//! F16 accumulation check.
 //!
 //! Reference: `CpuClient::varlen_attention_bwd` (the `impl_generic`-style CPU
 //! fallback in `src/ops/cpu/attention/varlen_attention.rs`), the same
@@ -125,22 +122,18 @@ fn read_back_f32(t: &Tensor<CudaRuntime>) -> Vec<f32> {
 /// `dQ_local[HEAD_DIM]` then a single final store) — pass `n_contrib = None`,
 /// the base pair is its whole tolerance.
 ///
-/// `dK`/`dV` accumulate every Q row of a tile into an FP32 register per
-/// K-row, then issue ONE `atomicAdd` into `dtype` storage per `(k_row, d)`
-/// per Q-block — not once per `(q_row, k_idx, d)` as before the restructure.
-/// Each such add still rounds the running sum to `dtype`'s mantissa, so for
-/// `n` sequential rounded additions Higham's classical recursive-summation
-/// bound applies: extra relative error `(n-1) * u` (`u` = unit roundoff:
-/// `2^-24` f32, `2^-11` f16). `n_contrib` is passed as
-/// `max_seqlen_q * (num_heads / num_kv_heads)` — an upper bound on
-/// `num_q_blocks_per_batch * heads_per_kv`, the actual number of atomics a
-/// given `(k_row, d)` receives, since `num_q_blocks_per_batch <=
-/// max_seqlen_q` for any `BLOCK_M >= 1`. Deliberately loose (mirrors
-/// `paged_bwd_tol`'s own reasoning for using `seq_len * heads_per_kv` rather
-/// than the strict per-tile count): tightening it to the exact runtime
-/// `BLOCK_M` would make this test flake with the device-dependent large/small
-/// tile choice in `varlen_attention_block_config.rs` rather than catch a real
-/// regression.
+/// `dK`/`dV` sum every Q row of a tile into an FP32 register per K row. They
+/// then issue ONE float `atomicAdd` per `(k_row, d)` per Q block into an F32
+/// buffer, for both dtypes. Each add rounds the running sum to F32. For `n`
+/// rounded additions Higham's recursive-summation bound gives extra relative
+/// error `(n-1) * u` with `u = 2^-24`, the F32 unit roundoff, at every dtype.
+/// The F16 path casts the F32 sum to F16 once, as dQ does, so the base pair
+/// covers that rounding. `n_contrib` is `max_seqlen_q * (num_heads /
+/// num_kv_heads)`. It bounds `num_q_blocks_per_batch * heads_per_kv`, the
+/// atomic count per `(k_row, d)`, since `num_q_blocks_per_batch <=
+/// max_seqlen_q` for any `BLOCK_M >= 1`. The exact runtime `BLOCK_M` depends on
+/// the device tile choice in `varlen_attention_block_config.rs`, so the bound
+/// does not use it.
 fn varlen_bwd_tol(dtype: DType, n_contrib: Option<usize>) -> (f32, f32) {
     let (atol, rtol_base) = match dtype {
         DType::F32 => (1e-5, 1e-4),
@@ -149,13 +142,8 @@ fn varlen_bwd_tol(dtype: DType, n_contrib: Option<usize>) -> (f32, f32) {
             unimplemented!("varlen_bwd_tol: unsupported dtype {other:?} (varlen is F32/F16 only)")
         }
     };
-    let u: f32 = match dtype {
-        DType::F32 => 2f32.powi(-24),
-        DType::F16 => 2f32.powi(-11),
-        other => {
-            unimplemented!("varlen_bwd_tol: unsupported dtype {other:?} (varlen is F32/F16 only)")
-        }
-    };
+    // The dK/dV accumulator is F32 at every input dtype.
+    let u: f32 = 2f32.powi(-24);
     let rtol = match n_contrib {
         None => rtol_base,
         Some(n) => rtol_base + (n.saturating_sub(1) as f32) * u,
@@ -483,18 +471,12 @@ fn assert_varlen_bwd_parity(
         causal,
     );
 
-    // dQ is the FP32-accumulated control (untouched by the dK/dV
-    // restructure), so its normalized error tracks pure input-quantization
-    // error only. dK/dV normalized error should sit within a fixed multiple
-    // of dQ's at the same shape and dtype — a regression back to
-    // per-(q_row, k_idx, d) half-precision atomics is exactly what would
-    // blow this ratio up, as it did for the paged kernel (orders of
-    // magnitude pre-fix there, a small multiple post-fix). 25x is reused
-    // unchanged from
-    // `paged_attention.rs::DKV_TO_DQ_RATIO_LIMIT`: same defect class, same
-    // one-atomic-per-Q-block-per-K-row restructure, so the same headroom
-    // above real post-fix noise and margin below the pre-fix magnitude
-    // applies without needing a varlen-specific recalibration.
+    // dQ accumulates in FP32 and rounds to `dtype` once, so its normalized
+    // error tracks input quantization only. dK/dV take the same path, so
+    // their normalized error stays within a fixed multiple of dQ's at the
+    // same shape and dtype. Per-contribution `dtype` atomics blow this ratio
+    // up. 25x matches `paged_attention.rs::DKV_TO_DQ_RATIO_LIMIT`, the same
+    // guard for the same defect class.
     const DKV_TO_DQ_RATIO_LIMIT: f32 = 25.0;
     for (name, norm) in [("dK", dk_norm), ("dV", dv_norm)] {
         let ratio = norm / dq_norm;
@@ -502,10 +484,8 @@ fn assert_varlen_bwd_parity(
             ratio <= DKV_TO_DQ_RATIO_LIMIT,
             "{label} {name} CUDA vs CPU [{dtype:?}]: normalized error (max_abs_diff / \
              ref_rms) is {norm:.4e}, {ratio:.1}x dQ's {dq_norm:.4e} (limit \
-             {DKV_TO_DQ_RATIO_LIMIT}x) — this most likely means {name}'s atomicAdd \
-             accumulation regressed from one atomic per (k_row, d) per Q-block back to \
-             one atomic per (q_row, k_idx, d), rounding the running sum to `{dtype:?}` on \
-             every contribution instead of once per tile"
+             {DKV_TO_DQ_RATIO_LIMIT}x); check that {name} accumulates in an F32 buffer \
+             with one atomic per (k_row, d) per Q block and rounds to `{dtype:?}` once"
         );
     }
 }

@@ -7,7 +7,7 @@ use super::document_mask::document_mask_bias;
 use crate::error::{Error, Result};
 use numr::autograd::{Var, var_add, var_matmul, var_mul_scalar, var_softmax, var_transpose};
 use numr::dtype::DType;
-use numr::ops::{CompareOps, ConditionalOps, ScalarOps};
+use numr::ops::{CompareOps, ConditionalOps, ScalarOps, TypeConversionOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
@@ -30,12 +30,12 @@ pub fn scaled_dot_product_attention_impl<R, C>(
 ) -> Result<Var<R>>
 where
     R: Runtime<DType = DType>,
-    C: RuntimeClient<R> + ScalarOps<R>,
+    C: RuntimeClient<R> + ScalarOps<R> + TypeConversionOps<R>,
     R::Client: ScalarOps<R>,
 {
     check_shapes(q, k, v)?;
     let mask = if causal {
-        Some(top_left_causal_mask(q, k)?)
+        Some(top_left_causal_mask(client, q, k)?)
     } else {
         None
     };
@@ -51,7 +51,7 @@ where
 /// RoPE needs no position reset per document. Rotated scores depend only on
 /// the offset `i - j`.
 ///
-/// The mask builds on the device from `segment_ids`. Scores must be F32, like the causal mask.
+/// The mask builds on the device from `segment_ids` in the dtype of the scores.
 pub fn segmented_scaled_dot_product_attention_impl<R, C>(
     client: &C,
     q: &Var<R>,
@@ -63,7 +63,7 @@ pub fn segmented_scaled_dot_product_attention_impl<R, C>(
 ) -> Result<Var<R>>
 where
     R: Runtime<DType = DType>,
-    C: RuntimeClient<R> + ScalarOps<R> + CompareOps<R> + ConditionalOps<R>,
+    C: RuntimeClient<R> + ScalarOps<R> + CompareOps<R> + ConditionalOps<R> + TypeConversionOps<R>,
     R::Client: ScalarOps<R>,
 {
     let Some(segment_ids) = segment_ids else {
@@ -80,13 +80,21 @@ where
             ),
         });
     }
-    let bias = document_mask_bias(client, segment_ids, batch, seq_q, causal)?;
+    let bias = document_mask_bias(
+        client,
+        segment_ids,
+        batch,
+        seq_q,
+        causal,
+        q.tensor().dtype(),
+    )?;
     scaled_dot_product_attention_masked_impl(client, q, k, v, scale, Some(&bias))
 }
 
 /// softmax(Q @ K^T * scale + mask) @ V with a caller-built additive mask.
 ///
 /// `mask` broadcasts against the `[B, H, S, S_kv]` scores and must share their dtype.
+/// Softmax accumulates in F32 for F16 and BF16 scores, so the scores need no cast.
 /// `None` adds no mask. The mask takes no gradient.
 pub fn scaled_dot_product_attention_masked_impl<R, C>(
     client: &C,
@@ -112,6 +120,16 @@ where
 
     let scores = match mask {
         Some(mask) => {
+            if mask.dtype() != scores.tensor().dtype() {
+                return Err(Error::InvalidArgument {
+                    arg: "mask",
+                    reason: format!(
+                        "mask dtype {:?} must match the scores dtype {:?}",
+                        mask.dtype(),
+                        scores.tensor().dtype()
+                    ),
+                });
+            }
             let mask = Var::new(mask.clone(), false);
             var_add(&scores, &mask, client).map_err(Error::Numr)?
         }
@@ -125,10 +143,14 @@ where
     var_matmul(&weights, v, client).map_err(Error::Numr)
 }
 
-/// `[1, 1, S, S_kv]` F32 causal mask: key `j > i` holds `-inf`.
+/// `[1, 1, S, S_kv]` causal mask in the dtype of `q`: key `j > i` holds `-inf`.
 ///
 /// Query `i` aligns with key `i`, the same rule as the CUDA SDPA kernel.
-fn top_left_causal_mask<R: Runtime<DType = DType>>(q: &Var<R>, k: &Var<R>) -> Result<Tensor<R>> {
+fn top_left_causal_mask<R, C>(client: &C, q: &Var<R>, k: &Var<R>) -> Result<Tensor<R>>
+where
+    R: Runtime<DType = DType>,
+    C: TypeConversionOps<R>,
+{
     let s_q = q.shape()[2];
     let s_kv = k.shape()[2];
     let mut mask_data = vec![0.0f32; s_q * s_kv];
@@ -137,11 +159,13 @@ fn top_left_causal_mask<R: Runtime<DType = DType>>(q: &Var<R>, k: &Var<R>) -> Re
             mask_data[i * s_kv + j] = f32::NEG_INFINITY;
         }
     }
-    Ok(Tensor::<R>::from_slice(
-        &mask_data,
-        &[1, 1, s_q, s_kv],
-        q.tensor().device(),
-    )?)
+    let mask = Tensor::<R>::from_slice(&mask_data, &[1, 1, s_q, s_kv], q.tensor().device())?;
+    let dtype = q.tensor().dtype();
+    if dtype == DType::F32 {
+        Ok(mask)
+    } else {
+        Ok(client.cast(&mask, dtype)?)
+    }
 }
 
 /// Check the `[B, H, S, D_k]`, `[B, H, S_kv, D_k]`, `[B, H, S_kv, D_v]` layout.

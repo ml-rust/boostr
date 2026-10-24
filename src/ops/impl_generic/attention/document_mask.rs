@@ -3,12 +3,13 @@
 use super::flash_standard::build_attention_mask;
 use crate::error::{Error, Result};
 use numr::dtype::DType;
-use numr::ops::{CompareOps, ConditionalOps};
+use numr::ops::{CompareOps, ConditionalOps, TypeConversionOps};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
-/// Additive `[B, 1, S, S]` F32 bias that keeps attention inside each document.
+/// Additive `[B, 1, S, S]` bias in `dtype` that keeps attention inside each document.
 ///
+/// `dtype` is the dtype of the attention scores. F16 and BF16 hold `-inf`.
 /// `segment_ids` is a `[B, S]` I32 tensor. Equal ids in one row mark one document.
 /// Query `i` sees key `j` when `segment_ids[b, i] == segment_ids[b, j]`.
 /// `causal` also requires `j <= i`.
@@ -16,16 +17,18 @@ use numr::tensor::Tensor;
 ///
 /// The diagonal is always allowed, so no softmax row is all `-inf`.
 /// The compare and the select run on the device. No id is read back to the host.
+/// The bias builds in F32 and casts to `dtype` once.
 pub fn document_mask_bias<R, C>(
     client: &C,
     segment_ids: &Tensor<R>,
     batch: usize,
     seq_len: usize,
     causal: bool,
+    dtype: DType,
 ) -> Result<Tensor<R>>
 where
     R: Runtime<DType = DType>,
-    C: CompareOps<R> + ConditionalOps<R>,
+    C: CompareOps<R> + ConditionalOps<R> + TypeConversionOps<R>,
 {
     if segment_ids.dtype() != DType::I32 {
         return Err(Error::InvalidArgument {
@@ -58,7 +61,12 @@ where
         Tensor::<R>::zeros(&[1, 1, 1, 1], DType::F32, device)?
     };
     let blocked = Tensor::<R>::full_scalar(&[1, 1, 1, 1], DType::F32, f64::NEG_INFINITY, device)?;
-    Ok(client.where_cond(&same_document, &allowed, &blocked)?)
+    let bias = client.where_cond(&same_document, &allowed, &blocked)?;
+    if dtype == DType::F32 {
+        Ok(bias)
+    } else {
+        Ok(client.cast(&bias, dtype)?)
+    }
 }
 
 #[cfg(test)]
@@ -69,13 +77,28 @@ mod tests {
 
     const NEG: f32 = f32::NEG_INFINITY;
 
-    fn bias(ids: &[i32], batch: usize, seq: usize, causal: bool) -> Vec<f32> {
+    fn bias_in(ids: &[i32], batch: usize, seq: usize, causal: bool, dtype: DType) -> Vec<f32> {
         let (client, dev) = cpu_setup();
         let ids = Tensor::<CpuRuntime>::from_slice(ids, &[batch, seq], &dev).unwrap();
-        let out = document_mask_bias(&client, &ids, batch, seq, causal).unwrap();
+        let out = document_mask_bias(&client, &ids, batch, seq, causal, dtype).unwrap();
         assert_eq!(out.shape(), &[batch, 1, seq, seq]);
-        assert_eq!(out.dtype(), DType::F32);
-        out.to_vec::<f32>()
+        assert_eq!(out.dtype(), dtype);
+        out.to_dtype(DType::F32).unwrap().to_vec::<f32>()
+    }
+
+    fn bias(ids: &[i32], batch: usize, seq: usize, causal: bool) -> Vec<f32> {
+        bias_in(ids, batch, seq, causal, DType::F32)
+    }
+
+    #[cfg(feature = "f16")]
+    #[test]
+    fn half_precision_bias_matches_f32_bias() {
+        for dtype in [DType::BF16, DType::F16] {
+            for causal in [true, false] {
+                let want = bias(&[0, 0, 1, 1, 1], 1, 5, causal);
+                assert_eq!(bias_in(&[0, 0, 1, 1, 1], 1, 5, causal, dtype), want);
+            }
+        }
     }
 
     #[test]
@@ -114,7 +137,9 @@ mod tests {
     fn rejects_non_i32_ids() {
         let (client, dev) = cpu_setup();
         let ids = Tensor::<CpuRuntime>::from_slice(&[0.0f32, 1.0], &[1, 2], &dev).unwrap();
-        let e = document_mask_bias(&client, &ids, 1, 2, true).err().unwrap();
+        let e = document_mask_bias(&client, &ids, 1, 2, true, DType::F32)
+            .err()
+            .unwrap();
         assert!(e.to_string().contains("must be I32"), "{e}");
     }
 
@@ -122,7 +147,9 @@ mod tests {
     fn rejects_wrong_shape() {
         let (client, dev) = cpu_setup();
         let ids = Tensor::<CpuRuntime>::from_slice(&[0i32, 0, 1], &[1, 3], &dev).unwrap();
-        let e = document_mask_bias(&client, &ids, 1, 4, true).err().unwrap();
+        let e = document_mask_bias(&client, &ids, 1, 4, true, DType::F32)
+            .err()
+            .unwrap();
         assert!(e.to_string().contains("must be [1, 4]"), "{e}");
     }
 }

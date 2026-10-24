@@ -45,7 +45,7 @@ impl<R: Runtime<DType = DType>> Mla<R> {
     /// `None` runs [`Mla::forward`] unchanged.
     ///
     /// RoPE needs no position reset per document. Rotated scores depend only on
-    /// the offset `i - j`. The mask builds on the device, and scores must be F32.
+    /// the offset `i - j`. The mask builds on the device in the dtype of `hidden`.
     pub fn forward_with_segments<C>(
         &self,
         client: &C,
@@ -77,7 +77,15 @@ impl<R: Runtime<DType = DType>> Mla<R> {
                 reason: format!("Mla: hidden must be [B, S, hidden], got {shape:?}"),
             });
         }
-        let bias = document_mask_bias(client, segment_ids, shape[0], shape[1], true)?;
+        // Scores take the dtype of the activations, so the bias takes it too.
+        let bias = document_mask_bias(
+            client,
+            segment_ids,
+            shape[0],
+            shape[1],
+            true,
+            hidden.tensor().dtype(),
+        )?;
         self.forward_masked(client, hidden, Some(&bias))
     }
 
@@ -209,5 +217,173 @@ impl<R: Runtime<DType = DType>> Mla<R> {
 
         // Output projection
         self.o_proj.forward(client, &attn_out)
+    }
+}
+
+#[cfg(all(test, feature = "f16"))]
+mod tests {
+    use super::*;
+    use crate::nn::mla::MlaWeights;
+    use crate::nn::{Linear, MaybeQuantLinear, MlaConfig, RmsNorm};
+    use crate::test_utils::{Lcg, cpu_setup, ids_for, max_abs_diff};
+    use numr::autograd::{backward, var_cast, var_mul, var_sum};
+    use numr::runtime::cpu::CpuRuntime;
+
+    const HIDDEN: usize = 16;
+
+    type T = Tensor<CpuRuntime>;
+
+    fn f32s(t: &T) -> Vec<f32> {
+        t.contiguous()
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+    }
+
+    /// `data` rounded to `round`, then stored as `store`.
+    fn rounded(data: &[f32], shape: &[usize], round: DType, store: DType) -> T {
+        let (_, dev) = cpu_setup();
+        let t = T::from_slice(data, shape, &dev).unwrap();
+        t.to_dtype(round).unwrap().to_dtype(store).unwrap()
+    }
+
+    /// An MLA layer whose weights hold `dtype`-rounded values, stored as `store`.
+    /// The F32 reference and the low-precision layer share every weight value.
+    fn build(round: DType, store: DType) -> Mla<CpuRuntime> {
+        let (_, dev) = cpu_setup();
+        let config = MlaConfig::deepseek_v2(HIDDEN, 2, 8, 8, 4, 16);
+        let mut rng = Lcg(5);
+        let mut lin = |out: usize, inp: usize| {
+            let data = rng.data(out * inp, 0.4);
+            MaybeQuantLinear::Standard(Linear::new(
+                rounded(&data, &[out, inp], round, store),
+                None,
+                true,
+            ))
+        };
+        let (q_down, q_up) = (lin(8, HIDDEN), lin(2 * 12, 8));
+        let (kv_compress, kv_decompress) = (lin(8 + 4, HIDDEN), lin(2 * 16, 8));
+        let o_proj = lin(HIDDEN, 2 * 8);
+        let norm = |n: usize| RmsNorm::new(rounded(&vec![1.0; n], &[n], round, store), 1e-6, true);
+        let weights = MlaWeights {
+            q_down: Some(q_down),
+            q_up,
+            q_norm: Some(norm(8)),
+            kv_compress,
+            kv_norm: Some(norm(8)),
+            kv_decompress,
+            o_proj,
+        };
+        Mla::with_ids(&config, weights, &dev).unwrap()
+    }
+
+    struct Run {
+        y: Vec<f32>,
+        gx: Vec<f32>,
+        gp: Vec<Vec<f32>>,
+    }
+
+    /// Forward and backward on `x` of `[1, seq, HIDDEN]`. The loss sums the
+    /// squared outputs in F32.
+    fn run(mla: &Mla<CpuRuntime>, x: &[f32], dtype: DType, ids: Option<&[i32]>) -> Run {
+        let (client, dev) = cpu_setup();
+        let seq = x.len() / HIDDEN;
+        let xv = Var::new(rounded(x, &[1, seq, HIDDEN], dtype, dtype), true);
+        let ids = ids.map(|i| T::from_slice(i, &[1, seq], &dev).unwrap());
+        let y = mla
+            .forward_with_segments(&client, &xv, ids.as_ref())
+            .unwrap();
+        assert_eq!(y.tensor().dtype(), dtype);
+        let y32 = var_cast(&y, DType::F32, &client).unwrap();
+        let sq = var_mul(&y32, &y32, &client).unwrap();
+        let loss = var_sum(&sq, &[0, 1, 2], false, &client).unwrap();
+        let g = backward(&loss, &client).unwrap();
+        let grad = |id, n: usize| g.get(id).map_or(vec![0.0; n], f32s);
+        Run {
+            y: f32s(y.tensor()),
+            gx: grad(xv.id(), x.len()),
+            gp: mla
+                .parameters()
+                .into_iter()
+                .map(|(id, p)| grad(id, p.tensor().numel()))
+                .collect(),
+        }
+    }
+
+    /// `got` is within `rel * max|want|` of `want`. The bound scales with the
+    /// signal, because a low-precision value carries a relative rounding error.
+    fn assert_close(got: &[f32], want: &[f32], rel: f32, what: &str) {
+        let peak = want.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.0, "{what}: reference is all zero");
+        let diff = max_abs_diff(got, want);
+        assert!(diff <= rel * peak, "{what}: diff {diff} > {rel} * {peak}");
+    }
+
+    /// Output and gradient bounds relative to the peak. BF16 keeps 8 significant
+    /// bits and F16 keeps 11. Gradients cross more rounded operations than the
+    /// output, so their bound is wider.
+    fn bounds(dtype: DType) -> (f32, f32) {
+        match dtype {
+            DType::BF16 => (0.06, 0.2),
+            _ => (0.01, 0.04),
+        }
+    }
+
+    fn compare_to_f32(dtype: DType, lens: &[usize], masked: bool) {
+        let seq: usize = lens.iter().sum();
+        let x = Lcg(7).data(seq * HIDDEN, 1.0);
+        // Both runs read the same `dtype`-rounded input.
+        let x = f32s(&rounded(&x, &[1, seq, HIDDEN], dtype, DType::F32));
+        let ids = ids_for(lens);
+        let ids = masked.then_some(ids.as_slice());
+        let want = run(&build(dtype, DType::F32), &x, DType::F32, ids);
+        let got = run(&build(dtype, dtype), &x, dtype, ids);
+        let (out_rel, grad_rel) = bounds(dtype);
+        let tag = format!("{dtype:?} lens {lens:?}");
+        assert_close(&got.y, &want.y, out_rel, &format!("y {tag}"));
+        assert_close(&got.gx, &want.gx, grad_rel, &format!("gx {tag}"));
+        for (i, (g, w)) in got.gp.iter().zip(&want.gp).enumerate() {
+            assert_close(g, w, grad_rel, &format!("param {i} {tag}"));
+        }
+    }
+
+    #[test]
+    fn half_precision_document_mask_matches_f32() {
+        for dtype in [DType::BF16, DType::F16] {
+            compare_to_f32(dtype, &[5, 4, 3], true);
+        }
+    }
+
+    #[test]
+    fn half_precision_causal_matches_f32() {
+        for dtype in [DType::BF16, DType::F16] {
+            compare_to_f32(dtype, &[12], false);
+        }
+    }
+
+    #[test]
+    fn bf16_single_document_equals_causal_bit_for_bit() {
+        let x = Lcg(9).data(8 * HIDDEN, 1.0);
+        let mla = build(DType::BF16, DType::BF16);
+        let plain = run(&mla, &x, DType::BF16, None);
+        let ids = ids_for(&[8]);
+        let single = run(&mla, &x, DType::BF16, Some(&ids));
+        assert_eq!(plain.y, single.y);
+    }
+
+    #[test]
+    fn bf16_perturbing_one_document_leaves_the_other_bit_identical() {
+        let (first, rest) = (5, 7);
+        let x = Lcg(21).data((first + rest) * HIDDEN, 1.0);
+        let mut x2 = x.clone();
+        let noise = Lcg(22).data(first * HIDDEN, 3.0);
+        x2.iter_mut().zip(&noise).for_each(|(a, n)| *a += n);
+        let mla = build(DType::BF16, DType::BF16);
+        let ids = ids_for(&[first, rest]);
+        let a = run(&mla, &x, DType::BF16, Some(&ids));
+        let b = run(&mla, &x2, DType::BF16, Some(&ids));
+        assert_ne!(a.y[..first * HIDDEN], b.y[..first * HIDDEN]);
+        assert_eq!(a.y[first * HIDDEN..], b.y[first * HIDDEN..]);
     }
 }

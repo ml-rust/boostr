@@ -179,7 +179,7 @@ fn compile_cuda_kernels() {
         ),
         k!(
             "src/ops/cuda/kernels/attention",
-            "varlen_attention_fwd_fp16.cu",
+            "varlen_attention_fwd_half.cu",
             "sm_75",
             true
         ),
@@ -191,7 +191,7 @@ fn compile_cuda_kernels() {
         ),
         k!(
             "src/ops/cuda/kernels/attention",
-            "varlen_attention_bwd_fp16.cu",
+            "varlen_attention_bwd_half.cu",
             "sm_75",
             true
         ),

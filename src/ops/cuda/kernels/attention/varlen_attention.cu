@@ -323,9 +323,9 @@ extern "C" __global__ void varlen_flash_attention_fwd_128_fp32_small(
 //
 // BWD for head_dim=256 IS instantiated (`varlen_flash_attention_bwd_256_fp32`
 // in varlen_attention_bwd.cu), exercised by
-// `tests/varlen_bwd_cuda.rs::test_cuda_varlen_bwd_hd256`. The FP16 forward
-// and backward for head_dim=256 live in varlen_attention_fwd_fp16.cu and
-// varlen_attention_bwd_fp16.cu respectively.
+// `tests/varlen_bwd_cuda.rs::test_cuda_varlen_bwd_hd256`. The F16 and BF16
+// forward and backward for head_dim=256 live in varlen_attention_fwd_half.cu
+// and varlen_attention_bwd_half.cu respectively.
 // ============================================================================
 
 extern "C" __global__ void varlen_flash_attention_fwd_256_fp32(

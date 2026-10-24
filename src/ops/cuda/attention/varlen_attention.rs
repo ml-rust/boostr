@@ -1,6 +1,6 @@
 //! Variable-length (ragged) attention CUDA launcher — trait wiring.
 //!
-//! Packed sequences with cu_seqlens indexing. Supports F32 and F16,
+//! Packed sequences with cu_seqlens indexing. Supports F32, F16 and BF16,
 //! head dims 64, 128, and 256, with GQA (num_kv_heads <= num_heads).
 //! Both forward and backward are implemented for all supported head dims.
 //!

@@ -16,7 +16,7 @@ use super::varlen_attention_block_config::{
     block_config_with_override, bwd_smem_size, validate_head_dim,
 };
 use crate::ops::cuda::kernels::{
-    self, VARLEN_ATTENTION_BWD_FP16_MODULE, VARLEN_ATTENTION_BWD_MODULE,
+    self, VARLEN_ATTENTION_BWD_HALF_MODULE, VARLEN_ATTENTION_BWD_MODULE,
 };
 
 /// Production entry point: normal capability-gated tile selection (no override).
@@ -147,20 +147,21 @@ fn varlen_attention_bwd_impl_inner(
     let dtype_suffix = match dtype {
         DType::F32 => "fp32",
         DType::F16 => "fp16",
+        DType::BF16 => "bf16",
         _ => {
             return Err(Error::KernelError {
                 reason: format!(
-                    "varlen attention bwd: unsupported dtype {dtype:?}, only F32/F16; \
-                     cast q/k/v to F32 or F16"
+                    "varlen attention bwd: unsupported dtype {dtype:?}, only F32/F16/BF16; \
+                     cast q/k/v to F32, F16 or BF16"
                 ),
             });
         }
     };
 
-    // FP16 backward kernels compile into their own module; FP32 stays in
-    // the base module.
+    // F16 and BF16 backward kernels share the half-precision module. FP32
+    // stays in the base module.
     let bwd_module = match dtype {
-        DType::F16 => VARLEN_ATTENTION_BWD_FP16_MODULE,
+        DType::F16 | DType::BF16 => VARLEN_ATTENTION_BWD_HALF_MODULE,
         _ => VARLEN_ATTENTION_BWD_MODULE,
     };
 
@@ -184,8 +185,8 @@ fn varlen_attention_bwd_impl_inner(
     // owns each Q row, so the kernel stores it once with no atomics.
     // dk/dv use the KV head layout (num_kv_heads). Under GQA several Q heads
     // and every Q block add into one KV row, so both kernels accumulate dk/dv
-    // with float atomicAdd into zeroed F32 buffers. The F16 path casts them
-    // after the launch.
+    // with float atomicAdd into zeroed F32 buffers. The F16 and BF16 paths
+    // cast them to the input dtype after the launch.
     let dq = Tensor::<CudaRuntime>::zeros(&[total_tokens_q, num_heads, head_dim], dtype, device)?;
     let kv_grad_shape = [total_tokens_k, num_kv_heads, head_dim];
     let dk_acc = Tensor::<CudaRuntime>::zeros(&kv_grad_shape, DType::F32, device)?;

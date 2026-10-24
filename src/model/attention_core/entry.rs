@@ -146,7 +146,7 @@ where
 /// - Rows: every row start must also start a segment. A segment never spans two rows.
 /// - Lengths: `S_q` must equal `S_k`. A KV-cached block passes `None`.
 /// - Window: `spec.sliding_window` must be `0`. Varlen attention has no window.
-/// - Backend: the CUDA varlen kernel takes F32/F16 with head_dim 64/128/256 only.
+/// - Backend: the CUDA varlen kernel takes F32/F16/BF16 with head_dim 64/128/256 only.
 ///
 /// RoPE needs no position reset per document. Rotated scores depend only on
 /// the offset `i - j`. A document at row offset `p` gets the scores it gets at

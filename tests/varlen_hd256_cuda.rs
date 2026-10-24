@@ -3,12 +3,14 @@
 //! Validates that the CUDA head_dim=256 forward kernel produces the same output
 //! as the CPU reference implementation (which supports arbitrary head_dim).
 //!
-//! Two tests:
+//! Tests:
 //!   - GQA (num_heads=4, num_kv_heads=2, head_dim=256) vs CPU
 //!   - MHA (num_heads=4, num_kv_heads=4, head_dim=256) vs CPU
+//!   - Both shapes at BF16, causal, vs CPU on the BF16-rounded inputs (needs
+//!     the `f16` feature)
 //!
 //! Run with:
-//!   cd boostr && cargo test --features cuda --test varlen_hd256_cuda
+//!   cd boostr && cargo test --features cuda,f16 --test varlen_hd256_cuda
 //!
 //! The entire file is gated on the `cuda` feature so it compiles away entirely
 //! on CPU-only builds.
@@ -354,4 +356,109 @@ fn test_cuda_varlen_hd256_mha() {
         "CUDA MHA hd256 vs CPU MHA hd256 (f32)",
         1e-2,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Test 3: CUDA head_dim=256 BF16 (GQA and MHA) matches CPU on rounded inputs
+// ---------------------------------------------------------------------------
+
+/// Runs the hd256 BF16 forward and compares it with a CPU F32 forward on the
+/// same BF16-rounded Q, K and V.
+///
+/// The kernel computes in F32 and rounds O once. With `u = 2^-8` (BF16 unit
+/// roundoff) the gap is at most `2u * |ref| + (u / 2) * ref_rms`. The factor 2
+/// and the RMS term cover F32 order and `__expf` noise across one rounding
+/// boundary.
+#[cfg(feature = "f16")]
+fn assert_hd256_bf16_matches_cpu(num_heads: usize, num_kv_heads: usize) {
+    use numr::dtype::DType;
+
+    let head_dim = 256usize;
+    let (q_data, k_data, v_data, cu_data, total_tokens, max_seqlen, batch_size) =
+        build_hd256_inputs(num_heads, num_kv_heads, head_dim);
+
+    let (cuda_client, cuda_device) = cuda_setup();
+    let bf16 = |data: &[f32], heads: usize| {
+        Tensor::<CudaRuntime>::from_slice(data, &[total_tokens, heads, head_dim], &cuda_device)
+            .expect("upload fixture")
+            .to_dtype(DType::BF16)
+            .expect("cast fixture to BF16")
+    };
+    let read =
+        |t: &Tensor<CudaRuntime>| t.to_dtype(DType::F32).expect("cast to F32").to_vec::<f32>();
+    let q_c = bf16(&q_data, num_heads);
+    let k_c = bf16(&k_data, num_kv_heads);
+    let v_c = bf16(&v_data, num_kv_heads);
+    let cu = Tensor::<CudaRuntime>::from_slice(&cu_data, &[batch_size + 1], &cuda_device)
+        .expect("upload cu_seqlens");
+    let (out_cuda, _) = cuda_client
+        .varlen_attention_fwd(
+            &q_c,
+            &k_c,
+            &v_c,
+            &cu,
+            &cu,
+            batch_size,
+            num_heads,
+            num_kv_heads,
+            max_seqlen,
+            max_seqlen,
+            head_dim,
+            true,
+        )
+        .expect("CUDA BF16 hd256 fwd failed");
+    assert_eq!(out_cuda.dtype(), DType::BF16, "hd256 BF16 output dtype");
+    let cuda_vec = read(&out_cuda);
+
+    let (cpu_client, cpu_device) = cpu_setup();
+    let cpu = |data: Vec<f32>, heads: usize| {
+        Tensor::<CpuRuntime>::from_slice(&data, &[total_tokens, heads, head_dim], &cpu_device)
+            .expect("build CPU tensor")
+    };
+    let cu_cpu = Tensor::<CpuRuntime>::from_slice(&cu_data, &[batch_size + 1], &cpu_device)
+        .expect("build CPU cu_seqlens");
+    let (out_cpu, _) = cpu_client
+        .varlen_attention_fwd(
+            &cpu(read(&q_c), num_heads),
+            &cpu(read(&k_c), num_kv_heads),
+            &cpu(read(&v_c), num_kv_heads),
+            &cu_cpu,
+            &cu_cpu,
+            batch_size,
+            num_heads,
+            num_kv_heads,
+            max_seqlen,
+            max_seqlen,
+            head_dim,
+            true,
+        )
+        .expect("CPU F32 hd256 fwd on BF16-rounded inputs failed");
+    let cpu_vec = out_cpu.to_vec::<f32>();
+
+    let u = 1.0f32 / 256.0;
+    let rms = (cpu_vec.iter().map(|x| x * x).sum::<f32>() / cpu_vec.len() as f32).sqrt();
+    assert!(
+        rms > 1e-4,
+        "reference RMS {rms:.3e} is degenerate; fix the fixture"
+    );
+    for (i, (&a, &e)) in cuda_vec.iter().zip(&cpu_vec).enumerate() {
+        let bound = 2.0 * u * e.abs() + 0.5 * u * rms;
+        assert!(
+            (a - e).abs() <= bound,
+            "hd256 BF16 nh={num_heads} nkv={num_kv_heads} at index {i}: {a} vs {e} \
+             (bound {bound:.3e})"
+        );
+    }
+}
+
+#[cfg(feature = "f16")]
+#[test]
+fn test_cuda_varlen_hd256_bf16_gqa_and_mha_match_cpu() {
+    if !cuda_available() {
+        eprintln!("CUDA not available, skipping test_cuda_varlen_hd256_bf16_gqa_and_mha_match_cpu");
+        return;
+    }
+    let _lock = cuda_lock();
+    assert_hd256_bf16_matches_cpu(4, 2);
+    assert_hd256_bf16_matches_cpu(4, 4);
 }

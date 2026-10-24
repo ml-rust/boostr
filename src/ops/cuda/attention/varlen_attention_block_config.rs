@@ -11,7 +11,7 @@ use super::flash::flash_utils::{compute_smem, device_max_smem};
 /// The variant, not a bare `bool`, is what determines the kernel-name suffix
 /// — this is the fix for a real regression: head_dim=256 has exactly one
 /// compiled config, exposed ONLY under the unsuffixed name
-/// (`varlen_flash_attention_{fwd,bwd}_256_{fp32,fp16}`), but a selector that
+/// (`varlen_flash_attention_{fwd,bwd}_256_{fp32,fp16,bf16}`), but a selector that
 /// reported only "did the large tile fit" treated 256 as "large didn't fit"
 /// and appended `_small`, producing a symbol
 /// (`varlen_flash_attention_fwd_256_fp32_small`) that was never compiled —
@@ -26,7 +26,7 @@ pub(crate) enum TileVariant {
     /// `_small`-suffixed fallback tile. head_dim 64 (F32 only) / 128.
     Small,
     /// Unsuffixed kernel that is head_dim=256's ONLY compiled config
-    /// (`<256,16,16>` F32, `<256,32,32>` F16). Distinct from `Large` even
+    /// (`<256,16,16>` F32, `<256,32,32>` F16/BF16). Distinct from `Large` even
     /// though both resolve to an empty suffix: head_dim=256 has no `_small`
     /// sibling to fall back to, so it must never be reached through the
     /// large/small capability-gate branch that can produce `Small`.
@@ -59,27 +59,29 @@ fn block_config_large(head_dim: usize) -> Option<(usize, usize)> {
 
 /// Small-tile fallback config of the `varlen_flash_attention_{fwd,bwd}_{head_dim}_{dtype}_small`
 /// kernels. `None` when no `_small` kernel is instantiated for this
-/// `(head_dim, dtype)` pair — head_dim=64/F16 fits the large tile on every
-/// opt-in shared-memory limit this crate targets (49920 B backward, under a
-/// 99KB device), so no fallback was compiled for it. Never called for
-/// head_dim=256 — see [`head_dim_256_config`].
+/// `(head_dim, dtype)` pair — head_dim=64 at F16/BF16 fits the large tile on
+/// every opt-in shared-memory limit this crate targets (49920 B backward,
+/// under a 99KB device), so no fallback was compiled for it. F16 and BF16
+/// share one kernel template and one 2-byte smem layout, so they share every
+/// tile. Never called for head_dim=256 — see [`head_dim_256_config`].
 fn block_config_small(head_dim: usize, dtype: DType) -> Option<(usize, usize)> {
     match (head_dim, dtype) {
         (64, DType::F32) => Some((32, 32)),
         (128, DType::F32) => Some((16, 16)),
-        (128, DType::F16) => Some((32, 32)),
+        (128, DType::F16 | DType::BF16) => Some((32, 32)),
         _ => None,
     }
 }
 
 /// head_dim=256's single compiled config — `<256,16,16>` F32, `<256,32,32>`
-/// F16 — exposed ONLY under the unsuffixed `varlen_flash_attention_{fwd,bwd}_256_{fp32,fp16}`
-/// name (`TileVariant::Base256`). There is no `_small` sibling; adding one
-/// would just duplicate this same kernel under a second symbol name.
+/// F16/BF16 — exposed ONLY under the unsuffixed
+/// `varlen_flash_attention_{fwd,bwd}_256_{fp32,fp16,bf16}` name
+/// (`TileVariant::Base256`). There is no `_small` sibling. A second symbol
+/// name for the same kernel adds nothing.
 fn head_dim_256_config(dtype: DType) -> (usize, usize) {
     match dtype {
-        DType::F16 => (32, 32),
-        _ => (16, 16), // F32 and any future dtype default to 16/16
+        DType::F16 | DType::BF16 => (32, 32),
+        _ => (16, 16), // F32; the launchers reject every other dtype first
     }
 }
 
@@ -91,7 +93,7 @@ fn head_dim_256_config(dtype: DType) -> (usize, usize) {
 /// `flash_utils::compute_smem`, which this file reuses directly for forward
 /// sizing. Layout: `[Q][K][V][dO]`, each `BLOCK_M` or `BLOCK_N` rows of
 /// `HEAD_DIM + 1` elements — see `varlen_flash_attention_bwd_fp32_impl` /
-/// `_fp16_impl` in `varlen_attention_bwd.cu` / `varlen_attention_bwd_fp16.cu`.
+/// `_half_impl` in `varlen_attention_bwd.cu` / `varlen_attention_bwd_half.cu`.
 ///
 /// This is the DYNAMIC allocation only, and it is what the launcher passes as
 /// `shared_mem_bytes`. Each backward kernel also declares two STATIC shared
@@ -151,6 +153,8 @@ pub(super) fn validate_head_dim(head_dim: usize, context: &str) -> Result<()> {
 /// | 128      | F16   | candidate        | 32,32 fallback  | n/a       |
 /// | 256      | F32   | n/a              | n/a             | 16,16     |
 /// | 256      | F16   | n/a              | n/a             | 32,32     |
+///
+/// BF16 takes the F16 row at every head_dim: same template, same 2-byte smem.
 ///
 /// head_dim=256 is handled first and unconditionally: it has exactly one
 /// compiled config, so there is no large/small choice to make and no
@@ -321,7 +325,7 @@ mod tests {
         if !require_cuda() {
             return;
         }
-        for dtype in [DType::F32, DType::F16] {
+        for dtype in [DType::F32, DType::F16, DType::BF16] {
             let (_, _, variant) = block_config_with_override(256, dtype, None).expect(
                 "head_dim=256 must resolve without a device-dependent capability gate \
                          failure for a reasonably sized opt-in shared-memory limit",
@@ -341,7 +345,27 @@ mod tests {
     }
 
     #[test]
-    fn head_dim_64_fp16_has_no_small_fallback() {
+    fn head_dim_64_half_has_no_small_fallback() {
         assert!(block_config_small(64, DType::F16).is_none());
+        assert!(block_config_small(64, DType::BF16).is_none());
+    }
+
+    /// BF16 must never fall through to the F32 tile: the half kernels are
+    /// compiled only at the F16 tile, so any other size names a symbol that
+    /// does not exist or overruns the smem the launcher requests.
+    #[test]
+    fn bf16_tiles_match_f16() {
+        for head_dim in [64, 128] {
+            assert_eq!(
+                block_config_small(head_dim, DType::BF16),
+                block_config_small(head_dim, DType::F16)
+            );
+        }
+        assert_eq!(
+            head_dim_256_config(DType::BF16),
+            head_dim_256_config(DType::F16)
+        );
+        assert_eq!(head_dim_256_config(DType::BF16), (32, 32));
+        assert_eq!(block_config_small(128, DType::BF16), Some((32, 32)));
     }
 }

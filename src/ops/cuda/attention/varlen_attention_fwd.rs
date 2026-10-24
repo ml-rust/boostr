@@ -14,7 +14,7 @@ use super::flash::impl_ops::set_smem_attribute;
 use super::varlen_attention_block_config::{
     block_config_with_override, fwd_smem_size, validate_head_dim,
 };
-use crate::ops::cuda::kernels::{self, VARLEN_ATTENTION_FWD_FP16_MODULE, VARLEN_ATTENTION_MODULE};
+use crate::ops::cuda::kernels::{self, VARLEN_ATTENTION_FWD_HALF_MODULE, VARLEN_ATTENTION_MODULE};
 
 /// Production entry point: normal capability-gated tile selection (no override).
 #[allow(clippy::too_many_arguments)]
@@ -117,20 +117,21 @@ fn varlen_attention_fwd_impl_inner(
     let dtype_suffix = match dtype {
         DType::F32 => "fp32",
         DType::F16 => "fp16",
+        DType::BF16 => "bf16",
         _ => {
             return Err(Error::KernelError {
                 reason: format!(
-                    "varlen attention: unsupported dtype {dtype:?}, only F32/F16; \
-                     cast q/k/v to F32 or F16"
+                    "varlen attention: unsupported dtype {dtype:?}, only F32/F16/BF16; \
+                     cast q/k/v to F32, F16 or BF16"
                 ),
             });
         }
     };
 
-    // FP16 forward kernels compile into their own module; FP32 stays in
-    // the base module.
+    // F16 and BF16 forward kernels share the half-precision module. FP32
+    // stays in the base module.
     let module_name = match dtype {
-        DType::F16 => VARLEN_ATTENTION_FWD_FP16_MODULE,
+        DType::F16 | DType::BF16 => VARLEN_ATTENTION_FWD_HALF_MODULE,
         _ => VARLEN_ATTENTION_MODULE,
     };
 

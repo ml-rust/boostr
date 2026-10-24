@@ -2,12 +2,13 @@
 //! `tests/varlen_bwd_cuda.rs` and `tests/varlen_tile_fallback_cuda.rs` leave
 //! uncovered.
 //!
-//! `varlen_attention_bwd.cu` / `varlen_attention_bwd_fp16.cu` sum each K row's
+//! `varlen_attention_bwd.cu` / `varlen_attention_bwd_half.cu` sum each K row's
 //! dK/dV over a Q tile in FP32 registers. They then issue ONE float
-//! `atomicAdd` per `(k_row, d)` per Q block into an F32 buffer. The F16 launcher
-//! casts that buffer to F16 once. This file checks dQ/dK/dV against a CPU
-//! reference at each dtype. `tests/varlen_f16_accum_cuda.rs` holds the tighter
-//! F16 accumulation check.
+//! `atomicAdd` per `(k_row, d)` per Q block into an F32 buffer. The F16 and
+//! BF16 launchers cast that buffer to the input dtype once. This file checks
+//! dQ/dK/dV against a CPU reference at each dtype. The reference runs in F32
+//! on the inputs rounded to the dtype under test. `tests/varlen_f16_accum_cuda.rs`
+//! holds the tighter half-precision accumulation check.
 //!
 //! Reference: `CpuClient::varlen_attention_bwd` (the `impl_generic`-style CPU
 //! fallback in `src/ops/cpu/attention/varlen_attention.rs`), the same
@@ -26,8 +27,8 @@
 //! `cu_seqlens_q`/`cu_seqlens_k` indexing are actually exercised — a uniform
 //! batch would not touch either.
 //!
-//! varlen supports ONLY F32/F16 (`src/ops/cuda/attention/varlen_attention_bwd.rs`
-//! rejects any other dtype), so no BF16 case is added here.
+//! varlen supports F32, F16 and BF16 (`src/ops/cuda/attention/varlen_attention_bwd.rs`
+//! rejects any other dtype). Each dtype has cases here.
 //!
 //! Run with:
 //!   cd boostr && cargo test --features cuda,f16 --test varlen_bwd_reference_parity_cuda
@@ -96,8 +97,8 @@ fn cast_to_dtype(
     }
 }
 
-/// Reads a CUDA result tensor back to `Vec<f32>`, casting through `F32` first
-/// when it is stored as `F16`.
+/// Reads a CUDA tensor back to `Vec<f32>`, casting through `F32` first when
+/// it is stored as `F16` or `BF16`.
 fn read_back_f32(t: &Tensor<CudaRuntime>) -> Vec<f32> {
     if t.dtype() == DType::F32 {
         t.to_vec::<f32>()
@@ -108,14 +109,16 @@ fn read_back_f32(t: &Tensor<CudaRuntime>) -> Vec<f32> {
     }
 }
 
-/// Backward tolerance, derived from first principles — NOT tuned to make any
-/// particular case pass. Mirrors `paged_attention.rs::paged_bwd_tol`, which
-/// this file's kernel restructure is the varlen counterpart of.
+/// Backward tolerance, derived from the rounding error of each dtype. Mirrors
+/// `paged_attention.rs::paged_bwd_tol`.
 ///
-/// Base pair is the quantization-only backward error from rounding Q/K/V/dO
-/// to `dtype` before the kernel runs (`f16`: atol 6e-3, rtol 3e-2 — reused
-/// from `mqa_gqa_attention.rs`'s own backward-pass measurement of the same
-/// mechanism; `f32` keeps 1e-5/1e-4).
+/// Base pair is the backward error of storing to `dtype`. `f16` takes atol
+/// 6e-3, rtol 3e-2 from `mqa_gqa_attention.rs`'s backward measurement, which
+/// also includes rounding Q/K/V/dO. The reference here reads the rounded
+/// inputs, so that pair is an upper bound. The terms left are the dQ/dK/dV
+/// stores and the `dtype` forward O inside `D = rowsum(dO * O)`. Each scales
+/// with the unit roundoff `u` of `dtype`. `bf16` therefore takes the `f16`
+/// pair times `2^-8 / 2^-11 = 8`. `f32` keeps 1e-5/1e-4.
 ///
 /// `dQ` accumulates in FP32 registers for the whole kernel and is cast to
 /// `dtype` exactly once, at the very end (`varlen_attention_bwd.cu`'s
@@ -124,12 +127,12 @@ fn read_back_f32(t: &Tensor<CudaRuntime>) -> Vec<f32> {
 ///
 /// `dK`/`dV` sum every Q row of a tile into an FP32 register per K row. They
 /// then issue ONE float `atomicAdd` per `(k_row, d)` per Q block into an F32
-/// buffer, for both dtypes. Each add rounds the running sum to F32. For `n`
+/// buffer, at every dtype. Each add rounds the running sum to F32. For `n`
 /// rounded additions Higham's recursive-summation bound gives extra relative
 /// error `(n-1) * u` with `u = 2^-24`, the F32 unit roundoff, at every dtype.
-/// The F16 path casts the F32 sum to F16 once, as dQ does, so the base pair
-/// covers that rounding. `n_contrib` is `max_seqlen_q * (num_heads /
-/// num_kv_heads)`. It bounds `num_q_blocks_per_batch * heads_per_kv`, the
+/// The F16 and BF16 paths cast the F32 sum to the input dtype once, as dQ
+/// does, so the base pair covers that rounding. `n_contrib` is
+/// `max_seqlen_q * (num_heads / num_kv_heads)`. It bounds `num_q_blocks_per_batch * heads_per_kv`, the
 /// atomic count per `(k_row, d)`, since `num_q_blocks_per_batch <=
 /// max_seqlen_q` for any `BLOCK_M >= 1`. The exact runtime `BLOCK_M` depends on
 /// the device tile choice in `varlen_attention_block_config.rs`, so the bound
@@ -138,8 +141,11 @@ fn varlen_bwd_tol(dtype: DType, n_contrib: Option<usize>) -> (f32, f32) {
     let (atol, rtol_base) = match dtype {
         DType::F32 => (1e-5, 1e-4),
         DType::F16 => (6e-3, 3e-2),
+        DType::BF16 => (4.8e-2, 2.4e-1),
         other => {
-            unimplemented!("varlen_bwd_tol: unsupported dtype {other:?} (varlen is F32/F16 only)")
+            unimplemented!(
+                "varlen_bwd_tol: unsupported dtype {other:?} (varlen is F32/F16/BF16 only)"
+            )
         }
     };
     // The dK/dV accumulator is F32 at every input dtype.
@@ -152,8 +158,7 @@ fn varlen_bwd_tol(dtype: DType, n_contrib: Option<usize>) -> (f32, f32) {
 }
 
 /// Compares against the reference, printing an always-on `VARLEN_BWD_DIAG`
-/// line (pass or fail) so the measured deviation is visible even on a green
-/// run. Returns the normalized error (`max_abs_diff / ref_rms`) for the
+/// line (pass or fail) with the deviation. Returns the normalized error (`max_abs_diff / ref_rms`) for the
 /// dK/dV-to-dQ ratio guard.
 #[allow(clippy::too_many_arguments)]
 fn assert_varlen_bwd_diff(
@@ -244,10 +249,10 @@ fn ragged_fixture() -> (usize, Vec<i32>, Vec<i32>, usize, usize, usize, usize) {
     (3, vec![0, 5, 12, 15], vec![0, 9, 13, 16], 7, 9, 15, 16)
 }
 
-/// Core comparison: builds the ragged fixture, runs the CPU reference in
-/// `F32`, runs the CUDA kernel at `dtype` (casting inputs down and results
-/// back up through `F32`), and checks dQ/dK/dV against the reference with the
-/// dK/dV-to-dQ ratio guard.
+/// Core comparison: builds the ragged fixture and rounds it to `dtype` on the
+/// device. Runs the CPU reference in `F32` on those rounded values and the
+/// CUDA kernel at `dtype`, reading results back through `F32`. Checks
+/// dQ/dK/dV against the reference with the dK/dV-to-dQ ratio guard.
 #[allow(clippy::too_many_arguments)]
 fn assert_varlen_bwd_parity(
     num_heads: usize,
@@ -287,6 +292,44 @@ fn assert_varlen_bwd_parity(
     let k_data = values(n_kv, 1.3);
     let v_data = values(n_kv, 2.7);
     let do_data = values(n_q, 3.9);
+
+    // CUDA at `dtype`.
+    let (cuda_client, cuda_dev) = cuda_setup();
+    let q_c = cast_to_dtype(
+        &q_data,
+        &[total_tokens_q, num_heads, head_dim],
+        &cuda_dev,
+        dtype,
+    );
+    let k_c = cast_to_dtype(
+        &k_data,
+        &[total_tokens_k, num_kv_heads, head_dim],
+        &cuda_dev,
+        dtype,
+    );
+    let v_c = cast_to_dtype(
+        &v_data,
+        &[total_tokens_k, num_kv_heads, head_dim],
+        &cuda_dev,
+        dtype,
+    );
+    let do_c = cast_to_dtype(
+        &do_data,
+        &[total_tokens_q, num_heads, head_dim],
+        &cuda_dev,
+        dtype,
+    );
+    let cu_q_c =
+        Tensor::<CudaRuntime>::from_slice(&cu_seqlens_q, &[batch_size + 1], &cuda_dev).unwrap();
+    let cu_k_c =
+        Tensor::<CudaRuntime>::from_slice(&cu_seqlens_k, &[batch_size + 1], &cuda_dev).unwrap();
+
+    // The CPU reference reads the values the kernel reads: inputs rounded to
+    // `dtype` once, then widened back to F32.
+    let q_data = read_back_f32(&q_c);
+    let k_data = read_back_f32(&k_c);
+    let v_data = read_back_f32(&v_c);
+    let do_data = read_back_f32(&do_c);
 
     // CPU reference, always F32.
     let (cpu_client, cpu_dev) = cpu_setup();
@@ -356,37 +399,6 @@ fn assert_varlen_bwd_parity(
     let dq_cpu_vec = dq_cpu.to_vec::<f32>();
     let dk_cpu_vec = dk_cpu.to_vec::<f32>();
     let dv_cpu_vec = dv_cpu.to_vec::<f32>();
-
-    // CUDA at `dtype`.
-    let (cuda_client, cuda_dev) = cuda_setup();
-    let q_c = cast_to_dtype(
-        &q_data,
-        &[total_tokens_q, num_heads, head_dim],
-        &cuda_dev,
-        dtype,
-    );
-    let k_c = cast_to_dtype(
-        &k_data,
-        &[total_tokens_k, num_kv_heads, head_dim],
-        &cuda_dev,
-        dtype,
-    );
-    let v_c = cast_to_dtype(
-        &v_data,
-        &[total_tokens_k, num_kv_heads, head_dim],
-        &cuda_dev,
-        dtype,
-    );
-    let do_c = cast_to_dtype(
-        &do_data,
-        &[total_tokens_q, num_heads, head_dim],
-        &cuda_dev,
-        dtype,
-    );
-    let cu_q_c =
-        Tensor::<CudaRuntime>::from_slice(&cu_seqlens_q, &[batch_size + 1], &cuda_dev).unwrap();
-    let cu_k_c =
-        Tensor::<CudaRuntime>::from_slice(&cu_seqlens_k, &[batch_size + 1], &cuda_dev).unwrap();
 
     let (out_c, lse_c) = cuda_client
         .varlen_attention_fwd(
@@ -676,4 +688,43 @@ fn test_varlen_bwd_parity_no_gqa_hd64_f16_noncausal() {
         DType::F16,
         "varlen_bwd no-gqa hd64 f16 noncausal",
     );
+}
+
+// ============================================================================
+// BF16 (u = 2^-8): GQA ratio 4 at every head_dim, plus no-GQA hd64.
+// ============================================================================
+
+#[test]
+fn test_varlen_bwd_parity_gqa_hd64_bf16_causal() {
+    assert_varlen_bwd_parity(8, 2, 64, true, DType::BF16, "bf16 gqa hd64 causal");
+}
+
+#[test]
+fn test_varlen_bwd_parity_gqa_hd64_bf16_noncausal() {
+    assert_varlen_bwd_parity(8, 2, 64, false, DType::BF16, "bf16 gqa hd64 noncausal");
+}
+
+#[test]
+fn test_varlen_bwd_parity_gqa_hd128_bf16_causal() {
+    assert_varlen_bwd_parity(8, 2, 128, true, DType::BF16, "bf16 gqa hd128 causal");
+}
+
+#[test]
+fn test_varlen_bwd_parity_gqa_hd128_bf16_noncausal() {
+    assert_varlen_bwd_parity(8, 2, 128, false, DType::BF16, "bf16 gqa hd128 noncausal");
+}
+
+#[test]
+fn test_varlen_bwd_parity_gqa_hd256_bf16_causal() {
+    assert_varlen_bwd_parity(8, 2, 256, true, DType::BF16, "bf16 gqa hd256 causal");
+}
+
+#[test]
+fn test_varlen_bwd_parity_gqa_hd256_bf16_noncausal() {
+    assert_varlen_bwd_parity(8, 2, 256, false, DType::BF16, "bf16 gqa hd256 noncausal");
+}
+
+#[test]
+fn test_varlen_bwd_parity_no_gqa_hd64_bf16_causal() {
+    assert_varlen_bwd_parity(4, 4, 64, true, DType::BF16, "bf16 no-gqa hd64 causal");
 }

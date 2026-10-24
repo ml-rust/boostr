@@ -1,7 +1,10 @@
-// VarLen (packed) flash-attention backward — FP16 path.
+// VarLen (packed) flash-attention backward — half-precision path (F16, BF16).
 //
 // `varlen_attention_bwd.cu` holds the FP32 path. This file compiles as its
-// own module (VARLEN_ATTENTION_BWD_FP16_MODULE).
+// own module (VARLEN_ATTENTION_BWD_HALF_MODULE). One template on the element
+// type T serves both 2-byte dtypes. Entry names end in `_fp16` for `__half`
+// and `_bf16` for `__nv_bfloat16`. No native bf16 arithmetic runs here, so
+// the module builds at sm_75.
 //
 // Causal convention: ABSOLUTE (bottom-right) alignment, per sequence.
 // Within sequence s, seq_len_q = cu_seqlens_q[s+1] - cu_seqlens_q[s] and
@@ -9,24 +12,24 @@
 // sequence are the LAST seq_len_q positions of its seq_len_k keys and local
 // query row r sits at absolute position key_offset + r, with a PER-SEQUENCE
 // key_offset = seq_len_k - seq_len_q. Key ki is masked when ki > key_offset + r.
-// A full prefill (seq_len_q == seq_len_k) gives key_offset == 0, leaving the
-// rule identical to the previous top-left form. Same convention as
-// `ops/impl_generic/attention/flash_standard.rs::build_attention_mask` and
-// `kernels/attention/flash_v2.cu`.
+// A full prefill (seq_len_q == seq_len_k) gives key_offset == 0. Same
+// convention as `ops/impl_generic/attention/flash_standard.rs::build_attention_mask`
+// and `kernels/attention/flash_v2.cu`.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "dtype_traits.cuh"
 
 // ============================================================================
-// VarLen Attention Backward - FP16 inputs, full GQA
+// VarLen Attention Backward - half-precision inputs, full GQA
 // ============================================================================
 //
-// Every thread computes in fp32. Q, K, V, O and dO are half. dQ is stored
-// once as half. dK and dV are FLOAT buffers: the launcher allocates them as
-// zeroed F32 scratch and casts them to F16 after the launch. No partial sum
-// is rounded to half before the full reduction ends.
+// Every thread computes in fp32. Q, K, V, O and dO are T. dQ is stored once
+// as T. dK and dV are FLOAT buffers: the launcher allocates them as zeroed
+// F32 scratch and casts them to T's dtype after the launch. No partial sum
+// is rounded to T before the full reduction ends.
 //
 // Two-phase tile loop. Phase 1 gives each thread one Q token row of the tile
 // and accumulates dQ locally. It needs no atomics: one block owns each Q row.
@@ -36,19 +39,19 @@
 // GQA several Q heads scatter into the same KV head, and each Q block of the
 // sequence adds to the same K rows.
 
-template<int HEAD_DIM, int BLOCK_M, int BLOCK_N>
-__device__ void varlen_flash_attention_bwd_fp16_impl(
-    const __half* __restrict__ Q,
-    const __half* __restrict__ K,
-    const __half* __restrict__ V,
-    const __half* __restrict__ O,
-    const float*  __restrict__ L,
-    const __half* __restrict__ grad_O,
-    const int*    __restrict__ cu_seqlens_q,
-    const int*    __restrict__ cu_seqlens_k,
-    __half* __restrict__ grad_Q,
-    float*  __restrict__ grad_K,   // F32 scratch, zeroed by the launcher
-    float*  __restrict__ grad_V,   // F32 scratch, zeroed by the launcher
+template<typename T, int HEAD_DIM, int BLOCK_M, int BLOCK_N>
+__device__ void varlen_flash_attention_bwd_half_impl(
+    const T* __restrict__ Q,
+    const T* __restrict__ K,
+    const T* __restrict__ V,
+    const T* __restrict__ O,
+    const float* __restrict__ L,
+    const T* __restrict__ grad_O,
+    const int* __restrict__ cu_seqlens_q,
+    const int* __restrict__ cu_seqlens_k,
+    T* __restrict__ grad_Q,
+    float* __restrict__ grad_K,   // F32 scratch, zeroed by the launcher
+    float* __restrict__ grad_V,   // F32 scratch, zeroed by the launcher
     const int batch_size,
     const int num_heads,
     const int num_kv_heads,
@@ -59,17 +62,21 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
 ) {
     constexpr int HEAD_STRIDE = HEAD_DIM + 1;
 
-    extern __shared__ __half smem_fp16[];
+    // Byte-typed so the `__half` and `__nv_bfloat16` instantiations share one
+    // extern declaration.
+    extern __shared__ __align__(16) unsigned char varlen_bwd_half_smem[];
+    T* smem = reinterpret_cast<T*>(varlen_bwd_half_smem);
 
-    __half* Q_smem_flat  = smem_fp16;
-    __half* K_smem_flat  = smem_fp16 + BLOCK_M * HEAD_STRIDE;
-    __half* V_smem_flat  = smem_fp16 + BLOCK_M * HEAD_STRIDE + BLOCK_N * HEAD_STRIDE;
-    __half* dO_smem_flat = smem_fp16 + BLOCK_M * HEAD_STRIDE + 2 * BLOCK_N * HEAD_STRIDE;
+    T* Q_smem_flat  = smem;
+    T* K_smem_flat  = smem + BLOCK_M * HEAD_STRIDE;
+    T* V_smem_flat  = smem + BLOCK_M * HEAD_STRIDE + BLOCK_N * HEAD_STRIDE;
+    T* dO_smem_flat = smem + BLOCK_M * HEAD_STRIDE + 2 * BLOCK_N * HEAD_STRIDE;
 
     #define Q_smem(i, j)  Q_smem_flat[(i)  * HEAD_STRIDE + (j)]
     #define K_smem(i, j)  K_smem_flat[(i)  * HEAD_STRIDE + (j)]
     #define V_smem(i, j)  V_smem_flat[(i)  * HEAD_STRIDE + (j)]
     #define dO_smem(i, j) dO_smem_flat[(i) * HEAD_STRIDE + (j)]
+    #define SMEM_F(base, i, j) load_dtype<T>(base, (i) * HEAD_STRIDE + (j))
 
     const int tid = threadIdx.x;
     const int head_idx = blockIdx.x % num_heads;
@@ -99,14 +106,14 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
 
     if (q_start >= seq_len_q) return;
 
-    const __half* Q_head  = Q      + head_idx    * HEAD_DIM;
-    const __half* K_head  = K      + kv_head_idx * HEAD_DIM;
-    const __half* V_head  = V      + kv_head_idx * HEAD_DIM;
-    const __half* O_head  = O      + head_idx    * HEAD_DIM;
-    const __half* dO_head = grad_O + head_idx    * HEAD_DIM;
-    __half*       dQ_head = grad_Q + head_idx    * HEAD_DIM;
-    float*        dK_head = grad_K + kv_head_idx * HEAD_DIM;
-    float*        dV_head = grad_V + kv_head_idx * HEAD_DIM;
+    const T* Q_head  = Q      + head_idx    * HEAD_DIM;
+    const T* K_head  = K      + kv_head_idx * HEAD_DIM;
+    const T* V_head  = V      + kv_head_idx * HEAD_DIM;
+    const T* O_head  = O      + head_idx    * HEAD_DIM;
+    const T* dO_head = grad_O + head_idx    * HEAD_DIM;
+    T*       dQ_head = grad_Q + head_idx    * HEAD_DIM;
+    float*   dK_head = grad_K + kv_head_idx * HEAD_DIM;
+    float*   dV_head = grad_V + kv_head_idx * HEAD_DIM;
 
     // Load Q and grad_O tiles
     for (int i = tid; i < q_tile_size * HEAD_DIM; i += blockDim.x) {
@@ -139,8 +146,8 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
         const int global_q_pos = seq_start_q + q_start + row;
         float d_acc = 0.0f;
         for (int d = 0; d < HEAD_DIM; ++d) {
-            d_acc += __half2float(O_head[global_q_pos * num_heads * HEAD_DIM + d]) *
-                     __half2float(dO_smem(row, d));
+            d_acc += load_dtype<T>(O_head, global_q_pos * num_heads * HEAD_DIM + d) *
+                     SMEM_F(dO_smem_flat, row, d);
         }
         D_smem[row] = d_acc;
         lse_smem[row] = L[global_q_pos * num_heads + head_idx];
@@ -175,7 +182,7 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
                 float score = 0.0f;
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    score += __half2float(Q_smem(q_row, d)) * __half2float(K_smem(j, d));
+                    score += SMEM_F(Q_smem_flat, q_row, d) * SMEM_F(K_smem_flat, j, d);
                 }
                 score *= scale;
 
@@ -184,14 +191,14 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
                 float grad_prob = 0.0f;
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    grad_prob += __half2float(V_smem(j, d)) * __half2float(dO_smem(q_row, d));
+                    grad_prob += SMEM_F(V_smem_flat, j, d) * SMEM_F(dO_smem_flat, q_row, d);
                 }
 
                 const float grad_score = prob * (grad_prob - D);
 
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    dQ_local[d] += scale * grad_score * __half2float(K_smem(j, d));
+                    dQ_local[d] += scale * grad_score * SMEM_F(K_smem_flat, j, d);
                 }
             }
         }
@@ -220,7 +227,7 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
                 float score = 0.0f;
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    score += __half2float(Q_smem(qr, d)) * __half2float(K_smem(k_row, d));
+                    score += SMEM_F(Q_smem_flat, qr, d) * SMEM_F(K_smem_flat, k_row, d);
                 }
                 score *= scale;
 
@@ -229,15 +236,15 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
                 float grad_prob = 0.0f;
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    grad_prob += __half2float(V_smem(k_row, d)) * __half2float(dO_smem(qr, d));
+                    grad_prob += SMEM_F(V_smem_flat, k_row, d) * SMEM_F(dO_smem_flat, qr, d);
                 }
 
                 const float grad_score = prob * (grad_prob - D_smem[qr]);
 
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    dK_local[d] += scale * grad_score * __half2float(Q_smem(qr, d));
-                    dV_local[d] += prob * __half2float(dO_smem(qr, d));
+                    dK_local[d] += scale * grad_score * SMEM_F(Q_smem_flat, qr, d);
+                    dV_local[d] += prob * SMEM_F(dO_smem_flat, qr, d);
                 }
             }
 
@@ -255,7 +262,7 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
         const int global_q_pos = seq_start_q + q_start + q_row;
         #pragma unroll
         for (int d = 0; d < HEAD_DIM; ++d) {
-            dQ_head[global_q_pos * num_heads * HEAD_DIM + d] = __float2half(dQ_local[d]);
+            store_dtype<T>(dQ_head, global_q_pos * num_heads * HEAD_DIM + d, dQ_local[d]);
         }
     }
 
@@ -263,86 +270,46 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
     #undef K_smem
     #undef V_smem
     #undef dO_smem
+    #undef SMEM_F
 }
 
 // ============================================================================
-// FP16 Kernel Entry Points
+// Kernel Entry Points
+//
+// VARLEN_BWD_HALF_ENTRY(T, SUFFIX, HD, BM, BN, TILE) emits
+// `varlen_flash_attention_bwd_<HD>_<SUFFIX><TILE>` for one tile config. The
+// tiles match the forward entries in varlen_attention_fwd_half.cu, which
+// lists the smem byte counts. head_dim=64 needs no small variant: its
+// backward needs 49920 B dynamic plus 1024 B of static D_smem / lse_smem at
+// the large tile, under a 99KB opt-in device.
 // ============================================================================
 
-extern "C" __global__ void varlen_flash_attention_bwd_64_fp16(
-    const __half* Q, const __half* K, const __half* V,
-    const __half* O, const float* L, const __half* grad_O,
-    const int* cu_seqlens_q, const int* cu_seqlens_k,
-    __half* grad_Q, float* grad_K, float* grad_V,
-    int batch_size, int num_heads, int num_kv_heads,
-    int max_seqlen_q, int max_seqlen_k, float scale, int causal
-) {
-    varlen_flash_attention_bwd_fp16_impl<64, 128, 64>(
-        Q, K, V, O, L, grad_O,
-        cu_seqlens_q, cu_seqlens_k,
-        grad_Q, grad_K, grad_V,
-        batch_size, num_heads, num_kv_heads,
-        max_seqlen_q, max_seqlen_k, scale, causal
-    );
-}
+#define VARLEN_BWD_HALF_ENTRY(T, SUFFIX, HD, BM, BN, TILE)                     \
+    extern "C" __global__ void varlen_flash_attention_bwd_##HD##_##SUFFIX##TILE( \
+        const T* Q, const T* K, const T* V,                                    \
+        const T* O, const float* L, const T* grad_O,                           \
+        const int* cu_seqlens_q, const int* cu_seqlens_k,                      \
+        T* grad_Q, float* grad_K, float* grad_V,                               \
+        int batch_size, int num_heads, int num_kv_heads,                       \
+        int max_seqlen_q, int max_seqlen_k, float scale, int causal            \
+    ) {                                                                        \
+        varlen_flash_attention_bwd_half_impl<T, HD, BM, BN>(                   \
+            Q, K, V, O, L, grad_O,                                             \
+            cu_seqlens_q, cu_seqlens_k,                                        \
+            grad_Q, grad_K, grad_V,                                            \
+            batch_size, num_heads, num_kv_heads,                               \
+            max_seqlen_q, max_seqlen_k, scale, causal                          \
+        );                                                                     \
+    }
 
-extern "C" __global__ void varlen_flash_attention_bwd_128_fp16(
-    const __half* Q, const __half* K, const __half* V,
-    const __half* O, const float* L, const __half* grad_O,
-    const int* cu_seqlens_q, const int* cu_seqlens_k,
-    __half* grad_Q, float* grad_K, float* grad_V,
-    int batch_size, int num_heads, int num_kv_heads,
-    int max_seqlen_q, int max_seqlen_k, float scale, int causal
-) {
-    varlen_flash_attention_bwd_fp16_impl<128, 128, 64>(
-        Q, K, V, O, L, grad_O,
-        cu_seqlens_q, cu_seqlens_k,
-        grad_Q, grad_K, grad_V,
-        batch_size, num_heads, num_kv_heads,
-        max_seqlen_q, max_seqlen_k, scale, causal
-    );
-}
+#define VARLEN_BWD_HALF_DTYPE(T, SUFFIX)                                       \
+    VARLEN_BWD_HALF_ENTRY(T, SUFFIX, 64, 128, 64, )                            \
+    VARLEN_BWD_HALF_ENTRY(T, SUFFIX, 128, 128, 64, )                           \
+    VARLEN_BWD_HALF_ENTRY(T, SUFFIX, 128, 32, 32, _small)                      \
+    VARLEN_BWD_HALF_ENTRY(T, SUFFIX, 256, 32, 32, )
 
-// ============================================================================
-// HEAD_DIM=128, small tile fallback (BLOCK_M=32, BLOCK_N=32) — see the
-// matching forward small-tile comment in varlen_attention_fwd_fp16.cu for the
-// smem byte counts. head_dim=64 fp16 needs no small variant: both its
-// forward (33280 B) and backward (49920 B dynamic + 1024 B of static D_smem /
-// lse_smem) requirements fit comfortably under a 99KB opt-in shared-memory
-// device at the large tile.
-// ============================================================================
+VARLEN_BWD_HALF_DTYPE(__half, fp16)
+VARLEN_BWD_HALF_DTYPE(__nv_bfloat16, bf16)
 
-extern "C" __global__ void varlen_flash_attention_bwd_128_fp16_small(
-    const __half* Q, const __half* K, const __half* V,
-    const __half* O, const float* L, const __half* grad_O,
-    const int* cu_seqlens_q, const int* cu_seqlens_k,
-    __half* grad_Q, float* grad_K, float* grad_V,
-    int batch_size, int num_heads, int num_kv_heads,
-    int max_seqlen_q, int max_seqlen_k, float scale, int causal
-) {
-    varlen_flash_attention_bwd_fp16_impl<128, 32, 32>(
-        Q, K, V, O, L, grad_O,
-        cu_seqlens_q, cu_seqlens_k,
-        grad_Q, grad_K, grad_V,
-        batch_size, num_heads, num_kv_heads,
-        max_seqlen_q, max_seqlen_k, scale, causal
-    );
-}
-
-// head_dim=256: use the same small tiles as the fwd 256 fp16 kernel
-extern "C" __global__ void varlen_flash_attention_bwd_256_fp16(
-    const __half* Q, const __half* K, const __half* V,
-    const __half* O, const float* L, const __half* grad_O,
-    const int* cu_seqlens_q, const int* cu_seqlens_k,
-    __half* grad_Q, float* grad_K, float* grad_V,
-    int batch_size, int num_heads, int num_kv_heads,
-    int max_seqlen_q, int max_seqlen_k, float scale, int causal
-) {
-    varlen_flash_attention_bwd_fp16_impl<256, 32, 32>(
-        Q, K, V, O, L, grad_O,
-        cu_seqlens_q, cu_seqlens_k,
-        grad_Q, grad_K, grad_V,
-        batch_size, num_heads, num_kv_heads,
-        max_seqlen_q, max_seqlen_k, scale, causal
-    );
-}
+#undef VARLEN_BWD_HALF_DTYPE
+#undef VARLEN_BWD_HALF_ENTRY

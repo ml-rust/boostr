@@ -12,8 +12,8 @@
 //!
 //! The remaining tests prove the new `_small` kernel instantiations compute
 //! the same thing as the proven large-tile kernels, not merely that they
-//! launch: `head_dim=64` F32 and `head_dim=128` F16 both fit the large tile
-//! on a ~99KB device, so both tiles can be forced and compared directly.
+//! launch: `head_dim=64` F32 and `head_dim=128` F16/BF16 all fit the large
+//! tile on a ~99KB device, so both tiles can be forced and compared directly.
 //! Tile forcing goes through `varlen_attention_{fwd,bwd}_with_tile_for_test`,
 //! explicit-parameter entry points that bottom out in the same inner
 //! function the production `VarLenAttentionOps` trait impl calls — NOT a
@@ -21,8 +21,8 @@
 //! function on its own thread within one process and setting such a var from
 //! a test would race with every other test reading or setting it.
 //!
-//! Run with:
-//!   cd boostr && cargo test --features cuda --test varlen_tile_fallback_cuda
+//! Run with (BF16 cases need `f16`):
+//!   cd boostr && cargo test --features cuda,f16 --test varlen_tile_fallback_cuda
 
 #![cfg(feature = "cuda")]
 
@@ -78,7 +78,7 @@ const F32_TOL: f32 = 1000.0 * f32::EPSILON;
 /// F16 tile-parity tolerance: Q/K/V are quantized to `half` once, identically
 /// for both tile runs (input storage does not depend on the tile), and the
 /// dot-product/softmax accumulation inside the kernel is entirely `float`
-/// (see `varlen_flash_attention_fwd_fp16_impl`'s `float O_local[HEAD_DIM]`,
+/// (see `varlen_flash_attention_fwd_half_impl`'s `float O_local[HEAD_DIM]`,
 /// `float m_local`, `float l_local`) — only the final `__float2half` write
 /// rounds to half. So the accumulated cross-tile floating-point-order error
 /// is the same small `f32`-scale noise as the F32 case, plus at most one
@@ -86,6 +86,11 @@ const F32_TOL: f32 = 1000.0 * f32::EPSILON;
 /// ULP at unit magnitude is `f16::EPSILON` (2^-10); 4x that covers a
 /// boundary-adjacent rounding flip plus the same margin used for F32_TOL.
 const F16_TOL: f32 = F32_TOL + 4.0 * 0.0009765625;
+
+/// BF16 tile-parity tolerance: the F16 argument with BF16's ULP at unit
+/// magnitude, `bf16::EPSILON` (2^-7). The kernel template is the same, so
+/// only the final store's rounding step differs.
+const BF16_TOL: f32 = F32_TOL + 4.0 * 0.0078125;
 
 fn assert_close(a: &[f32], b: &[f32], label: &str, tol: f32) {
     assert_eq!(a.len(), b.len(), "{label}: length mismatch");
@@ -368,14 +373,27 @@ fn head_dim_64_f32_large_and_small_tile_agree() {
 }
 
 // ---------------------------------------------------------------------------
-// Parity: head_dim=128, F16 — both tiles fit the large kernel on a ~99KB
-// device, and head_dim=128 was untested at every dtype before this file.
+// Parity: head_dim=128, F16 and BF16 — both tiles fit the large kernel on a
+// ~99KB device. Both dtypes share one kernel template and one tile table.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn head_dim_128_f16_large_and_small_tile_agree() {
+    half_hd128_large_and_small_tile_agree(DType::F16, F16_TOL);
+}
+
+#[test]
+fn head_dim_128_bf16_large_and_small_tile_agree() {
+    half_hd128_large_and_small_tile_agree(DType::BF16, BF16_TOL);
+}
+
+fn half_hd128_large_and_small_tile_agree(dtype: DType, tol: f32) {
     if !cuda_available() {
-        eprintln!("head_dim_128_f16_large_and_small_tile_agree: CUDA not available, skipping");
+        eprintln!("hd128 {dtype:?} large/small tile parity: CUDA not available, skipping");
+        return;
+    }
+    if dtype == DType::BF16 && !cfg!(feature = "f16") {
+        eprintln!("hd128 BF16 large/small tile parity: built without `f16`, skipping");
         return;
     }
     let _lock = cuda_lock();
@@ -390,16 +408,16 @@ fn head_dim_128_f16_large_and_small_tile_agree() {
     let cu_seqlens_data = vec![0i32, 4, 10];
 
     let n = total_tokens * num_heads * head_dim;
-    let to_f16 = |data: Vec<f32>, shape: &[usize]| -> Tensor<CudaRuntime> {
+    let to_half = |data: Vec<f32>, shape: &[usize]| -> Tensor<CudaRuntime> {
         Tensor::<CudaRuntime>::from_slice(&data, shape, &device)
             .expect("build F32 fixture")
-            .to_dtype(DType::F16)
-            .expect("cast fixture to F16")
+            .to_dtype(dtype)
+            .unwrap_or_else(|e| panic!("cast fixture to {dtype:?}: {e:?}"))
     };
-    let q = to_f16(values(n, 0.3), &[total_tokens, num_heads, head_dim]);
-    let k = to_f16(values(n, 1.1), &[total_tokens, num_kv_heads, head_dim]);
-    let v = to_f16(values(n, 2.7), &[total_tokens, num_kv_heads, head_dim]);
-    let dout = to_f16(values(n, 4.4), &[total_tokens, num_heads, head_dim]);
+    let q = to_half(values(n, 0.3), &[total_tokens, num_heads, head_dim]);
+    let k = to_half(values(n, 1.1), &[total_tokens, num_kv_heads, head_dim]);
+    let v = to_half(values(n, 2.7), &[total_tokens, num_kv_heads, head_dim]);
+    let dout = to_half(values(n, 4.4), &[total_tokens, num_heads, head_dim]);
     let cu = Tensor::<CudaRuntime>::from_slice(&cu_seqlens_data, &[batch_size + 1], &device)
         .expect("build cu_seqlens");
 
@@ -419,7 +437,7 @@ fn head_dim_128_f16_large_and_small_tile_agree() {
         true,
         false,
     )
-    .expect("F16 small-tile forward must succeed at head_dim=128");
+    .unwrap_or_else(|e| panic!("{dtype:?} small-tile forward at head_dim=128: {e:?}"));
     let (large_out, large_lse) = varlen_attention_fwd_with_tile_for_test(
         &client,
         &q,
@@ -436,7 +454,7 @@ fn head_dim_128_f16_large_and_small_tile_agree() {
         true,
         true,
     )
-    .expect("F16 large-tile forward must succeed at head_dim=128");
+    .unwrap_or_else(|e| panic!("{dtype:?} large-tile forward at head_dim=128: {e:?}"));
 
     let small_out_f32 = small_out
         .to_dtype(DType::F32)
@@ -446,12 +464,17 @@ fn head_dim_128_f16_large_and_small_tile_agree() {
         .to_dtype(DType::F32)
         .expect("cast large-tile output to F32")
         .to_vec::<f32>();
-    assert_close(&small_out_f32, &large_out_f32, "fwd O (hd128 f16)", F16_TOL);
+    assert_close(
+        &small_out_f32,
+        &large_out_f32,
+        &format!("fwd O (hd128 {dtype:?})"),
+        tol,
+    );
     assert_close(
         &small_lse.to_vec::<f32>(),
         &large_lse.to_vec::<f32>(),
-        "fwd LSE (hd128 f16)",
-        F16_TOL,
+        &format!("fwd LSE (hd128 {dtype:?})"),
+        tol,
     );
 
     let (dq_small, dk_small, dv_small) = varlen_attention_bwd_with_tile_for_test(
@@ -473,7 +496,7 @@ fn head_dim_128_f16_large_and_small_tile_agree() {
         true,
         false,
     )
-    .expect("F16 small-tile backward must succeed at head_dim=128");
+    .unwrap_or_else(|e| panic!("{dtype:?} small-tile backward at head_dim=128: {e:?}"));
     let (dq_large, dk_large, dv_large) = varlen_attention_bwd_with_tile_for_test(
         &client,
         &dout,
@@ -493,7 +516,7 @@ fn head_dim_128_f16_large_and_small_tile_agree() {
         true,
         true,
     )
-    .expect("F16 large-tile backward must succeed at head_dim=128");
+    .unwrap_or_else(|e| panic!("{dtype:?} large-tile backward at head_dim=128: {e:?}"));
 
     let cast = |t: Tensor<CudaRuntime>, label: &str| -> Vec<f32> {
         t.to_dtype(DType::F32)
@@ -503,20 +526,20 @@ fn head_dim_128_f16_large_and_small_tile_agree() {
     assert_close(
         &cast(dq_small, "dQ small"),
         &cast(dq_large, "dQ large"),
-        "dQ (hd128 f16)",
-        F16_TOL,
+        &format!("dQ (hd128 {dtype:?})"),
+        tol,
     );
     assert_close(
         &cast(dk_small, "dK small"),
         &cast(dk_large, "dK large"),
-        "dK (hd128 f16)",
-        F16_TOL,
+        &format!("dK (hd128 {dtype:?})"),
+        tol,
     );
     assert_close(
         &cast(dv_small, "dV small"),
         &cast(dv_large, "dV large"),
-        "dV (hd128 f16)",
-        F16_TOL,
+        &format!("dV (hd128 {dtype:?})"),
+        tol,
     );
 }
 
@@ -527,11 +550,12 @@ fn head_dim_128_f16_large_and_small_tile_agree() {
 // "did the large tile fit" as a bool, so head_dim=256 (which has no large
 // tile at all) fell into the same branch as a genuine large-tile miss and
 // got an unexisting `_256_..._small` name appended. Every accepted head_dim
-// (64/128/256) x dtype (F32/F16) combination is exercised here, through the
+// (64/128/256) x dtype (F32/F16/BF16) combination is exercised here, through the
 // default (unforced) production tile-selection path — including the two
 // combinations the parity tests above do not touch: head_dim=256 (both
-// dtypes, `TileVariant::Base256`, unsuffixed name, no `_small` sibling) and
-// head_dim=64 F16 (no `_small` kernel compiled for it at all).
+// half dtypes, `TileVariant::Base256`, unsuffixed name, no `_small` sibling)
+// and head_dim=64 F16/BF16 (no `_small` kernel compiled for it at all). BF16
+// joins the loop only with the `f16` feature.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -552,8 +576,13 @@ fn every_accepted_head_dim_dtype_resolves_a_kernel_that_loads() {
     let max_seqlen = 2usize;
     let cu_seqlens_data = vec![0i32, 2];
 
+    let dtypes: &[DType] = if cfg!(feature = "f16") {
+        &[DType::F32, DType::F16, DType::BF16]
+    } else {
+        &[DType::F32, DType::F16]
+    };
     for &head_dim in &[64usize, 128, 256] {
-        for &dtype in &[DType::F32, DType::F16] {
+        for &dtype in dtypes {
             let n = total_tokens * num_heads * head_dim;
 
             let build_fixture = |data: Vec<f32>| -> Tensor<CudaRuntime> {
@@ -563,8 +592,8 @@ fn every_accepted_head_dim_dtype_resolves_a_kernel_that_loads() {
                     &device,
                 )
                 .expect("build F32 fixture");
-                if matches!(dtype, DType::F16) {
-                    t.to_dtype(DType::F16).expect("cast fixture to F16")
+                if dtype != DType::F32 {
+                    t.to_dtype(dtype).expect("cast fixture to the half dtype")
                 } else {
                     t
                 }
@@ -628,6 +657,9 @@ fn every_accepted_head_dim_dtype_resolves_a_kernel_that_loads() {
                 });
 
             assert_eq!(out.shape(), &[total_tokens, num_heads, head_dim]);
+            for (name, t) in [("O", &out), ("dQ", &dq), ("dK", &dk), ("dV", &dv)] {
+                assert_eq!(t.dtype(), dtype, "head_dim={head_dim}: {name} dtype");
+            }
             assert_eq!(dq.shape(), &[total_tokens, num_heads, head_dim]);
             assert_eq!(dk.shape(), &[total_tokens, num_kv_heads, head_dim]);
             assert_eq!(dv.shape(), &[total_tokens, num_kv_heads, head_dim]);

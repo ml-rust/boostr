@@ -1,26 +1,29 @@
-//! F16 varlen attention backward: dK/dV accumulate in F32 across GQA heads
-//! and Q blocks.
+//! F16/BF16 varlen attention: the forward O and dQ round to the input dtype
+//! once, and dK/dV accumulate in F32 across GQA heads and Q blocks.
 //!
 //! Every Q head of a KV group and every Q block of a sequence adds one partial
 //! into the same dK/dV row. The kernel adds these partials into a zeroed F32
-//! buffer. The launcher rounds the result to F16 once. These tests feed the CPU
-//! reference the exact inputs the kernel reads: Q, K, V and dO rounded to F16,
-//! plus the CUDA forward O (F16) and LSE (F32). The reference then differs from
-//! the kernel only by F32 summation order, `__expf`, and the final F16 store.
+//! buffer. The launcher rounds the result to the input dtype once. These tests
+//! feed the CPU reference the exact inputs the kernel reads: Q, K, V and dO
+//! rounded to the dtype, plus the CUDA forward O and LSE (F32). The reference
+//! then differs from the kernel only by F32 summation order, `__expf`, and the
+//! final store. The forward O is checked the same way against a CPU forward on
+//! the rounded Q, K and V.
 //!
-//! Bounds, with `u = 2^-11` (F16 unit roundoff):
-//! - Per element: `|cuda - ref| <= 2u * |ref| + 2^-12 * ref_rms + 2^-25`. The
-//!   final round-to-nearest F16 store costs at most `u * |ref|`, or `2^-25` for
-//!   an F16 subnormal. The factor 2 and the `ref_rms` term cover F32 order and
-//!   `__expf` noise.
-//! - Aggregate: `rms(cuda - ref) / ref_rms <= u`. One F16 rounding gives an
-//!   error near `u / sqrt(3)` relative.
+//! Bounds, with `u` the unit roundoff (`2^-11` F16, `2^-8` BF16):
+//! - Per element: `|cuda - ref| <= 2u * |ref| + (u / 2) * ref_rms + s`. The
+//!   final round-to-nearest store costs at most `u * |ref|`, or `s` for a
+//!   subnormal (half the smallest subnormal step). The factor 2 and the
+//!   `ref_rms` term cover F32 order and `__expf` noise, which can push a value
+//!   across one rounding boundary.
+//! - Aggregate: `rms(cuda - ref) / ref_rms <= u`. One rounding gives an error
+//!   near `u / sqrt(3)` relative.
 //!
 //! A half accumulator rounds the running sum after each of `P` partials, and
 //! rounds each partial too. Its error is near `(u / sqrt(3)) * sqrt(P)`
 //! relative. The hd128 case forces the `BLOCK_M=32` tile with 512 Q rows and 8
 //! Q heads per KV head, so `P = 16 * 8 = 128`. That error is several times both
-//! bounds above.
+//! bounds above, at either dtype.
 //!
 //! Run with:
 //!   cd boostr && cargo test --features cuda,f16 --test varlen_f16_accum_cuda
@@ -46,16 +49,32 @@ fn cuda_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|p| p.into_inner())
 }
 
-/// F16 unit roundoff.
-const U_F16: f32 = 1.0 / 2048.0;
-/// Per-element relative bound: twice one F16 rounding.
-const ELEM_RTOL: f32 = 2.0 * U_F16;
-/// Per-element absolute bound, as a fraction of the reference RMS.
-const ELEM_ATOL_FRAC: f32 = 1.0 / 4096.0;
-/// Largest round-to-nearest error of an F16 subnormal: half its step 2^-24.
-const F16_SUBNORMAL_RN: f32 = 1.0 / 33_554_432.0;
-/// Aggregate bound: `rms(diff) / ref_rms`.
-const RMS_RTOL: f32 = U_F16;
+/// Rounding constants of one storage dtype.
+#[derive(Clone, Copy)]
+struct Rounding {
+    /// Unit roundoff: `2^-11` F16, `2^-8` BF16.
+    u: f32,
+    /// Largest round-to-nearest error of a subnormal: half the smallest step.
+    /// F16 steps by `2^-24`. BF16 shares F32's exponent range, so its step is
+    /// `2^-133`, below any F32 noise term; `0.0` is exact enough.
+    subnormal_rn: f32,
+}
+
+impl Rounding {
+    fn of(dtype: DType) -> Self {
+        match dtype {
+            DType::F16 => Rounding {
+                u: 1.0 / 2048.0,
+                subnormal_rn: 1.0 / 33_554_432.0,
+            },
+            DType::BF16 => Rounding {
+                u: 1.0 / 256.0,
+                subnormal_rn: 0.0,
+            },
+            other => panic!("Rounding::of: {other:?} is not a half dtype; use F16 or BF16"),
+        }
+    }
+}
 
 /// Deterministic pseudo-random values, distinct per index and per seed.
 fn values(len: usize, seed: f32) -> Vec<f32> {
@@ -81,15 +100,24 @@ fn cpu_tensor(data: &[f32], shape: &[usize], dev: &CpuDevice) -> Tensor<CpuRunti
     Tensor::<CpuRuntime>::from_slice(data, shape, dev).expect("build CPU tensor")
 }
 
-/// Uploads F32 data and rounds it to F16 on the device.
-fn f16_tensor(data: &[f32], shape: &[usize], dev: &CudaDevice, what: &str) -> Tensor<CudaRuntime> {
+/// Uploads F32 data and rounds it to `dtype` on the device.
+fn half_tensor(
+    data: &[f32],
+    shape: &[usize],
+    dev: &CudaDevice,
+    dtype: DType,
+    what: &str,
+) -> Tensor<CudaRuntime> {
     Tensor::<CudaRuntime>::from_slice(data, shape, dev)
         .unwrap_or_else(|e| panic!("upload {what}: {e}"))
-        .to_dtype(DType::F16)
-        .unwrap_or_else(|e| panic!("cast {what} to F16: {e}"))
+        .to_dtype(dtype)
+        .unwrap_or_else(|e| panic!("cast {what} to {dtype:?}: {e}"))
 }
 
-fn assert_f16_accum(actual: &[f32], expected: &[f32], label: &str) {
+fn assert_half_once(actual: &[f32], expected: &[f32], r: Rounding, label: &str) {
+    let elem_rtol = 2.0 * r.u;
+    let elem_atol_frac = r.u / 2.0;
+    let rms_rtol = r.u;
     assert_eq!(
         actual.len(),
         expected.len(),
@@ -108,7 +136,7 @@ fn assert_f16_accum(actual: &[f32], expected: &[f32], label: &str) {
         assert!(a.is_finite(), "{label}: non-finite {a} at index {i}");
         let diff = (a - e).abs();
         diff_sq += (diff as f64).powi(2);
-        let bound = ELEM_RTOL * e.abs() + ELEM_ATOL_FRAC * ref_rms + F16_SUBNORMAL_RN;
+        let bound = elem_rtol * e.abs() + elem_atol_frac * ref_rms + r.subnormal_rn;
         if diff / bound > worst.1 {
             worst = (i, diff / bound, diff);
         }
@@ -116,21 +144,21 @@ fn assert_f16_accum(actual: &[f32], expected: &[f32], label: &str) {
     let rel_rms = ((diff_sq / n).sqrt() as f32) / ref_rms;
     let (wi, wratio, wdiff) = worst;
     println!(
-        "VARLEN_F16_ACCUM {label}: rms_rel={rel_rms:.3e} (bound {RMS_RTOL:.3e}) \
+        "VARLEN_HALF_ACCUM {label}: rms_rel={rel_rms:.3e} (bound {rms_rtol:.3e}) \
          worst_elem idx={wi} diff={wdiff:.3e} ratio_to_bound={wratio:.3} ref_rms={ref_rms:.3e}"
     );
     assert!(
         wratio <= 1.0,
         "{label}: index {wi}: cuda {} vs reference {} (diff {wdiff:.3e}) exceeds \
-         {ELEM_RTOL:.3e}*|ref| + {ELEM_ATOL_FRAC:.3e}*ref_rms; dK/dV no longer reach \
-         F16 through one rounding",
+         {elem_rtol:.3e}*|ref| + {elem_atol_frac:.3e}*ref_rms; the result no longer \
+         reaches the half dtype through one rounding",
         actual[wi],
         expected[wi]
     );
     assert!(
-        rel_rms <= RMS_RTOL,
-        "{label}: rms(diff)/ref_rms {rel_rms:.3e} exceeds {RMS_RTOL:.3e}; the partials \
-         round to F16 before the reduction ends"
+        rel_rms <= rms_rtol,
+        "{label}: rms(diff)/ref_rms {rel_rms:.3e} exceeds {rms_rtol:.3e}; the partials \
+         round to the half dtype before the reduction ends"
     );
 }
 
@@ -144,6 +172,7 @@ struct Case {
     causal: bool,
     /// `Some(false)` forces the small tile; `None` uses the production tile.
     force_large: Option<bool>,
+    dtype: DType,
 }
 
 fn max_len(cu: &[i32]) -> usize {
@@ -174,10 +203,12 @@ fn run(case: &Case) {
 
     let cuda_dev = CudaDevice::new(0);
     let cuda: CudaClient = CudaRuntime::default_client(&cuda_dev);
-    let q = f16_tensor(&values(tq * nh * hd, 0.1), &q_shape, &cuda_dev, "q");
-    let k = f16_tensor(&values(tk * nkv * hd, 1.3), &kv_shape, &cuda_dev, "k");
-    let v = f16_tensor(&values(tk * nkv * hd, 2.7), &kv_shape, &cuda_dev, "v");
-    let dout = f16_tensor(&values(tq * nh * hd, 3.9), &q_shape, &cuda_dev, "dout");
+    let dt = case.dtype;
+    let r = Rounding::of(dt);
+    let q = half_tensor(&values(tq * nh * hd, 0.1), &q_shape, &cuda_dev, dt, "q");
+    let k = half_tensor(&values(tk * nkv * hd, 1.3), &kv_shape, &cuda_dev, dt, "k");
+    let v = half_tensor(&values(tk * nkv * hd, 2.7), &kv_shape, &cuda_dev, dt, "v");
+    let dout = half_tensor(&values(tq * nh * hd, 3.9), &q_shape, &cuda_dev, dt, "dout");
     let cu_q = Tensor::<CudaRuntime>::from_slice(&case.cu_q, &[batch + 1], &cuda_dev)
         .expect("upload cu_seqlens_q");
     let cu_k = Tensor::<CudaRuntime>::from_slice(&case.cu_k, &[batch + 1], &cuda_dev)
@@ -198,7 +229,7 @@ fn run(case: &Case) {
             hd,
             case.causal,
         )
-        .expect("CUDA F16 varlen forward");
+        .expect("CUDA half varlen forward");
     let (dq, dk, dv) = match case.force_large {
         Some(force_large) => varlen_attention_bwd_with_tile_for_test(
             &cuda,
@@ -239,9 +270,10 @@ fn run(case: &Case) {
             case.causal,
         ),
     }
-    .expect("CUDA F16 varlen backward");
-    assert_eq!(dk.dtype(), DType::F16, "{}: dK dtype", case.label);
-    assert_eq!(dv.dtype(), DType::F16, "{}: dV dtype", case.label);
+    .expect("CUDA half varlen backward");
+    for (name, t) in [("O", &out), ("dQ", &dq), ("dK", &dk), ("dV", &dv)] {
+        assert_eq!(t.dtype(), dt, "{}: {name} dtype", case.label);
+    }
 
     // CPU reference in F32 over the exact values the kernel read.
     let cpu_dev = CpuDevice::new();
@@ -277,30 +309,40 @@ fn run(case: &Case) {
             case.causal,
         )
         .expect("CPU F32 varlen backward reference");
+    let (out_r, _) = cpu
+        .varlen_attention_fwd(
+            &q_c,
+            &k_c,
+            &v_c,
+            &cu_q_c,
+            &cu_k_c,
+            batch,
+            nh,
+            nkv,
+            msq,
+            msk,
+            hd,
+            case.causal,
+        )
+        .expect("CPU F32 varlen forward reference");
 
-    assert_f16_accum(
-        &read_f32(&dk, "dk"),
-        &dk_r.to_vec::<f32>(),
-        &format!("{} dK", case.label),
-    );
-    assert_f16_accum(
-        &read_f32(&dv, "dv"),
-        &dv_r.to_vec::<f32>(),
-        &format!("{} dV", case.label),
-    );
-    assert_f16_accum(
-        &read_f32(&dq, "dq"),
-        &dq_r.to_vec::<f32>(),
-        &format!("{} dQ", case.label),
-    );
+    let checks = [
+        ("O", read_f32(&out, "output"), out_r),
+        ("dK", read_f32(&dk, "dk"), dk_r),
+        ("dV", read_f32(&dv, "dv"), dv_r),
+        ("dQ", read_f32(&dq, "dq"), dq_r),
+    ];
+    for (name, actual, reference) in checks {
+        let label = format!("{} {dt:?} {name}", case.label);
+        assert_half_once(&actual, &reference.to_vec::<f32>(), r, &label);
+    }
 }
 
 /// 8 Q heads per KV head, small tile forced (`BLOCK_M=32`). Sequence 0 has 512
 /// Q rows, so each of its dK/dV rows takes 16 Q blocks x 8 heads = 128
 /// partials. Sequence 1 is ragged: 160 Q rows over 288 keys.
-#[test]
-fn varlen_bwd_f16_gqa8_hd128_small_tile_many_q_blocks() {
-    run(&Case {
+fn gqa8_hd128_small_tile(dtype: DType) -> Case {
+    Case {
         label: "gqa8 hd128 small-tile noncausal",
         cu_q: vec![0, 512, 672],
         cu_k: vec![0, 512, 800],
@@ -309,15 +351,15 @@ fn varlen_bwd_f16_gqa8_hd128_small_tile_many_q_blocks() {
         head_dim: 128,
         causal: false,
         force_large: Some(false),
-    });
+        dtype,
+    }
 }
 
 /// Same GQA shape on the production tile path at head_dim 64 (`BLOCK_M=128`),
 /// causal with a ragged `key_offset`. Sequence 0 gives up to 4 Q blocks x 8
 /// heads = 32 partials per dK/dV row.
-#[test]
-fn varlen_bwd_f16_gqa8_hd64_production_tile_causal() {
-    run(&Case {
+fn gqa8_hd64_production_tile(dtype: DType) -> Case {
+    Case {
         label: "gqa8 hd64 production-tile causal",
         cu_q: vec![0, 512, 672],
         cu_k: vec![0, 512, 800],
@@ -326,5 +368,26 @@ fn varlen_bwd_f16_gqa8_hd64_production_tile_causal() {
         head_dim: 64,
         causal: true,
         force_large: None,
-    });
+        dtype,
+    }
+}
+
+#[test]
+fn varlen_bwd_f16_gqa8_hd128_small_tile_many_q_blocks() {
+    run(&gqa8_hd128_small_tile(DType::F16));
+}
+
+#[test]
+fn varlen_bwd_f16_gqa8_hd64_production_tile_causal() {
+    run(&gqa8_hd64_production_tile(DType::F16));
+}
+
+#[test]
+fn varlen_bwd_bf16_gqa8_hd128_small_tile_many_q_blocks() {
+    run(&gqa8_hd128_small_tile(DType::BF16));
+}
+
+#[test]
+fn varlen_bwd_bf16_gqa8_hd64_production_tile_causal() {
+    run(&gqa8_hd64_production_tile(DType::BF16));
 }

@@ -5,7 +5,7 @@
 // 1. Packed sequences with cu_seqlens indexing
 // 2. Eliminates padding overhead in gradient computation
 // 3. Full GQA support: num_kv_heads <= num_heads; dK/dV scatter via atomicAdd
-// 4. FP16 inputs (varlen_attention_bwd_fp16.cu) also accumulate dK/dV in F32
+// 4. F16/BF16 inputs (varlen_attention_bwd_half.cu) also accumulate dK/dV in F32
 // 5. head_dim 64 / 128 / 256 supported
 //
 // Backward pass computes:

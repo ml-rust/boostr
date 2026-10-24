@@ -148,7 +148,7 @@ impl<R: Runtime<DType = DType>> Mamba1Block<R> {
             + CompareOps<R>,
     {
         let normed = self.norm.forward(client, x)?;
-        let out = self.mamba.forward(client, &normed)?;
+        let out = self.mamba.forward(client, &normed, None)?;
         numr::autograd::var_add(x, &out, client).map_err(Error::Numr)
     }
 }

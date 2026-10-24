@@ -2,7 +2,9 @@
 
 use super::layer::Mamba2;
 use crate::error::{Error, Result};
-use crate::model::mamba::ssm::{SsmInput, var_contiguous};
+use crate::model::mamba::ssm::{SsmInput, keep_var, var_contiguous};
+use crate::nn::segment_masks::SegmentMasks;
+use crate::nn::var_causal_conv1d_silu;
 use numr::autograd::{
     Var, var_add, var_exp, var_mul, var_narrow, var_neg, var_reshape, var_silu, var_softplus,
     var_transpose,
@@ -18,7 +20,16 @@ impl<R: Runtime> Mamba2<R> {
     /// Training forward pass.
     ///
     /// x: `[batch, seq_len, d_model]` → `[batch, seq_len, d_model]`
-    pub fn forward<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>
+    ///
+    /// With `segments`, a packed row holds several documents. The conv and the
+    /// scan then read no state across a document start. `None` treats each row
+    /// as one document.
+    pub fn forward<C>(
+        &self,
+        client: &C,
+        x: &Var<R>,
+        segments: Option<&SegmentMasks<R>>,
+    ) -> Result<Var<R>>
     where
         R: Runtime<DType = DType>,
         C: RuntimeClient<R>
@@ -73,12 +84,16 @@ impl<R: Runtime> Mamba2<R> {
         )?;
 
         // 3. Causal conv1d on xBC
-        let xbc_ncl = var_contiguous(&var_transpose(&xbc).map_err(Error::Numr)?)?;
-        let xbc_conv = self.conv1d.forward(client, &xbc_ncl)?;
-        let xbc = var_contiguous(&var_transpose(&xbc_conv).map_err(Error::Numr)?)?;
-
         // 4. SiLU activation
-        let xbc = var_silu(&xbc, client).map_err(Error::Numr)?;
+        let xbc = if let Some(masks) = segments {
+            let (weight, bias) = (self.conv1d.weight(), self.conv1d.bias());
+            var_causal_conv1d_silu(client, &xbc, weight, bias, true, Some(masks))?
+        } else {
+            let xbc_ncl = var_contiguous(&var_transpose(&xbc).map_err(Error::Numr)?)?;
+            let xbc_conv = self.conv1d.forward(client, &xbc_ncl)?;
+            let xbc = var_contiguous(&var_transpose(&xbc_conv).map_err(Error::Numr)?)?;
+            var_silu(&xbc, client).map_err(Error::Numr)?
+        };
 
         // 5. Split xBC into x_ssm, B, C
         let x_ssm = var_contiguous(&var_narrow(&xbc, 2, 0, d_inner).map_err(Error::Numr)?)?;
@@ -124,6 +139,7 @@ impl<R: Runtime> Mamba2<R> {
         }
 
         // 9. SSM forward
+        let keep = keep_var(segments)?;
         let ssm_input = SsmInput {
             x: &x_ssm,
             a: &a,
@@ -133,6 +149,7 @@ impl<R: Runtime> Mamba2<R> {
             dt: &dt,
             config: &self.config,
             hidden_state_clamp: None,
+            keep: keep.as_ref(),
         };
         let out = crate::model::mamba::ssm::ssm_forward_sequential(client, &ssm_input)?;
 
@@ -280,7 +297,7 @@ mod tests {
             false,
         );
 
-        let out = mamba.forward(&client, &x).unwrap();
+        let out = mamba.forward(&client, &x, None).unwrap();
         assert_eq!(out.shape(), &[1, 4, 8]);
     }
 
@@ -294,14 +311,14 @@ mod tests {
             Tensor::<CpuRuntime>::from_slice(&[0.1f32; 8], &[1, 8], &device).unwrap(),
             false,
         );
-        assert!(mamba.forward(&client, &x_2d).is_err());
+        assert!(mamba.forward(&client, &x_2d, None).is_err());
 
         // Wrong d_model should fail
         let x_wrong = Var::new(
             Tensor::<CpuRuntime>::from_slice(&[0.1f32; 12], &[1, 4, 3], &device).unwrap(),
             false,
         );
-        assert!(mamba.forward(&client, &x_wrong).is_err());
+        assert!(mamba.forward(&client, &x_wrong, None).is_err());
     }
 
     /// `dt_bias` must be added INSIDE softplus: `softplus(dt + bias)`.
@@ -364,7 +381,9 @@ mod tests {
                 Tensor::<CpuRuntime>::from_slice(&[0.05f32; 8 * 6], &[1, 6, 8], &device).unwrap(),
                 false,
             );
-            let out = mamba.forward(&client, &x).expect("forward must succeed");
+            let out = mamba
+                .forward(&client, &x, None)
+                .expect("forward must succeed");
             let vals: Vec<f32> = out.tensor().contiguous().unwrap().to_vec();
             assert!(
                 vals.iter().all(|v| v.is_finite()),

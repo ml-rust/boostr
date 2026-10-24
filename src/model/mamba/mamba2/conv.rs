@@ -134,7 +134,7 @@ mod tests {
         let mut state = SsmState::<CpuRuntime>::new(1, &config, DType::F32, &device).unwrap();
         let inference = prefill(&client, &mamba, &x, &mut state);
         let training = mamba
-            .forward(&client, &Var::new(x.clone(), false))
+            .forward(&client, &Var::new(x.clone(), false), None)
             .unwrap()
             .tensor()
             .contiguous()

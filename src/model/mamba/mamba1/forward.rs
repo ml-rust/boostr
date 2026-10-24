@@ -2,7 +2,9 @@
 
 use super::layer::Mamba1;
 use crate::error::{Error, Result};
-use crate::model::mamba::ssm::{SsmInput, ssm_forward_sequential, var_contiguous};
+use crate::model::mamba::ssm::{SsmInput, keep_var, ssm_forward_sequential, var_contiguous};
+use crate::nn::segment_masks::SegmentMasks;
+use crate::nn::var_causal_conv1d_silu;
 use numr::autograd::{
     Var, var_exp, var_mul, var_narrow, var_neg, var_reshape, var_silu, var_softplus, var_transpose,
 };
@@ -17,7 +19,16 @@ impl<R: Runtime> Mamba1<R> {
     /// Full-sequence Var forward pass.
     ///
     /// x: `[batch, seq_len, d_model]` → `[batch, seq_len, d_model]`.
-    pub fn forward<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>
+    ///
+    /// With `segments`, a packed row holds several documents. The conv and the
+    /// scan then read no state across a document start. `None` treats each row
+    /// as one document.
+    pub fn forward<C>(
+        &self,
+        client: &C,
+        x: &Var<R>,
+        segments: Option<&SegmentMasks<R>>,
+    ) -> Result<Var<R>>
     where
         R: Runtime<DType = DType>,
         C: RuntimeClient<R>
@@ -63,14 +74,21 @@ impl<R: Runtime> Mamba1<R> {
             var_contiguous(&var_narrow(&projected, 2, d_inner, d_inner).map_err(Error::Numr)?)?;
 
         // 2. Depthwise causal Conv1D over the SSM path.
-        let x_ncl = var_contiguous(&var_transpose(&x_part).map_err(Error::Numr)?)?;
-        let conv_out = self.conv1d.forward(client, &x_ncl)?;
-        let conv_out = var_contiguous(&var_narrow(&conv_out, 2, 0, seq_len).map_err(Error::Numr)?)?;
-        let conv_out = var_contiguous(&var_transpose(&conv_out).map_err(Error::Numr)?)?;
-        let conv_out = var_silu(&conv_out, client).map_err(Error::Numr)?;
+        let conv_out = if let Some(masks) = segments {
+            let (weight, bias) = (self.conv1d.weight(), self.conv1d.bias());
+            var_causal_conv1d_silu(client, &x_part, weight, bias, true, Some(masks))?
+        } else {
+            let x_ncl = var_contiguous(&var_transpose(&x_part).map_err(Error::Numr)?)?;
+            let conv_out = self.conv1d.forward(client, &x_ncl)?;
+            let conv_out =
+                var_contiguous(&var_narrow(&conv_out, 2, 0, seq_len).map_err(Error::Numr)?)?;
+            let conv_out = var_contiguous(&var_transpose(&conv_out).map_err(Error::Numr)?)?;
+            var_silu(&conv_out, client).map_err(Error::Numr)?
+        };
 
         // 3. Sequential selective scan (never chunked/parallel for Mamba1 training).
-        let y = self.selective_scan_sequential(client, &conv_out)?;
+        let keep = keep_var(segments)?;
+        let y = self.selective_scan_sequential(client, &conv_out, keep.as_ref())?;
 
         // 4. Gate with the residual branch and project back to d_model.
         let gate = var_silu(&residual, client).map_err(Error::Numr)?;
@@ -82,6 +100,7 @@ impl<R: Runtime> Mamba1<R> {
         &self,
         client: &C,
         u: &Var<R>,
+        keep: Option<&Var<R>>,
     ) -> Result<Var<R>>
     where
         R: Runtime<DType = DType>,
@@ -126,7 +145,9 @@ impl<R: Runtime> Mamba1<R> {
         // Preserve the oxidizr Mamba1 reference transform: A = exp(-a_log).
         let a_neg = var_neg(&self.a_log, client).map_err(Error::Numr)?;
         let a = var_exp(&a_neg, client).map_err(Error::Numr)?;
-        self.selective_scan_from_parts(client, u, &delta, &a, &b_proj, &c_proj, batch, seq_len)
+        self.selective_scan_from_parts(
+            client, u, &delta, &a, &b_proj, &c_proj, batch, seq_len, keep,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -140,6 +161,7 @@ impl<R: Runtime> Mamba1<R> {
         c: &Var<R>,
         batch: usize,
         seq_len: usize,
+        keep: Option<&Var<R>>,
     ) -> Result<Var<R>>
     where
         R: Runtime<DType = DType>,
@@ -162,6 +184,7 @@ impl<R: Runtime> Mamba1<R> {
             dt: delta,
             config: &scan_config,
             hidden_state_clamp: self.config.hidden_state_clamp,
+            keep,
         };
         let out = ssm_forward_sequential(client, &ssm_input)?;
         var_reshape(&out, &[batch, seq_len, d_inner]).map_err(Error::Numr)
@@ -248,7 +271,7 @@ mod tests {
             false,
         );
 
-        let out = mamba.forward(&client, &x).unwrap();
+        let out = mamba.forward(&client, &x, None).unwrap();
         assert_eq!(out.shape(), &[1, 3, 4]);
     }
 
@@ -266,13 +289,13 @@ mod tests {
             Tensor::<CpuRuntime>::from_slice(&[0.1f32; 4], &[1, 4], &device).unwrap(),
             false,
         );
-        assert!(mamba.forward(&client, &x_2d).is_err());
+        assert!(mamba.forward(&client, &x_2d, None).is_err());
 
         let x_wrong = Var::new(
             Tensor::<CpuRuntime>::from_slice(&[0.1f32; 6], &[1, 3, 2], &device).unwrap(),
             false,
         );
-        assert!(mamba.forward(&client, &x_wrong).is_err());
+        assert!(mamba.forward(&client, &x_wrong, None).is_err());
     }
 
     #[test]
@@ -319,7 +342,7 @@ mod tests {
         );
 
         let out = mamba
-            .selective_scan_from_parts(&client, &u, &delta, &a, &b, &c, 1, 3)
+            .selective_scan_from_parts(&client, &u, &delta, &a, &b, &c, 1, 3, None)
             .unwrap();
         let data: Vec<f32> = out.tensor().to_vec();
         let expected = selective_scan_reference(
@@ -382,7 +405,7 @@ mod tests {
         );
 
         let out = mamba
-            .selective_scan_from_parts(&client, &u, &delta, &a, &b, &c, 1, 2)
+            .selective_scan_from_parts(&client, &u, &delta, &a, &b, &c, 1, 2, None)
             .unwrap();
         let data: Vec<f32> = out.tensor().to_vec();
         let expected = selective_scan_reference(

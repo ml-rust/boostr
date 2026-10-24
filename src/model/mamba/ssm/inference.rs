@@ -252,6 +252,7 @@ mod tests {
             dt: &dt_var,
             config: &config,
             hidden_state_clamp: None,
+            keep: None,
         };
         let out_var = ssm_forward_sequential(&client, &var_input).unwrap();
 

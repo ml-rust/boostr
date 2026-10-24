@@ -14,6 +14,9 @@ use numr::tensor::Tensor;
 ///   `h[t]` = exp(`dt[t]` * A) * `h[t-1]` + `dt[t]` * `B[t]` * `x[t]`
 ///   `y[t]` = (`C[t]` @ `h[t]`) + D * `x[t]`
 ///
+/// With `keep` set, `exp(dt[t] * A)` is multiplied by `keep[t]`, so a token
+/// with `keep[t] = 0` starts from a zero state.
+///
 /// x: `[B, S, nheads, headdim]`, A: `[nheads]` or `[nheads, d_state]`,
 /// B: `[B, S, ngroups, d_state]`, C: `[B, S, ngroups, d_state]`,
 /// dt: `[B, S, nheads]`, D: `[nheads]` (optional)
@@ -60,6 +63,7 @@ where
             d_state,
             ngroups,
             input.hidden_state_clamp,
+            input.keep,
         )?;
         h = h_new;
         outputs.push(y_t);
@@ -117,6 +121,11 @@ where
         let b_chunk = var_narrow(input.b, 1, start, len).map_err(Error::Numr)?;
         let c_chunk = var_narrow(input.c, 1, start, len).map_err(Error::Numr)?;
         let dt_chunk = var_narrow(input.dt, 1, start, len).map_err(Error::Numr)?;
+        let keep_chunk = input
+            .keep
+            .map(|keep| var_narrow(keep, 1, start, len))
+            .transpose()
+            .map_err(Error::Numr)?;
 
         let chunk_input = SsmInput {
             x: &x_chunk,
@@ -127,6 +136,7 @@ where
             dt: &dt_chunk,
             config: input.config,
             hidden_state_clamp: input.hidden_state_clamp,
+            keep: keep_chunk.as_ref(),
         };
 
         let (chunk_out, h_new) = ssm_chunk_with_state(client, &chunk_input, &h)?;
@@ -179,6 +189,7 @@ where
             d_state,
             ngroups,
             input.hidden_state_clamp,
+            input.keep,
         )?;
         h = h_new;
         outputs.push(y_t);
@@ -209,6 +220,7 @@ fn ssm_step<R, C>(
     d_state: usize,
     ngroups: usize,
     hidden_state_clamp: Option<f64>,
+    keep: Option<&Var<R>>,
 ) -> Result<(Var<R>, Var<R>)>
 where
     R: Runtime<DType = DType>,
@@ -236,6 +248,15 @@ where
     // decay = exp(dt_t * A): [B, nheads, 1, 1] or [B, nheads, 1, d_state]
     let dt_a = var_mul(&dt_t, &a_broad, client).map_err(Error::Numr)?;
     let decay = var_exp(&dt_a, client).map_err(Error::Numr)?;
+
+    // A document start drops the previous state: keep_t is 0 there.
+    let decay = match keep {
+        Some(keep) => {
+            let keep_t = var_contiguous(&var_narrow(keep, 1, t, 1).map_err(Error::Numr)?)?;
+            var_mul(&decay, &keep_t, client).map_err(Error::Numr)?
+        }
+        None => decay,
+    };
 
     // h = decay * h
     let mut h = var_mul(&decay, h, client).map_err(Error::Numr)?;
@@ -346,6 +367,7 @@ mod tests {
             dt: &dt,
             config: &config,
             hidden_state_clamp: None,
+            keep: None,
         };
         let out = ssm_forward_sequential(&client, &input).unwrap();
         assert_eq!(out.shape(), &[1, 2, 1, 4]);
@@ -405,6 +427,7 @@ mod tests {
             dt: &dt,
             config: &config,
             hidden_state_clamp: None,
+            keep: None,
         };
 
         let out_seq = ssm_forward_sequential(&client, &input).unwrap();

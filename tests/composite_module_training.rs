@@ -299,7 +299,7 @@ fn composite_adamw_training_preserves_ids_and_state() {
         assert_ids(&ids_from(model.trainable_parameters()), &mamba_expected_ids);
         let x = Var::new(mamba_input.clone(), false);
         let y = Var::new(mamba_target.clone(), false);
-        let pred = model.forward(&client, &x).expect("Mamba2 forward");
+        let pred = model.forward(&client, &x, None).expect("Mamba2 forward");
         let diff = var_sub(&pred, &y, &client).expect("Mamba2 diff");
         let sq = var_mul(&diff, &diff, &client).expect("Mamba2 sq");
         let loss = var_mean(&sq, &[0, 1, 2], false, &client).expect("Mamba2 loss");

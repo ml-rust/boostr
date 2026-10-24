@@ -107,7 +107,7 @@ where
 mod tests {
     use super::*;
     use crate::nn::conv::causal_conv1d;
-    use crate::test_utils::{Lcg, cpu_setup, max_abs_diff_f64, to_f64};
+    use crate::test_utils::{Lcg, cpu_setup, ids_for, max_abs_diff_f64, to_f64};
     use numr::autograd::{backward, var_sum};
     use numr::ops::BinaryOps;
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
@@ -325,14 +325,6 @@ mod tests {
         (0..n)
             .map(|_| f64::from(g.uniform_f32(-1.0, 1.0)))
             .collect()
-    }
-
-    fn ids_for(lens: &[usize]) -> Vec<i32> {
-        let mut ids = Vec::new();
-        for (i, &n) in lens.iter().enumerate() {
-            ids.extend(std::iter::repeat_n(i as i32 * 3 + 1, n));
-        }
-        ids
     }
 
     struct Out {

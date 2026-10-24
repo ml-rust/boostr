@@ -2,6 +2,8 @@ pub mod mamba1;
 pub mod mamba2;
 pub mod mamba3;
 pub mod model;
+#[cfg(test)]
+mod packed_support;
 pub mod ssm;
 
 pub use mamba1::{Mamba1, Mamba1Config, Mamba1Weights, Mamba1WeightsWithIds};

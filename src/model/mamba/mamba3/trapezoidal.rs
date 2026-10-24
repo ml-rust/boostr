@@ -18,6 +18,19 @@ use numr::tensor::Tensor;
 const A_MIN: f64 = 1e-6;
 const A_MAX: f64 = 1e6;
 
+/// Inputs of [`Mamba3::trapezoidal_ssm_forward`], each `[batch, seq, ..]`.
+///
+/// `keep` is a constant `[batch, seq, 1, 1]` mask: 0 at a document start,
+/// else 1.
+pub(in crate::model::mamba::mamba3) struct TrapezoidInputs<'a, R: Runtime> {
+    pub hidden_states: &'a Var<R>,
+    pub b: &'a Var<R>,
+    pub c: &'a Var<R>,
+    pub dt: &'a Var<R>,
+    pub lambda: &'a Var<R>,
+    pub keep: Option<&'a Var<R>>,
+}
+
 impl<R: Runtime> Mamba3<R> {
     pub(in crate::model::mamba::mamba3) fn repeat_groups_to_heads(
         &self,
@@ -74,20 +87,28 @@ impl<R: Runtime> Mamba3<R> {
         .map_err(Error::Numr)
     }
 
+    /// Trapezoidal scan over `[batch, seq, ..]` inputs.
+    ///
+    /// At a document start `keep` zeroes the state decay and the previous-token
+    /// term, so neither `h` nor `prev_x`/`prev_b` carry across documents.
     pub(in crate::model::mamba::mamba3) fn trapezoidal_ssm_forward<C>(
         &self,
         client: &C,
-        hidden_states: &Var<R>,
-        b: &Var<R>,
-        c: &Var<R>,
-        dt: &Var<R>,
-        lambda: &Var<R>,
+        inputs: &TrapezoidInputs<'_, R>,
     ) -> Result<Var<R>>
     where
         R: Runtime<DType = DType>,
         C: RuntimeClient<R> + TensorOps<R> + ScalarOps<R> + UnaryOps<R> + ActivationOps<R>,
         R::Client: TensorOps<R> + ScalarOps<R> + CompareOps<R>,
     {
+        let TrapezoidInputs {
+            hidden_states,
+            b,
+            c,
+            dt,
+            lambda,
+            keep,
+        } = *inputs;
         let shape = hidden_states.shape();
         let batch = shape[0];
         let seq_len = shape[1];
@@ -129,7 +150,14 @@ impl<R: Runtime> Mamba3<R> {
             let beta = var_mul(&beta, &alpha, client).map_err(Error::Numr)?;
             let gamma = var_mul(&lambda_t, &dt_t, client).map_err(Error::Numr)?;
 
-            h = var_mul(&alpha, &h, client).map_err(Error::Numr)?;
+            let keep_t = keep
+                .map(|keep| time_step(keep, t, &[batch, 1, 1, 1]))
+                .transpose()?;
+            let decay = match &keep_t {
+                Some(keep_t) => var_mul(&alpha, keep_t, client).map_err(Error::Numr)?,
+                None => alpha,
+            };
+            h = var_mul(&decay, &h, client).map_err(Error::Numr)?;
 
             let prev_x_col =
                 var_reshape(&prev_x, &[batch, nheads, headdim, 1]).map_err(Error::Numr)?;
@@ -137,6 +165,10 @@ impl<R: Runtime> Mamba3<R> {
                 var_reshape(&prev_b, &[batch, nheads, 1, d_state]).map_err(Error::Numr)?;
             let prev_term = var_mul(&prev_x_col, &prev_b_row, client).map_err(Error::Numr)?;
             let prev_term = var_mul(&beta, &prev_term, client).map_err(Error::Numr)?;
+            let prev_term = match &keep_t {
+                Some(keep_t) => var_mul(&prev_term, keep_t, client).map_err(Error::Numr)?,
+                None => prev_term,
+            };
 
             let x_col = var_reshape(&x_t, &[batch, nheads, headdim, 1]).map_err(Error::Numr)?;
             let b_row = var_reshape(&b_t, &[batch, nheads, 1, d_state]).map_err(Error::Numr)?;
@@ -235,7 +267,17 @@ mod tests {
         );
 
         let out = mamba
-            .trapezoidal_ssm_forward(&client, &x, &b, &c, &dt, &lambda)
+            .trapezoidal_ssm_forward(
+                &client,
+                &TrapezoidInputs {
+                    hidden_states: &x,
+                    b: &b,
+                    c: &c,
+                    dt: &dt,
+                    lambda: &lambda,
+                    keep: None,
+                },
+            )
             .unwrap();
         let data: Vec<f32> = out.tensor().to_vec();
 
@@ -300,7 +342,17 @@ mod tests {
         let lambda = input(&[&lambda_rows[0], &lambda_rows[1]], &[2, 3, 1]);
 
         let out = mamba
-            .trapezoidal_ssm_forward(&client, &x, &b, &c, &dt, &lambda)
+            .trapezoidal_ssm_forward(
+                &client,
+                &TrapezoidInputs {
+                    hidden_states: &x,
+                    b: &b,
+                    c: &c,
+                    dt: &dt,
+                    lambda: &lambda,
+                    keep: None,
+                },
+            )
             .unwrap();
         assert_eq!(out.shape(), &[2, 3, 1, 2]);
         let data: Vec<f32> = out.tensor().contiguous().unwrap().to_vec();

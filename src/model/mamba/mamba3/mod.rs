@@ -4,6 +4,7 @@ pub mod forward;
 pub mod init;
 pub mod layer;
 pub mod mimo;
+mod packed_documents;
 pub mod rope;
 pub mod trapezoidal;
 

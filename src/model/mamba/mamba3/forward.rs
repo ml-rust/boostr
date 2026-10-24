@@ -3,8 +3,11 @@
 //! `rope` (complex RoPE on B/C), `mimo` (the MIMO up/down projections).
 
 use super::layer::Mamba3;
+use super::trapezoidal::TrapezoidInputs;
 use crate::error::{Error, Result};
-use crate::model::mamba::ssm::var_contiguous;
+use crate::model::mamba::ssm::{keep_var, var_contiguous};
+use crate::nn::segment_masks::SegmentMasks;
+use crate::nn::var_causal_conv1d_silu;
 use numr::autograd::{
     Var, var_add, var_cat, var_clamp, var_cumsum, var_mul, var_narrow, var_reshape, var_sigmoid,
     var_silu, var_softplus, var_transpose,
@@ -20,7 +23,16 @@ impl<R: Runtime> Mamba3<R> {
     /// Full-sequence Var forward pass.
     ///
     /// x: `[batch, seq_len, d_model]` → `[batch, seq_len, d_model]`
-    pub fn forward<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>
+    ///
+    /// With `segments`, a packed row holds several documents. The optional
+    /// conv and the scan then read no state across a document start. `None`
+    /// treats each row as one document.
+    pub fn forward<C>(
+        &self,
+        client: &C,
+        x: &Var<R>,
+        segments: Option<&SegmentMasks<R>>,
+    ) -> Result<Var<R>>
     where
         R: Runtime<DType = DType>,
         C: RuntimeClient<R>
@@ -83,12 +95,17 @@ impl<R: Runtime> Mamba3<R> {
         // 3. Optional causal Conv1D over concatenated [x, B, C], otherwise SiLU(x).
         let x_part = if let Some(ref conv1d) = self.conv1d {
             let xbc = var_cat(&[&x_part, &b_proj, &c_proj], 2, client).map_err(Error::Numr)?;
-            let xbc_ncl = var_contiguous(&var_transpose(&xbc).map_err(Error::Numr)?)?;
-            let conv_out = conv1d.forward(client, &xbc_ncl)?;
-            let conv_out =
-                var_contiguous(&var_narrow(&conv_out, 2, 0, seq_len).map_err(Error::Numr)?)?;
-            let conv_out = var_contiguous(&var_transpose(&conv_out).map_err(Error::Numr)?)?;
-            let conv_out = var_silu(&conv_out, client).map_err(Error::Numr)?;
+            let conv_out = if let Some(masks) = segments {
+                let (weight, bias) = (conv1d.weight(), conv1d.bias());
+                var_causal_conv1d_silu(client, &xbc, weight, bias, true, Some(masks))?
+            } else {
+                let xbc_ncl = var_contiguous(&var_transpose(&xbc).map_err(Error::Numr)?)?;
+                let conv_out = conv1d.forward(client, &xbc_ncl)?;
+                let conv_out =
+                    var_contiguous(&var_narrow(&conv_out, 2, 0, seq_len).map_err(Error::Numr)?)?;
+                let conv_out = var_contiguous(&var_transpose(&conv_out).map_err(Error::Numr)?)?;
+                var_silu(&conv_out, client).map_err(Error::Numr)?
+            };
             let x_conv =
                 var_contiguous(&var_narrow(&conv_out, 2, 0, d_inner).map_err(Error::Numr)?)?;
             b_proj =
@@ -178,7 +195,18 @@ impl<R: Runtime> Mamba3<R> {
         let x_for_ssm = self.apply_mimo_up(client, &x_ssm, batch, seq_len)?;
 
         // 9. Trapezoidal SSM recurrence.
-        let y = self.trapezoidal_ssm_forward(client, &x_for_ssm, &b_proj, &c_proj, &dt, &lambda)?;
+        let keep = keep_var(segments)?;
+        let y = self.trapezoidal_ssm_forward(
+            client,
+            &TrapezoidInputs {
+                hidden_states: &x_for_ssm,
+                b: &b_proj,
+                c: &c_proj,
+                dt: &dt,
+                lambda: &lambda,
+                keep: keep.as_ref(),
+            },
+        )?;
 
         // 10. Optional MIMO down-projection.
         let y = self.apply_mimo_down(client, &y, batch, seq_len)?;
@@ -339,7 +367,7 @@ pub(super) mod tests {
             false,
         );
 
-        let out = mamba.forward(&client, &x).unwrap();
+        let out = mamba.forward(&client, &x, None).unwrap();
         assert_eq!(out.shape(), &[1, 3, 4]);
     }
 
@@ -359,12 +387,12 @@ pub(super) mod tests {
             Tensor::<CpuRuntime>::from_slice(&[0.1f32; 4], &[1, 4], &device).unwrap(),
             false,
         );
-        assert!(mamba.forward(&client, &x_2d).is_err());
+        assert!(mamba.forward(&client, &x_2d, None).is_err());
 
         let x_wrong = Var::new(
             Tensor::<CpuRuntime>::from_slice(&[0.1f32; 6], &[1, 3, 2], &device).unwrap(),
             false,
         );
-        assert!(mamba.forward(&client, &x_wrong).is_err());
+        assert!(mamba.forward(&client, &x_wrong, None).is_err());
     }
 }

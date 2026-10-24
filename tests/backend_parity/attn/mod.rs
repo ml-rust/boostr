@@ -16,3 +16,4 @@ pub mod var_varlen_attention;
 pub mod varlen_attention;
 #[cfg(all(feature = "cuda", feature = "f16"))]
 pub mod varlen_attention_bf16;
+pub mod varlen_attention_window;

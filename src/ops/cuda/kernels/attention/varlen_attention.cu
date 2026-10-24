@@ -16,11 +16,16 @@
 // prefill (seq_len_q == seq_len_k) gives key_offset == 0, leaving the rule
 // identical to the previous top-left form. Same convention as
 // `ops/impl_generic/attention/flash_standard.rs::build_attention_mask`.
+//
+// Sliding window: `window_size > 0` also masks key ki when
+// ki + window_size <= key_offset + r. `varlen_mask.cuh` holds the predicate
+// and the K-tile range. A row with no visible key stores zeros and LSE = -inf.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "varlen_mask.cuh"
 
 // ============================================================================
 // FP32 VarLen Flash Attention Forward
@@ -41,7 +46,8 @@ __device__ void varlen_flash_attention_fwd_fp32_impl(
     const int max_seqlen_q,
     const int max_seqlen_k,
     const float scale,
-    const int causal
+    const int causal,
+    const int window_size                  // 0 = no window; see varlen_mask.cuh
 ) {
     // +1 padding on the column stride eliminates 32-way bank conflicts for
     // power-of-2 head dimensions (mirrors flash_v2.cu HEAD_STRIDE = HEAD_DIM+1).
@@ -120,10 +126,13 @@ __device__ void varlen_flash_attention_fwd_fp32_impl(
         O_local[d] = 0.0f;
     }
 
-    // Iterate over K/V tiles
-    const int num_k_blocks = (seq_len_k + BLOCK_N - 1) / BLOCK_N;
+    // Iterate over the K/V tiles that hold a key visible to this Q block.
+    const int q_pos = key_offset + q_start + q_row;
+    int first_k_block, end_k_block;
+    varlen_k_tile_range(key_offset + q_start, key_offset + q_end - 1, seq_len_k,
+                        BLOCK_N, causal, window_size, &first_k_block, &end_k_block);
 
-    for (int k_block = 0; k_block < num_k_blocks; ++k_block) {
+    for (int k_block = first_k_block; k_block < end_k_block; ++k_block) {
         const int k_start = k_block * BLOCK_N;
         const int k_end = min(k_start + BLOCK_N, seq_len_k);
         const int k_tile_size = k_end - k_start;
@@ -142,7 +151,7 @@ __device__ void varlen_flash_attention_fwd_fp32_impl(
             // First pass: compute max
             float m_new = m_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
+                if (varlen_masked(q_pos, k_start + j, causal, window_size)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -153,8 +162,9 @@ __device__ void varlen_flash_attention_fwd_fp32_impl(
                 m_new = fmaxf(m_new, score);
             }
 
-            // Rescale previous output
-            const float alpha = __expf(m_local - m_new);
+            // Rescale previous output. A row with no visible key so far keeps
+            // m at -inf. alpha = 1 then avoids exp(-inf - -inf) = NaN.
+            const float alpha = (m_new == -INFINITY) ? 1.0f : __expf(m_local - m_new);
             #pragma unroll
             for (int d = 0; d < HEAD_DIM; ++d) {
                 O_local[d] *= alpha;
@@ -163,7 +173,7 @@ __device__ void varlen_flash_attention_fwd_fp32_impl(
             // Second pass: accumulate
             float l_new = alpha * l_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
+                if (varlen_masked(q_pos, k_start + j, causal, window_size)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -186,9 +196,11 @@ __device__ void varlen_flash_attention_fwd_fp32_impl(
         __syncthreads();
     }
 
-    // Write output
+    // Write output. A row with no visible key has l == 0 and O_local == 0.
+    // It stores zeros and LSE = -inf, the CPU convention.
     if (is_valid_thread) {
-        const float inv_l = 1.0f / l_local;
+        const bool empty_row = (l_local == 0.0f);
+        const float inv_l = empty_row ? 1.0f : 1.0f / l_local;
         const int global_out_pos = seq_start_q + q_start + q_row;
 
         #pragma unroll
@@ -196,7 +208,8 @@ __device__ void varlen_flash_attention_fwd_fp32_impl(
             O_head[global_out_pos * num_heads * HEAD_DIM + d] = O_local[d] * inv_l;
         }
 
-        L[global_out_pos * num_heads + head_idx] = m_local + __logf(l_local);
+        L[global_out_pos * num_heads + head_idx] =
+            empty_row ? -INFINITY : m_local + __logf(l_local);
     }
 
     #undef Q_smem
@@ -222,11 +235,13 @@ extern "C" __global__ void varlen_flash_attention_fwd_64_fp32(
     int max_seqlen_q,
     int max_seqlen_k,
     float scale,
-    int causal
+    int causal,
+    int window_size
 ) {
     varlen_flash_attention_fwd_fp32_impl<64, 128, 64>(
         Q, K, V, cu_seqlens_q, cu_seqlens_k, O, L,
-        batch_size, num_heads, num_kv_heads, max_seqlen_q, max_seqlen_k, scale, causal
+        batch_size, num_heads, num_kv_heads, max_seqlen_q, max_seqlen_k, scale, causal,
+        window_size
     );
 }
 
@@ -244,11 +259,13 @@ extern "C" __global__ void varlen_flash_attention_fwd_128_fp32(
     int max_seqlen_q,
     int max_seqlen_k,
     float scale,
-    int causal
+    int causal,
+    int window_size
 ) {
     varlen_flash_attention_fwd_fp32_impl<128, 128, 64>(
         Q, K, V, cu_seqlens_q, cu_seqlens_k, O, L,
-        batch_size, num_heads, num_kv_heads, max_seqlen_q, max_seqlen_k, scale, causal
+        batch_size, num_heads, num_kv_heads, max_seqlen_q, max_seqlen_k, scale, causal,
+        window_size
     );
 }
 
@@ -279,11 +296,13 @@ extern "C" __global__ void varlen_flash_attention_fwd_64_fp32_small(
     int max_seqlen_q,
     int max_seqlen_k,
     float scale,
-    int causal
+    int causal,
+    int window_size
 ) {
     varlen_flash_attention_fwd_fp32_impl<64, 32, 32>(
         Q, K, V, cu_seqlens_q, cu_seqlens_k, O, L,
-        batch_size, num_heads, num_kv_heads, max_seqlen_q, max_seqlen_k, scale, causal
+        batch_size, num_heads, num_kv_heads, max_seqlen_q, max_seqlen_k, scale, causal,
+        window_size
     );
 }
 
@@ -301,11 +320,13 @@ extern "C" __global__ void varlen_flash_attention_fwd_128_fp32_small(
     int max_seqlen_q,
     int max_seqlen_k,
     float scale,
-    int causal
+    int causal,
+    int window_size
 ) {
     varlen_flash_attention_fwd_fp32_impl<128, 16, 16>(
         Q, K, V, cu_seqlens_q, cu_seqlens_k, O, L,
-        batch_size, num_heads, num_kv_heads, max_seqlen_q, max_seqlen_k, scale, causal
+        batch_size, num_heads, num_kv_heads, max_seqlen_q, max_seqlen_k, scale, causal,
+        window_size
     );
 }
 
@@ -342,10 +363,12 @@ extern "C" __global__ void varlen_flash_attention_fwd_256_fp32(
     int max_seqlen_q,
     int max_seqlen_k,
     float scale,
-    int causal
+    int causal,
+    int window_size
 ) {
     varlen_flash_attention_fwd_fp32_impl<256, 16, 16>(
         Q, K, V, cu_seqlens_q, cu_seqlens_k, O, L,
-        batch_size, num_heads, num_kv_heads, max_seqlen_q, max_seqlen_k, scale, causal
+        batch_size, num_heads, num_kv_heads, max_seqlen_q, max_seqlen_k, scale, causal,
+        window_size
     );
 }

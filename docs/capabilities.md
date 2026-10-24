@@ -28,7 +28,7 @@ For the feature flags, see the [README](../README.md#feature-flags).
 - **Multi-head latent attention (MLA)**: compressed KV cache (`mla.rs`).
 - **Grouped query attention (GQA)** and multi-head variants (`multi_head.rs`).
 - **Paged attention**: `paged_attention.rs` and `inference/kv_cache/paged.rs`.
-- **Variable-length attention**: ragged batches (`varlen_attention.rs`).
+- **Variable-length attention**: ragged batches with an optional sliding window (`varlen_attention.rs`).
 - **Sliding window** through the `window_size` argument of `flash_attention_fwd`.
 - **ALiBi bias**: `flash_alibi.rs`.
 - **Prefix caching** for context reuse (`inference/prefix_cache/`).

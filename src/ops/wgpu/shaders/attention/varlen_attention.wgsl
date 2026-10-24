@@ -12,7 +12,15 @@ struct VarlenParams {
     batch_size: u32,
     causal: u32,
     scale: f32,
-    _pad: u32,
+    window: u32,
+}
+
+// True when key `j` is masked for query `i`. `q_pos = key_offset + i`.
+// The window test `j + window <= q_pos` is written without the sum, so it cannot overflow.
+fn varlen_masked(j: u32, q_pos: u32, causal: u32, window: u32) -> bool {
+    let beyond_causal = causal != 0u && j > q_pos;
+    let beyond_window = window > 0u && q_pos >= window && j <= q_pos - window;
+    return beyond_causal || beyond_window;
 }
 
 @group(0) @binding(0) var<storage, read> q: array<f32>;
@@ -57,7 +65,7 @@ fn varlen_attention_fwd_f32(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Position within batch
     let pos_q = token_idx - batch_start_q;
 
-    // Bottom-right (ABSOLUTE) causal alignment, per sequence: this sequence's
+    // Bottom-right (ABSOLUTE) alignment for the causal and window rules, per sequence: this sequence's
     // batch_len_q query rows are the LAST positions of its batch_len_k keys, so
     // row pos_q sits at absolute position key_offset + pos_q. A full prefill
     // (batch_len_q == batch_len_k) gives key_offset == 0, leaving the rule
@@ -79,12 +87,13 @@ fn varlen_attention_fwd_f32(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Compute max score
         let k_start = batch_start_k;
         let k_end = batch_end_k;
-        var k_limit = batch_end_k;
-        if params.causal != 0u {
-            k_limit = batch_start_k + q_pos + 1u;
-        }
+        var any_key = false;
 
-        for (var k_idx = k_start; k_idx < min(k_end, k_limit); k_idx = k_idx + 1u) {
+        for (var k_idx = k_start; k_idx < k_end; k_idx = k_idx + 1u) {
+            if varlen_masked(k_idx - batch_start_k, q_pos, params.causal, params.window) {
+                continue;
+            }
+            any_key = true;
             let k_base = (k_idx * params.num_heads + h) * params.head_dim;
             var score = 0.0f;
             for (var d = 0u; d < params.head_dim; d = d + 1u) {
@@ -94,8 +103,15 @@ fn varlen_attention_fwd_f32(@builtin(global_invocation_id) gid: vec3<u32>) {
             max_score = max(max_score, score);
         }
 
-        if max_score == -1e30f {
-            max_score = 0.0f;
+        // A row with no unmasked key outputs zeros and lse = -inf.
+        if !any_key {
+            let out_zero = (token_idx * params.num_heads + h) * params.head_dim;
+            for (var d = 0u; d < params.head_dim; d = d + 1u) {
+                out[out_zero + d] = 0.0f;
+            }
+            var neg_inf_bits = 0xff800000u;
+            lse[token_idx * params.num_heads + h] = bitcast<f32>(neg_inf_bits);
+            continue;
         }
 
         // Second pass: softmax and aggregate
@@ -103,7 +119,10 @@ fn varlen_attention_fwd_f32(@builtin(global_invocation_id) gid: vec3<u32>) {
             accum[d] = 0.0f;
         }
 
-        for (var k_idx = k_start; k_idx < min(k_end, k_limit); k_idx = k_idx + 1u) {
+        for (var k_idx = k_start; k_idx < k_end; k_idx = k_idx + 1u) {
+            if varlen_masked(k_idx - batch_start_k, q_pos, params.causal, params.window) {
+                continue;
+            }
             let k_base = (k_idx * params.num_heads + h) * params.head_dim;
             var score = 0.0f;
             for (var d = 0u; d < params.head_dim; d = d + 1u) {

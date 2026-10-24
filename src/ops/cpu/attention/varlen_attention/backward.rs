@@ -1,11 +1,14 @@
 //! Backward kernel: recomputes probabilities from the saved log-sum-exp and
 //! accumulates dQ, dK, dV with GQA scatter into the shared kv heads.
 
+use super::mask::varlen_masked;
 use crate::error::Result;
 use numr::runtime::cpu::CpuRuntime;
 use numr::tensor::Tensor;
 
 /// Inputs are contiguous F32, `lse` included. `cu_q` and `cu_k` are checked host offsets.
+///
+/// A row with `lse = -inf` has no unmasked key. It adds no gradient.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn varlen_attention_bwd_cpu(
     dout: &Tensor<CpuRuntime>,
@@ -20,6 +23,7 @@ pub(super) fn varlen_attention_bwd_cpu(
     num_kv_heads: usize,
     head_dim: usize,
     causal: bool,
+    window: usize,
 ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
     // GQA backward: multiple Q heads share one KV head.
     // dK and dV accumulate contributions from all Q heads mapping to the same
@@ -51,7 +55,7 @@ pub(super) fn varlen_attention_bwd_cpu(
         let sk_end = cu_k[b + 1] as usize;
         let seq_len_q = sq_end - sq_start;
         let seq_len_k = sk_end - sk_start;
-        // Bottom-right (ABSOLUTE) causal alignment, per sequence: this
+        // Bottom-right (ABSOLUTE) alignment for the causal and window rules, per sequence: this
         // sequence's `seq_len_q` query rows are the LAST positions of its
         // `seq_len_k` keys, so row `qi` sits at absolute position
         // `key_offset + qi`. A full prefill (`seq_len_q == seq_len_k`) gives
@@ -66,6 +70,9 @@ pub(super) fn varlen_attention_bwd_cpu(
             for qi in 0..seq_len_q {
                 let q_off = ((sq_start + qi) * num_heads + h) * head_dim;
                 let l = lse_data[(sq_start + qi) * num_heads + h];
+                if l == f32::NEG_INFINITY {
+                    continue;
+                }
 
                 // D = sum(dO * O)
                 let o_off = ((sq_start + qi) * num_heads + h) * head_dim;
@@ -75,7 +82,7 @@ pub(super) fn varlen_attention_bwd_cpu(
                 }
 
                 for ki in 0..seq_len_k {
-                    if causal && key_offset + qi < ki {
+                    if varlen_masked(qi, ki, key_offset, causal, window) {
                         continue;
                     }
                     // K/V row stride uses num_kv_heads (GQA layout)
@@ -123,6 +130,81 @@ mod tests {
     use super::*;
     use crate::ops::traits::VarLenAttentionOps;
     use crate::test_utils::cpu_setup;
+
+    use super::super::test_support::*;
+
+    fn run_bwd(p: &Packed, causal: bool, window: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let (client, dev) = cpu_setup();
+        let (tq, tk) = (
+            p.q.len() / (HEADS * HEAD_DIM),
+            p.k.len() / (KV_HEADS * HEAD_DIM),
+        );
+        let cq = Tensor::<CpuRuntime>::from_slice(&p.cu_q, &[p.cu_q.len()], &dev).unwrap();
+        let ck = Tensor::<CpuRuntime>::from_slice(&p.cu_k, &[p.cu_k.len()], &dev).unwrap();
+        let (q, k, v) = (
+            tensor(&p.q, tq, HEADS, &dev),
+            tensor(&p.k, tk, KV_HEADS, &dev),
+            tensor(&p.v, tk, KV_HEADS, &dev),
+        );
+        let dout = tensor(&p.dout, tq, HEADS, &dev);
+        let batch = p.cu_q.len() - 1;
+        let (out, lse) = client
+            .varlen_attention_fwd(
+                &q, &k, &v, &cq, &ck, batch, HEADS, KV_HEADS, 8, 8, HEAD_DIM, causal, window,
+            )
+            .unwrap();
+        let (dq, dk, dv) = client
+            .varlen_attention_bwd(
+                &dout, &q, &k, &v, &out, &lse, &cq, &ck, &p.cu_q, &p.cu_k, batch, HEADS, KV_HEADS,
+                8, 8, HEAD_DIM, causal, window,
+            )
+            .unwrap();
+        (dq.to_vec::<f32>(), dk.to_vec::<f32>(), dv.to_vec::<f32>())
+    }
+
+    #[test]
+    fn fully_masked_rows_add_no_gradient_and_no_nan() {
+        // 5 queries over 2 keys, window 1: rows 2..5 keep no key.
+        let p = packed(&[(5, 2)]);
+        for causal in [false, true] {
+            let (dq, dk, dv) = run_bwd(&p, causal, 1);
+            for g in dq.iter().chain(&dk).chain(&dv) {
+                assert!(g.is_finite(), "causal={causal}: non-finite gradient {g}");
+            }
+            for i in 2..5 {
+                let base = i * HEADS * HEAD_DIM;
+                assert!(dq[base..base + HEADS * HEAD_DIM].iter().all(|&x| x == 0.0));
+            }
+        }
+    }
+
+    #[test]
+    fn window_gradients_ignore_keys_outside_the_window() {
+        // Causal, 6 queries over 6 keys, window 2: row 5 keeps keys 4 and 5 only.
+        let p = packed(&[(6, 6)]);
+        let (_, dk_win, _) = run_bwd(&p, true, 2);
+        let (_, dk_full, _) = run_bwd(&p, true, 0);
+        assert_ne!(dk_win, dk_full);
+        // Only row 5 reads key 5, and the window keeps it for that row.
+        let last = 5 * KV_HEADS * HEAD_DIM;
+        assert!(dk_win[last..].iter().any(|&x| x != 0.0));
+    }
+
+    #[test]
+    fn window_at_least_max_seqlen_is_bitwise_equal_to_no_window() {
+        for shape in SHAPES {
+            let p = packed(shape);
+            let max_seq = shape.iter().map(|s| s.0.max(s.1)).max().unwrap();
+            for causal in [true, false] {
+                let base = run_bwd(&p, causal, 0);
+                assert_eq!(
+                    run_bwd(&p, causal, max_seq),
+                    base,
+                    "{shape:?} causal={causal}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_varlen_bwd_shapes() {

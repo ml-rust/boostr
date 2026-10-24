@@ -6,8 +6,8 @@
 /// bottom-right corner. The causal rule masks `j > key_offset + i`. The window
 /// rule masks `j + window <= key_offset + i`. `window == 0` turns the window
 /// off. With `causal == false` the window still anchors at `key_offset + i`.
+/// The saturating sum keeps a huge `window` from overflowing.
 #[inline]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn varlen_masked(
     i: usize,
     j: usize,
@@ -15,7 +15,7 @@ pub(crate) fn varlen_masked(
     causal: bool,
     window: usize,
 ) -> bool {
-    (causal && j > key_offset + i) || (window > 0 && j + window <= key_offset + i)
+    (causal && j > key_offset + i) || (window > 0 && j.saturating_add(window) <= key_offset + i)
 }
 
 #[cfg(test)]
@@ -72,6 +72,12 @@ mod tests {
     }
 
     #[test]
+    fn huge_window_masks_nothing_and_does_not_overflow() {
+        assert!(!varlen_masked(5, 0, 0, false, usize::MAX));
+        assert!(!varlen_masked(5, 0, 0, true, usize::MAX));
+    }
+
+    #[test]
     fn unequal_lengths_shift_the_anchor() {
         // seq_len_q = 2, seq_len_k = 5: key_offset = 3.
         // Query 0 anchors at key 3. Causal keeps 0..=3. Window 2 keeps 2..=3.
@@ -88,7 +94,7 @@ mod tests {
 
     #[test]
     fn non_causal_window_keeps_keys_right_of_anchor() {
-        // Query 1, offset 3, window 2: anchor key 4. Keys 3 and 4 stay, no key is above 4.
+        // Query 1, offset 3, window 2: anchor key 4. Keys 3 and above stay.
         let kept: Vec<usize> = (0..7)
             .filter(|&j| !varlen_masked(1, j, 3, false, 2))
             .collect();

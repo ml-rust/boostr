@@ -1,11 +1,15 @@
 //! Forward kernel: per-sequence softmax attention over the packed buffer,
 //! returning the output and the per-row log-sum-exp.
 
+use super::mask::varlen_masked;
 use crate::error::Result;
 use numr::runtime::cpu::CpuRuntime;
 use numr::tensor::Tensor;
 
 /// Inputs are contiguous F32. `cu_q` and `cu_k` are checked host offsets.
+///
+/// A row with no unmasked key (empty segment, or a window past the keys) outputs zeros
+/// with `lse = -inf`. The backward pass skips such rows, so their gradients are zero.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn varlen_attention_fwd_cpu(
     q: &Tensor<CpuRuntime>,
@@ -17,6 +21,7 @@ pub(super) fn varlen_attention_fwd_cpu(
     num_kv_heads: usize,
     head_dim: usize,
     causal: bool,
+    window: usize,
 ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
     // GQA ratio: each kv head serves (num_heads / num_kv_heads) query heads.
     // For MHA num_kv_heads == num_heads so the ratio is 1 and the mapping is
@@ -43,7 +48,7 @@ pub(super) fn varlen_attention_fwd_cpu(
         let sk_end = cu_k[b + 1] as usize;
         let seq_len_q = sq_end - sq_start;
         let seq_len_k = sk_end - sk_start;
-        // Bottom-right (ABSOLUTE) causal alignment, per sequence: this
+        // Bottom-right (ABSOLUTE) alignment for the causal and window rules, per sequence: this
         // sequence's `seq_len_q` query rows are the LAST positions of its
         // `seq_len_k` keys, so row `qi` sits at absolute position
         // `key_offset + qi`. A full prefill (`seq_len_q == seq_len_k`) gives
@@ -62,7 +67,7 @@ pub(super) fn varlen_attention_fwd_cpu(
                 let mut scores = Vec::with_capacity(seq_len_k);
 
                 for ki in 0..seq_len_k {
-                    if causal && key_offset + qi < ki {
+                    if varlen_masked(qi, ki, key_offset, causal, window) {
                         scores.push(f32::NEG_INFINITY);
                         continue;
                     }
@@ -75,6 +80,12 @@ pub(super) fn varlen_attention_fwd_cpu(
                     let s = dot * scale;
                     max_score = max_score.max(s);
                     scores.push(s);
+                }
+
+                let lse_idx = (sq_start + qi) * num_heads + h;
+                if max_score == f32::NEG_INFINITY {
+                    lse[lse_idx] = f32::NEG_INFINITY;
+                    continue;
                 }
 
                 let mut sum_exp = 0.0f32;
@@ -95,7 +106,7 @@ pub(super) fn varlen_attention_fwd_cpu(
                     }
                 }
 
-                lse[(sq_start + qi) * num_heads + h] = max_score + sum_exp.ln();
+                lse[lse_idx] = max_score + sum_exp.ln();
             }
         }
     }
@@ -111,6 +122,102 @@ mod tests {
     use super::*;
     use crate::ops::traits::VarLenAttentionOps;
     use crate::test_utils::cpu_setup;
+
+    use super::super::test_support::*;
+
+    fn run_fwd(p: &Packed, causal: bool, window: usize) -> (Vec<f32>, Vec<f32>) {
+        let (client, dev) = cpu_setup();
+        let (tq, tk) = (
+            p.q.len() / (HEADS * HEAD_DIM),
+            p.k.len() / (KV_HEADS * HEAD_DIM),
+        );
+        let cq = Tensor::<CpuRuntime>::from_slice(&p.cu_q, &[p.cu_q.len()], &dev).unwrap();
+        let ck = Tensor::<CpuRuntime>::from_slice(&p.cu_k, &[p.cu_k.len()], &dev).unwrap();
+        let (out, lse) = client
+            .varlen_attention_fwd(
+                &tensor(&p.q, tq, HEADS, &dev),
+                &tensor(&p.k, tk, KV_HEADS, &dev),
+                &tensor(&p.v, tk, KV_HEADS, &dev),
+                &cq,
+                &ck,
+                p.cu_q.len() - 1,
+                HEADS,
+                KV_HEADS,
+                8,
+                8,
+                HEAD_DIM,
+                causal,
+                window,
+            )
+            .unwrap();
+        (out.to_vec::<f32>(), lse.to_vec::<f32>())
+    }
+
+    #[test]
+    fn window_matches_naive_reference() {
+        for shape in SHAPES {
+            let p = packed(shape);
+            for causal in [true, false] {
+                for window in [0, 1, 3, 4, 100] {
+                    let (out, lse) = run_fwd(&p, causal, window);
+                    let (want, want_lse) = naive_fwd(&p, causal, window);
+                    for (i, (g, w)) in out.iter().zip(&want).enumerate() {
+                        assert!(
+                            (g - w).abs() <= 1e-5,
+                            "{shape:?} causal={causal} window={window} out[{i}]: {g} vs {w}"
+                        );
+                    }
+                    for (i, (g, w)) in lse.iter().zip(&want_lse).enumerate() {
+                        assert!(
+                            g == w || (g - w).abs() <= 1e-5,
+                            "{shape:?} causal={causal} window={window} lse[{i}]: {g} vs {w}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fully_masked_row_gives_zeros_and_neg_inf_lse() {
+        // 5 queries over 2 keys, non-causal window 1: rows 2..5 keep no key.
+        let p = packed(&[(5, 2)]);
+        for causal in [false, true] {
+            let (out, lse) = run_fwd(&p, causal, 1);
+            assert!(
+                out.iter().all(|x| x.is_finite()),
+                "causal={causal}: NaN or inf in out"
+            );
+            for i in 2..5 {
+                for h in 0..HEADS {
+                    assert_eq!(lse[i * HEADS + h], f32::NEG_INFINITY);
+                    let base = (i * HEADS + h) * HEAD_DIM;
+                    assert!(out[base..base + HEAD_DIM].iter().all(|&x| x == 0.0));
+                }
+            }
+            for h in 0..HEADS {
+                assert!(lse[h].is_finite() && lse[HEADS + h].is_finite());
+            }
+        }
+    }
+
+    #[test]
+    fn window_at_least_max_seqlen_is_bitwise_equal_to_no_window() {
+        for shape in SHAPES {
+            let p = packed(shape);
+            let max_seq = shape.iter().map(|s| s.0.max(s.1)).max().unwrap();
+            for causal in [true, false] {
+                let base = run_fwd(&p, causal, 0);
+                for window in [max_seq, max_seq + 3] {
+                    assert_eq!(
+                        run_fwd(&p, causal, window),
+                        base,
+                        "{shape:?} causal={causal} window={window}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_varlen_fwd_shape() {

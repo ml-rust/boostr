@@ -15,6 +15,7 @@ use super::flash::impl_ops::set_smem_attribute;
 use super::varlen_attention_block_config::{
     block_config_with_override, bwd_smem_size, validate_head_dim,
 };
+use super::varlen_attention_fwd::window_size_arg;
 use crate::ops::cuda::kernels::{
     self, VARLEN_ATTENTION_BWD_HALF_MODULE, VARLEN_ATTENTION_BWD_MODULE,
 };
@@ -146,15 +147,6 @@ fn varlen_attention_bwd_impl_inner(
     Tensor<CudaRuntime>,
     Tensor<CudaRuntime>,
 )> {
-    if window_size != 0 {
-        return Err(Error::InvalidArgument {
-            arg: "window_size",
-            reason: format!(
-                "varlen_attention_bwd (CUDA): varlen attention does not implement a window yet; \
-                 pass 0, got {window_size}"
-            ),
-        });
-    }
     validate_head_dim(head_dim, "varlen attention bwd")?;
 
     let dtype = q.dtype();
@@ -243,6 +235,8 @@ fn varlen_attention_bwd_impl_inner(
     let msq_i32 = max_seqlen_q as i32;
     let msk_i32 = max_seqlen_k as i32;
     let causal_i32 = if causal { 1i32 } else { 0i32 };
+    // Same value the forward passes, so both mask the same keys.
+    let window_i32 = window_size_arg(window_size);
 
     unsafe {
         let mut builder = client.stream().launch_builder(&func);
@@ -264,6 +258,7 @@ fn varlen_attention_bwd_impl_inner(
         builder.arg(&msk_i32);
         builder.arg(&scale);
         builder.arg(&causal_i32);
+        builder.arg(&window_i32);
         builder.launch(cfg).map_err(|e| Error::KernelError {
             reason: format!(
                 "varlen attention bwd: launch of `{kernel_name}` failed ({e:?}); \

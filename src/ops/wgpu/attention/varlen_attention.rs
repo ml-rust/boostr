@@ -70,7 +70,20 @@ struct VarlenParams {
     batch_size: u32,
     causal: u32,
     scale: f32,
-    _pad: u32,
+    window: u32,
+}
+
+/// Number of leading query rows of a segment that keep at least one key.
+///
+/// With `s_q > s_k` the anchor is `key_offset = 0`. Row `i` keeps keys
+/// `max(0, i - window + 1) ..= s_k - 1` (non-causal) or up to `min(i, s_k - 1)` (causal).
+/// Both are empty exactly when `i >= s_k + window - 1`. Every other case keeps all rows.
+fn live_query_rows(s_q: usize, s_k: usize, window_size: usize) -> usize {
+    if window_size > 0 && s_q > s_k {
+        s_q.min(s_k.saturating_add(window_size - 1))
+    } else {
+        s_q
+    }
 }
 
 fn validate_f32(t: &Tensor<WgpuRuntime>, op: &str) -> Result<()> {
@@ -100,15 +113,6 @@ impl VarLenAttentionOps<WgpuRuntime> for WgpuClient {
         causal: bool,
         window_size: usize,
     ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
-        if window_size != 0 {
-            return Err(Error::InvalidArgument {
-                arg: "window_size",
-                reason: format!(
-                    "varlen_attention_fwd (WebGPU): varlen attention does not implement a \
-                     window yet; pass 0, got {window_size}"
-                ),
-            });
-        }
         // WebGPU WGSL shader implements MHA only.  GQA requires non-trivial shader
         // changes; guard until a shader update is provided.
         if num_kv_heads != num_heads {
@@ -166,7 +170,8 @@ impl VarLenAttentionOps<WgpuRuntime> for WgpuClient {
             batch_size: batch_size as u32,
             causal: if causal { 1 } else { 0 },
             scale: 1.0f32 / (head_dim as f32).sqrt(),
-            _pad: 0,
+            // Positions are below 2^32, so a larger window masks nothing.
+            window: u32::try_from(window_size).unwrap_or(u32::MAX),
         };
 
         let params_buf = self.wgpu_device().create_buffer(&wgpu::BufferDescriptor {
@@ -253,15 +258,6 @@ impl VarLenAttentionOps<WgpuRuntime> for WgpuClient {
         Tensor<WgpuRuntime>,
         Tensor<WgpuRuntime>,
     )> {
-        if window_size != 0 {
-            return Err(Error::InvalidArgument {
-                arg: "window_size",
-                reason: format!(
-                    "varlen_attention_bwd (WebGPU): varlen attention does not implement a \
-                     window yet; pass 0, got {window_size}"
-                ),
-            });
-        }
         validate_f32(dout, "varlen_attention_bwd")?;
         validate_f32(q, "varlen_attention_bwd")?;
         validate_f32(k, "varlen_attention_bwd")?;
@@ -304,22 +300,35 @@ impl VarLenAttentionOps<WgpuRuntime> for WgpuClient {
                 continue;
             }
 
-            let q_seq = pack_seq(&q.narrow(0, sq_start, s_q)?, num_heads, s_q, d)?;
+            // Rows past `rows` have no unmasked key (window with s_q > s_k). The dense
+            // softmax would turn them into NaN, so they are cut and get zero dQ.
+            let rows = live_query_rows(s_q, s_k, window_size);
+            let q_seq = pack_seq(&q.narrow(0, sq_start, rows)?, num_heads, rows, d)?;
             let k_seq = pack_seq(&k.narrow(0, sk_start, s_k)?, num_kv_heads, s_k, d)?;
             let v_seq = pack_seq(&v.narrow(0, sk_start, s_k)?, num_kv_heads, s_k, d)?;
-            let o_seq = pack_seq(&output.narrow(0, sq_start, s_q)?, num_heads, s_q, d)?;
-            let do_seq = pack_seq(&dout.narrow(0, sq_start, s_q)?, num_heads, s_q, d)?;
+            let o_seq = pack_seq(&output.narrow(0, sq_start, rows)?, num_heads, rows, d)?;
+            let do_seq = pack_seq(&dout.narrow(0, sq_start, rows)?, num_heads, rows, d)?;
 
+            // `standard_attention_bwd` anchors at `key_offset = max(0, s_k - rows)` like
+            // the varlen rule. `rows < s_q` only when `s_q > s_k`, where both offsets are 0.
             let cfg = StandardAttnConfig {
                 num_heads,
                 num_kv_heads,
                 causal,
-                window_size: 0,
+                window_size,
             };
             let (dq_s, dk_s, dv_s) =
                 standard_attention_bwd(self, &do_seq, &q_seq, &k_seq, &v_seq, &o_seq, cfg)?;
 
-            dq_parts.push(unpack_seq(&dq_s, num_heads, s_q, d)?);
+            dq_parts.push(unpack_seq(&dq_s, num_heads, rows, d)?);
+            if rows < s_q {
+                let pad_shape = [s_q - rows, num_heads, d];
+                dq_parts.push(Tensor::<WgpuRuntime>::zeros(
+                    &pad_shape,
+                    DType::F32,
+                    q.device(),
+                )?);
+            }
             dk_parts.push(unpack_seq(&dk_s, num_kv_heads, s_k, d)?);
             dv_parts.push(unpack_seq(&dv_s, num_kv_heads, s_k, d)?);
         }
@@ -329,5 +338,21 @@ impl VarLenAttentionOps<WgpuRuntime> for WgpuClient {
         let dk = cat_token_parts(self, &dk_parts, k.shape(), device)?;
         let dv = cat_token_parts(self, &dv_parts, v.shape(), device)?;
         Ok((dq, dk, dv))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::live_query_rows;
+
+    #[test]
+    fn live_rows_cut_only_when_window_and_more_queries_than_keys() {
+        assert_eq!(live_query_rows(6, 2, 0), 6);
+        assert_eq!(live_query_rows(2, 6, 1), 2);
+        assert_eq!(live_query_rows(4, 4, 1), 4);
+        assert_eq!(live_query_rows(6, 2, 1), 2);
+        assert_eq!(live_query_rows(6, 2, 3), 4);
+        assert_eq!(live_query_rows(6, 2, 100), 6);
+        assert_eq!(live_query_rows(6, 2, usize::MAX), 6);
     }
 }

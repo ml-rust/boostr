@@ -92,19 +92,6 @@ pub(super) fn packed_shape(
     Ok(shape[0])
 }
 
-/// Refuse a non-zero sliding window until the CPU kernels implement it.
-pub(super) fn reject_window(op: &'static str, window_size: usize) -> Result<()> {
-    if window_size != 0 {
-        return Err(Error::InvalidArgument {
-            arg: "window_size",
-            reason: format!(
-                "{op} (CPU): varlen attention does not implement a window yet; pass 0, got {window_size}"
-            ),
-        });
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,13 +107,6 @@ mod tests {
         let e = float_dtype("op", &[("q", &b), ("k", &a)]).err().unwrap();
         assert!(e.to_string().contains("share one dtype"), "{e}");
         assert_eq!(float_dtype("op", &[("q", &b)]).unwrap(), DType::F32);
-    }
-
-    #[test]
-    fn reject_window_accepts_zero_only() {
-        assert!(reject_window("op", 0).is_ok());
-        let e = reject_window("op", 4).err().unwrap();
-        assert!(e.to_string().contains("window_size"), "{e}");
     }
 
     #[test]

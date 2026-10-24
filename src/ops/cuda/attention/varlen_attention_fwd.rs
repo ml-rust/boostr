@@ -116,15 +116,6 @@ fn varlen_attention_fwd_impl_inner(
     window_size: usize,
     force_large: Option<bool>,
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
-    if window_size != 0 {
-        return Err(Error::InvalidArgument {
-            arg: "window_size",
-            reason: format!(
-                "varlen_attention_fwd (CUDA): varlen attention does not implement a window yet; \
-                 pass 0, got {window_size}"
-            ),
-        });
-    }
     validate_head_dim(head_dim, "varlen attention")?;
 
     let dtype = q.dtype();
@@ -200,6 +191,7 @@ fn varlen_attention_fwd_impl_inner(
     let msq_i32 = max_seqlen_q as i32;
     let msk_i32 = max_seqlen_k as i32;
     let causal_i32 = if causal { 1i32 } else { 0i32 };
+    let window_i32 = window_size_arg(window_size);
 
     unsafe {
         let mut builder = client.stream().launch_builder(&func);
@@ -217,6 +209,7 @@ fn varlen_attention_fwd_impl_inner(
         builder.arg(&msk_i32);
         builder.arg(&scale);
         builder.arg(&causal_i32);
+        builder.arg(&window_i32);
         builder.launch(cfg).map_err(|e| Error::KernelError {
             reason: format!("varlen attention fwd launch failed: {e:?}"),
         })?;
@@ -225,4 +218,11 @@ fn varlen_attention_fwd_impl_inner(
     // No sync needed: same-stream ordering guarantees correctness.
 
     Ok((output, lse))
+}
+
+/// `window_size` as the kernels' `int` argument. A window of `i32::MAX` or
+/// more masks no key, since every position fits in `i32`. Clamping keeps that
+/// meaning. `0` stays `0`, the no-window value.
+pub(super) fn window_size_arg(window_size: usize) -> i32 {
+    i32::try_from(window_size).unwrap_or(i32::MAX)
 }

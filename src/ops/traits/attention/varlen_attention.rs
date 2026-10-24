@@ -41,6 +41,9 @@ use numr::tensor::Tensor;
 /// `key_offset = max(0, seq_len_k - seq_len_q)`. This is the same bottom-right
 /// convention as the causal rule and as `FlashAttentionOps`. With
 /// `causal = false` the window still anchors at `key_offset + i`.
+///
+/// A query row with no unmasked key (an empty key segment, or `seq_len_q > seq_len_k`
+/// with a window) outputs zeros with `lse = -inf` and adds no gradient.
 #[allow(clippy::too_many_arguments)]
 pub trait VarLenAttentionOps<R: Runtime> {
     /// Variable-length attention forward pass

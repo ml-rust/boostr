@@ -15,12 +15,18 @@
 // A full prefill (seq_len_q == seq_len_k) gives key_offset == 0. Same
 // convention as `ops/impl_generic/attention/flash_standard.rs::build_attention_mask`
 // and `kernels/attention/flash_v2.cu`.
+//
+// Sliding window: `window_size > 0` also masks key ki when
+// ki + window_size <= key_offset + r. Both phases call the predicate in
+// `varlen_mask.cuh`, the one the forward calls. A row with no visible key has
+// LSE = -inf. Every key is masked for it, so its gradients stay zero.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <stdint.h>
 #include "dtype_traits.cuh"
+#include "varlen_mask.cuh"
 
 // ============================================================================
 // VarLen Attention Backward - half-precision inputs, full GQA
@@ -58,7 +64,8 @@ __device__ void varlen_flash_attention_bwd_half_impl(
     const int max_seqlen_q,
     const int max_seqlen_k,
     const float scale,
-    const int causal
+    const int causal,
+    const int window_size         // 0 = no window; see varlen_mask.cuh
 ) {
     constexpr int HEAD_STRIDE = HEAD_DIM + 1;
 
@@ -154,9 +161,13 @@ __device__ void varlen_flash_attention_bwd_half_impl(
     }
     __syncthreads();
 
-    const int num_k_blocks = (seq_len_k + BLOCK_N - 1) / BLOCK_N;
+    // Iterate over the K/V tiles that hold a key visible to this Q block.
+    // Same range and predicate as the forward, so P matches the forward LSE.
+    int first_k_block, end_k_block;
+    varlen_k_tile_range(key_offset + q_start, key_offset + q_end - 1, seq_len_k,
+                        BLOCK_N, causal, window_size, &first_k_block, &end_k_block);
 
-    for (int k_block = 0; k_block < num_k_blocks; ++k_block) {
+    for (int k_block = first_k_block; k_block < end_k_block; ++k_block) {
         const int k_start     = k_block * BLOCK_N;
         const int k_end       = min(k_start + BLOCK_N, seq_len_k);
         const int k_tile_size = k_end - k_start;
@@ -177,7 +188,8 @@ __device__ void varlen_flash_attention_bwd_half_impl(
             const float D   = D_smem[q_row];
 
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
+                if (varlen_masked(key_offset + q_start + q_row, k_start + j,
+                                  causal, window_size)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -222,7 +234,7 @@ __device__ void varlen_flash_attention_bwd_half_impl(
             }
 
             for (int qr = 0; qr < q_tile_size; ++qr) {
-                if (causal && (key_offset + q_start + qr) < k_idx) continue;
+                if (varlen_masked(key_offset + q_start + qr, k_idx, causal, window_size)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -291,14 +303,15 @@ __device__ void varlen_flash_attention_bwd_half_impl(
         const int* cu_seqlens_q, const int* cu_seqlens_k,                      \
         T* grad_Q, float* grad_K, float* grad_V,                               \
         int batch_size, int num_heads, int num_kv_heads,                       \
-        int max_seqlen_q, int max_seqlen_k, float scale, int causal            \
+        int max_seqlen_q, int max_seqlen_k, float scale, int causal,           \
+        int window_size                                                        \
     ) {                                                                        \
         varlen_flash_attention_bwd_half_impl<T, HD, BM, BN>(                   \
             Q, K, V, O, L, grad_O,                                             \
             cu_seqlens_q, cu_seqlens_k,                                        \
             grad_Q, grad_K, grad_V,                                            \
             batch_size, num_heads, num_kv_heads,                               \
-            max_seqlen_q, max_seqlen_k, scale, causal                          \
+            max_seqlen_q, max_seqlen_k, scale, causal, window_size             \
         );                                                                     \
     }
 

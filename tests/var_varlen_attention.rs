@@ -90,7 +90,13 @@ fn to_packed(dense: &[f32], t: usize, h: usize, d: usize, rep: usize) -> Vec<f32
 }
 
 /// `[1, 1, T, T]` bias: 0 where the query sees the key, `f32::MIN` elsewhere.
-fn block_bias(offsets: &[i32], causal: bool, dev: &CpuDevice) -> TestResult<Tensor<CpuRuntime>> {
+/// Segments have equal q and k lengths, so the window rule is `j + window > i`.
+fn block_bias(
+    offsets: &[i32],
+    causal: bool,
+    window: usize,
+    dev: &CpuDevice,
+) -> TestResult<Tensor<CpuRuntime>> {
     let t = *offsets.last().ok_or("empty offsets")? as usize;
     let seg = |tok: usize| {
         offsets
@@ -100,7 +106,8 @@ fn block_bias(offsets: &[i32], causal: bool, dev: &CpuDevice) -> TestResult<Tens
     let mut bias = vec![f32::MIN; t * t];
     for i in 0..t {
         for j in 0..t {
-            if seg(i) == seg(j) && (!causal || j <= i) {
+            let in_window = window == 0 || j + window > i;
+            if seg(i) == seg(j) && (!causal || j <= i) && in_window {
                 bias[i * t + j] = 0.0;
             }
         }
@@ -121,6 +128,7 @@ struct Case {
     kv_heads: usize,
     head_dim: usize,
     causal: bool,
+    window: usize,
 }
 
 impl Case {
@@ -148,7 +156,16 @@ impl Case {
         );
         let segs = PackedSegments::<CpuRuntime>::from_offsets(&self.offsets, t, &dev)?;
         let scale = 1.0 / (d as f64).sqrt();
-        let out = var_varlen_attention(&client, &qv, &kv, &vv, &segs, scale, self.causal, 0)?;
+        let out = var_varlen_attention(
+            &client,
+            &qv,
+            &kv,
+            &vv,
+            &segs,
+            scale,
+            self.causal,
+            self.window,
+        )?;
         let loss = var_sum(&var_mul(&out, &wv, &client)?, &[0, 1, 2], false, &client)?;
         let grads = backward(&loss, &client)?;
         Ok(Grads {
@@ -172,7 +189,7 @@ impl Case {
             Tensor::<CpuRuntime>::from_slice(&wd, &[1, h, t, d], &dev)?,
             false,
         );
-        let bias = block_bias(&self.offsets, self.causal, &dev)?;
+        let bias = block_bias(&self.offsets, self.causal, self.window, &dev)?;
         let out =
             var_attention_with_bias(&client, &qv, &kv, &vv, &bias, AttentionCausality::InBias, h)?;
         let loss = var_sum(&var_mul(&out, &wv, &client)?, &[0, 1, 2, 3], false, &client)?;
@@ -206,6 +223,7 @@ fn causal_mha_matches_block_diagonal_reference() -> TestResult {
         kv_heads: 2,
         head_dim: 8,
         causal: true,
+        window: 0,
     }
     .check_against_reference("causal mha")
 }
@@ -218,6 +236,7 @@ fn causal_gqa_matches_block_diagonal_reference() -> TestResult {
         kv_heads: 2,
         head_dim: 8,
         causal: true,
+        window: 0,
     }
     .check_against_reference("causal gqa")
 }
@@ -230,6 +249,7 @@ fn non_causal_matches_block_diagonal_reference() -> TestResult {
         kv_heads: 1,
         head_dim: 8,
         causal: false,
+        window: 0,
     }
     .check_against_reference("non-causal mqa")
 }
@@ -244,6 +264,7 @@ fn single_segment_equals_plain_causal_attention() -> TestResult {
         kv_heads: 2,
         head_dim: 8,
         causal: true,
+        window: 0,
     };
     let (q, k, v, w) = case.inputs();
     let got = case.run_varlen(&q, &k, &v, &w)?;
@@ -272,6 +293,7 @@ fn perturbing_one_segment_leaves_the_other_bitwise_unchanged() -> TestResult {
             kv_heads: 2,
             head_dim: 8,
             causal,
+            window: 0,
         };
         let (q, k, v, w) = case.inputs();
         let base = case.run_varlen(&q, &k, &v, &w)?;
@@ -351,6 +373,7 @@ mod half_precision {
             kv_heads: 2,
             head_dim: 8,
             causal: true,
+            window: 0,
         };
         let (t, h, hkv, d) = (case.tokens(), case.heads, case.kv_heads, case.head_dim);
         let (q, k, v, _) = case.inputs();
@@ -405,4 +428,106 @@ mod half_precision {
     fn bf16_matches_f32_on_rounded_inputs() -> TestResult {
         run(DType::BF16, 2.0f32.powi(-8))
     }
+}
+
+fn windowed(offsets: Vec<i32>, heads: usize, kv_heads: usize, causal: bool, window: usize) -> Case {
+    Case {
+        offsets,
+        heads,
+        kv_heads,
+        head_dim: 8,
+        causal,
+        window,
+    }
+}
+
+#[test]
+fn causal_window_matches_block_diagonal_reference() -> TestResult {
+    for window in [1, 3, 5] {
+        windowed(vec![0, 6, 9, 15], 4, 2, true, window)
+            .check_against_reference(&format!("causal window {window}"))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn non_causal_window_matches_block_diagonal_reference() -> TestResult {
+    for window in [1, 2, 4] {
+        windowed(vec![0, 5, 11], 2, 2, false, window)
+            .check_against_reference(&format!("non-causal window {window}"))?;
+    }
+    Ok(())
+}
+
+/// A window of at least the longest segment masks nothing, so the output and
+/// the gradients equal the `window = 0` run bit for bit.
+#[test]
+fn window_at_least_max_seqlen_equals_no_window_bitwise() -> TestResult {
+    for causal in [true, false] {
+        let base = windowed(vec![0, 4, 9], 4, 2, causal, 0);
+        let (q, k, v, w) = base.inputs();
+        let want = base.run_varlen(&q, &k, &v, &w)?;
+        for window in [5, 6, 100] {
+            let got = windowed(vec![0, 4, 9], 4, 2, causal, window).run_varlen(&q, &k, &v, &w)?;
+            assert_eq!(got.out, want.out, "causal={causal} window={window}: out");
+            assert_eq!(got.dq, want.dq, "causal={causal} window={window}: dQ");
+            assert_eq!(got.dk, want.dk, "causal={causal} window={window}: dK");
+            assert_eq!(got.dv, want.dv, "causal={causal} window={window}: dV");
+        }
+    }
+    Ok(())
+}
+
+/// Central finite differences of `sum(out * w)` against the autograd gradients.
+/// The loss sums in f64 so rounding stays far below the step error.
+#[test]
+fn window_gradients_match_finite_differences() -> TestResult {
+    const EPS: f32 = 1e-2;
+    const TOL: f64 = 3e-3;
+    for (causal, window) in [(true, 2), (false, 2), (true, 3)] {
+        let case = Case {
+            offsets: vec![0, 4, 9],
+            heads: 2,
+            kv_heads: 1,
+            head_dim: 4,
+            causal,
+            window,
+        };
+        let (q, k, v, w) = case.inputs();
+        let loss = |q: &[f32], k: &[f32], v: &[f32]| -> TestResult<f64> {
+            let out = case.run_varlen(q, k, v, &w)?.out;
+            Ok(out
+                .iter()
+                .zip(&w)
+                .map(|(&o, &x)| f64::from(o) * f64::from(x))
+                .sum())
+        };
+        let analytic = case.run_varlen(&q, &k, &v, &w)?;
+        let numeric = |which: usize| -> TestResult<Vec<f64>> {
+            let base = [&q, &k, &v][which];
+            let mut grads = Vec::with_capacity(base.len());
+            for i in 0..base.len() {
+                let mut args = [q.clone(), k.clone(), v.clone()];
+                args[which][i] += EPS;
+                let hi = loss(&args[0], &args[1], &args[2])?;
+                args[which][i] -= 2.0 * EPS;
+                let lo = loss(&args[0], &args[1], &args[2])?;
+                grads.push((hi - lo) / (2.0 * f64::from(EPS)));
+            }
+            Ok(grads)
+        };
+        for (which, name, got) in [
+            (0, "dQ", &analytic.dq),
+            (1, "dK", &analytic.dk),
+            (2, "dV", &analytic.dv),
+        ] {
+            for (i, (&g, n)) in got.iter().zip(numeric(which)?).enumerate() {
+                assert!(
+                    (f64::from(g) - n).abs() <= TOL,
+                    "causal={causal} window={window} {name}[{i}]: autograd {g}, finite difference {n}"
+                );
+            }
+        }
+    }
+    Ok(())
 }

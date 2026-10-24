@@ -3,8 +3,8 @@
 //! Operates on `[total_tokens, hidden]` packed input using
 //! `VarLenAttentionOps::varlen_attention_fwd` and packed RoPE.
 //!
-//! The varlen kernel supports full and causal attention but not a bounded
-//! attention span, so a windowed block cannot be evaluated here. Callers must
+//! The encoder span is symmetric. The varlen window is one-sided, so a windowed
+//! block cannot be evaluated here. Callers must
 //! first clear
 //! [`ensure_varlen_span_is_unconstrained`](super::attention_mask::ensure_varlen_span_is_unconstrained),
 //! which errors rather than letting a windowed model return unwindowed results.

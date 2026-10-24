@@ -56,7 +56,10 @@ fn check_row_starts<R: Runtime>(
 /// Returns the token-major `[B, S, H, D]` output, ready for the token-major epilogue.
 ///
 /// The scale is `1 / sqrt(D)`, the same as the unsegmented flash path.
-/// A sliding window returns an error: varlen attention has no window.
+/// `spec.sliding_window` is the kernel's `window_size`: query `i` of a segment keeps
+/// the `sliding_window` newest keys of that segment, itself included. Segments have
+/// equal query and key lengths, so the kernel's key offset is 0 and each document
+/// behaves as if run alone with the same window. `0` turns the window off.
 pub(super) fn segmented_flash_attention<R>(
     q: &Var<R>,
     k: &Var<R>,
@@ -68,16 +71,6 @@ where
     R: Runtime,
     R::Client: ScalarOps<R> + VarLenAttentionOps<R>,
 {
-    if spec.sliding_window != 0 {
-        return Err(Error::InvalidArgument {
-            arg: "spec.sliding_window",
-            reason: format!(
-                "attention_core_flash: sliding_window {} cannot run with segments, varlen \
-                 attention has no window; set spec.sliding_window to 0 or pass segments None",
-                spec.sliding_window
-            ),
-        });
-    }
     let (batch, seq_q, seq_k) = (q.shape()[0], q.shape()[2], k.shape()[2]);
     if seq_q != seq_k {
         return Err(Error::InvalidArgument {
@@ -96,7 +89,14 @@ where
     let client = R::default_client(q.tensor().device());
     let scale = (spec.head_dim as f64).sqrt().recip();
     let out = var_varlen_attention(
-        &client, &q_packed, &k_packed, &v_packed, segments, scale, true, 0,
+        &client,
+        &q_packed,
+        &k_packed,
+        &v_packed,
+        segments,
+        scale,
+        true,
+        spec.sliding_window,
     )?;
     var_reshape(&out, &[batch, seq_q, spec.num_heads, spec.head_dim]).map_err(Error::Numr)
 }

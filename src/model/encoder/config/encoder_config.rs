@@ -342,8 +342,8 @@ impl EncoderConfig {
     /// Whether a packed (varlen) forward over sequences of at most `max_seqlen`
     /// tokens needs no span masking at all.
     ///
-    /// The varlen attention kernel has no bounded-span support, so this must
-    /// hold before that path may be used. A symmetric window is provably inert
+    /// The varlen window is one-sided and the encoder span is symmetric, so this
+    /// must hold before that path can be used. A symmetric window is provably inert
     /// while the furthest pair in a sequence — `max_seqlen - 1` apart — is still
     /// within the half-width.
     pub fn varlen_span_is_unconstrained(&self, max_seqlen: usize) -> bool {

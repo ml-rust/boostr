@@ -222,8 +222,9 @@ impl<R: Runtime<DType = DType>> SpanMasks<R> {
 
 /// Reject a packed (varlen) forward whose sliding window would actually bind.
 ///
-/// The varlen attention kernel supports full and causal attention but not a
-/// bounded span, so a windowed block cannot be evaluated correctly there. The
+/// The encoder span is a symmetric band: a key is kept when `|i - j|` is at most
+/// the half-width. The varlen kernel window is one-sided: it drops only keys older
+/// than the window. The two rules differ, so a windowed block cannot run there. The
 /// window is provably inert while every sequence is shorter than the
 /// half-width, which is the regime the packed path is used in; beyond that the
 /// caller must use the padded path, which does apply the mask.
@@ -256,8 +257,9 @@ pub(in crate::model::encoder) fn ensure_varlen_span_is_unconstrained(
     Err(Error::ModelError {
         reason: format!(
             "sequence of {max_seqlen} tokens exceeds the sliding-window half-width of \
-             {} for this model's local attention blocks, which the packed (varlen) \
-             path cannot mask. Use the padded path for inputs this long.",
+             {} for this model's local attention blocks, which is a \
+             symmetric span; the packed (varlen) window is one-sided and cannot mask it. \
+             Use the padded path for inputs this long.",
             spec.max_distance().unwrap_or(0)
         ),
     })

@@ -186,7 +186,7 @@ fn token_rows(data: &[f32], width: usize, start: usize, len: usize) -> Vec<f32> 
 }
 
 /// Every document run alone, results concatenated in token order.
-fn gqa_separate(x: &Inputs) -> TestResult<Run> {
+fn gqa_separate(x: &Inputs, sliding_window: usize) -> TestResult<Run> {
     let mut all = Run {
         out: Vec::new(),
         dq: Vec::new(),
@@ -201,7 +201,7 @@ fn gqa_separate(x: &Inputs) -> TestResult<Run> {
             v: token_rows(&x.v, H_KV * D, start, len),
             w: token_rows(&x.w, H * D, start, len),
         };
-        let run = run_gqa(&doc, 1, len, None, 0)?;
+        let run = run_gqa(&doc, 1, len, None, sliding_window)?;
         all.out.extend(run.out);
         all.dq.extend(run.dq);
         all.dk.extend(run.dk);
@@ -214,7 +214,7 @@ fn gqa_separate(x: &Inputs) -> TestResult<Run> {
 fn gqa_packed_documents_match_separate_runs() -> TestResult {
     let x = gqa_inputs();
     let packed = run_gqa(&x, B, S, Some(&LENGTHS[..]), 0)?;
-    let separate = gqa_separate(&x)?;
+    let separate = gqa_separate(&x, 0)?;
     assert_close(&packed.out, &separate.out, "gqa out");
     assert_close(&packed.dq, &separate.dq, "gqa dQ");
     assert_close(&packed.dk, &separate.dk, "gqa dK");
@@ -270,13 +270,68 @@ fn gqa_one_document_per_row_matches_unsegmented() -> TestResult {
 }
 
 #[test]
-fn gqa_sliding_window_with_segments_is_rejected() {
+fn gqa_windowed_packed_documents_match_separate_runs() -> TestResult {
     let x = gqa_inputs();
-    let err = match run_gqa(&x, B, S, Some(&LENGTHS[..]), 4) {
-        Ok(_) => panic!("a window with segments must be refused"),
-        Err(e) => e.to_string(),
+    // 2 binds in every document, 4 only in the two longest, 1 keeps the token itself.
+    for window in [1, 2, 4] {
+        let packed = run_gqa(&x, B, S, Some(&LENGTHS[..]), window)?;
+        let separate = gqa_separate(&x, window)?;
+        let what = format!("gqa window {window}");
+        assert_close(&packed.out, &separate.out, &format!("{what} out"));
+        assert_close(&packed.dq, &separate.dq, &format!("{what} dQ"));
+        assert_close(&packed.dk, &separate.dk, &format!("{what} dK"));
+        assert_close(&packed.dv, &separate.dv, &format!("{what} dV"));
+        // A one-key softmax is constant, so dQ and dK are exactly zero at window 1.
+        if window > 1 {
+            assert_nonzero(&packed.dq, &format!("{what} dQ"));
+            assert_nonzero(&packed.dk, &format!("{what} dK"));
+        }
+        assert_nonzero(&packed.dv, &format!("{what} dV"));
+    }
+    Ok(())
+}
+
+#[test]
+fn gqa_window_changes_the_output() -> TestResult {
+    let x = gqa_inputs();
+    let open = run_gqa(&x, B, S, Some(&LENGTHS[..]), 0)?;
+    let windowed = run_gqa(&x, B, S, Some(&LENGTHS[..]), 2)?;
+    assert_ne!(open.out, windowed.out, "window 2 must bind");
+    Ok(())
+}
+
+#[test]
+fn gqa_window_wider_than_every_document_is_bit_identical_to_none() -> TestResult {
+    let x = gqa_inputs();
+    let open = run_gqa(&x, B, S, Some(&LENGTHS[..]), 0)?;
+    let wide = run_gqa(&x, B, S, Some(&LENGTHS[..]), 64)?;
+    assert_eq!(open.out, wide.out, "out");
+    assert_eq!(open.dq, wide.dq, "dQ");
+    assert_eq!(open.dk, wide.dk, "dK");
+    assert_eq!(open.dv, wide.dv, "dV");
+    Ok(())
+}
+
+#[test]
+fn gqa_windowed_perturbing_one_document_leaves_others_bit_identical() -> TestResult {
+    let x = gqa_inputs();
+    let base = run_gqa(&x, B, S, Some(&LENGTHS[..]), 2)?;
+    let doc_a = 3;
+    let shift = |data: &[f32], width: usize| {
+        let mut out = data.to_vec();
+        out[..doc_a * width].iter_mut().for_each(|x| *x += 0.5);
+        out
     };
-    assert!(err.contains("spec.sliding_window"), "{err}");
+    let moved = Inputs {
+        q: shift(&x.q, H * D),
+        k: shift(&x.k, H_KV * D),
+        v: shift(&x.v, H_KV * D),
+        w: x.w.clone(),
+    };
+    let perturbed = run_gqa(&moved, B, S, Some(&LENGTHS[..]), 2)?;
+    let split = doc_a * H * D;
+    assert_eq!(&base.out[split..], &perturbed.out[split..]);
+    Ok(())
 }
 
 // ---------------------------------------------------------------- MLA ----

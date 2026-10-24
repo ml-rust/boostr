@@ -147,7 +147,7 @@ where
     R::Client: ModelClient<R>,
 {
     let normed = layer.attn_norm.forward(client, x)?;
-    let mixed = layer.mixer.forward_train(client, &normed)?;
+    let mixed = layer.mixer.forward_train(client, &normed, None)?;
     ffn_residual(client, x, &mixed, &layer.post_attention_norm, &layer.mlp)
 }
 

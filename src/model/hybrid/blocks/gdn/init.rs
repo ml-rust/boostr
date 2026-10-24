@@ -420,8 +420,8 @@ pub(super) mod tests {
         assert_eq!(Module::trainable_parameters(&loaded).len(), NAMES.len());
 
         let x = input(&client, &device, DType::F64, 0x6d4e_0201, false);
-        let want = block.forward_train(&client, &x).unwrap();
-        let got = loaded.forward_train(&client, &x).unwrap();
+        let want = block.forward_train(&client, &x, None).unwrap();
+        let got = loaded.forward_train(&client, &x, None).unwrap();
         assert_eq!(f64_bits(got.tensor()), f64_bits(want.tensor()));
 
         let mut partial = save();

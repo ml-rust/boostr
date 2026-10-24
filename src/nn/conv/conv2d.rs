@@ -48,12 +48,8 @@ impl<R: Runtime> Conv2d<R> {
     /// Input: `[batch, in_channels, height, width]`
     /// Output: `[batch, out_channels, height_out, width_out]`
     ///
-    /// Tracked forward — mirrors `Conv1d::forward`.
-    ///
-    /// This previously wrapped `client.conv2d` in `Var::new(output, false)` as a
-    /// stopgap while `var_conv2d` was being added to numr. That op now exists, and
-    /// the stopgap was a silent training bug: a trainable `Conv2d`'s weight and
-    /// bias received no gradient at all.
+    /// Tracked forward, as `Conv1d::forward`. The weight and bias of a
+    /// trainable `Conv2d` receive gradients through `var_conv2d`.
     pub fn forward<C>(&self, client: &C, input: &Var<R>) -> Result<Var<R>>
     where
         R: Runtime<DType = numr::dtype::DType>,
@@ -158,9 +154,8 @@ mod tests {
 
     /// A trainable Conv2d must receive gradients on its weight.
     ///
-    /// Regression: `forward` used to wrap `client.conv2d` in `Var::new(out, false)`
-    /// as a stopgap while `var_conv2d` was being added to numr. That op landed, but
-    /// the stopgap stayed — so any trainable Conv2d silently never trained.
+    /// A forward that detaches the output gives the weight no gradient, so
+    /// the layer never trains.
     #[test]
     fn test_conv2d_forward_propagates_gradient_to_weight() {
         use numr::autograd::{backward, var_sum};

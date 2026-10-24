@@ -28,4 +28,5 @@ pub mod vocab_resize;
 pub mod weight;
 pub mod weight_norm;
 
+pub(crate) use conv::check_segments;
 pub use reexports::*;

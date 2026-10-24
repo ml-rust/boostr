@@ -25,6 +25,7 @@ use numr::tensor::Tensor;
 
 /// Boundary masks for one batch of packed rows. Cloning copies handles only.
 pub struct SegmentMasks<R: Runtime> {
+    ids: Tensor<R>,
     keep: Tensor<R>,
     taps: Vec<Tensor<R>>,
     max_kernel: usize,
@@ -34,6 +35,7 @@ pub struct SegmentMasks<R: Runtime> {
 impl<R: Runtime> Clone for SegmentMasks<R> {
     fn clone(&self) -> Self {
         Self {
+            ids: self.ids.clone(),
             keep: self.keep.clone(),
             taps: self.taps.clone(),
             max_kernel: self.max_kernel,
@@ -92,11 +94,18 @@ where
             taps.push(mask.reshape(&[batch, seq, 1]).map_err(Error::Numr)?);
         }
         Ok(Self {
+            ids,
             keep,
             taps,
             max_kernel,
             dtype,
         })
+    }
+
+    /// The I32 `[batch, seq]` segment ids these masks came from. Cloning the
+    /// result copies a handle.
+    pub fn segment_ids(&self) -> &Tensor<R> {
+        &self.ids
     }
 
     /// `[batch, seq]`: 1 where position `t` continues the segment of `t - 1`,
@@ -186,6 +195,12 @@ mod tests {
             let m = SegmentMasks::from_ids(&client, &t, 4, dtype).unwrap();
             assert_eq!(m.dims(), (2, 6));
             assert_eq!(m.keep().dtype(), dtype);
+            assert_eq!(m.segment_ids().dtype(), DType::I32);
+            assert_eq!(m.segment_ids().shape(), &[2, 6]);
+            assert_eq!(
+                m.segment_ids().to_vec::<i32>(),
+                vec![7, 7, 7, 2, 9, 9, 4, 4, 4, 4, 4, 4]
+            );
             let host = |x: &Tensor<CpuRuntime>| crate::test_utils::to_f64(x);
             assert_eq!(
                 host(m.keep()),

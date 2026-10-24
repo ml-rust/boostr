@@ -10,3 +10,4 @@ pub use causal_conv1d::causal_conv1d;
 pub use conv1d::Conv1d;
 pub use conv2d::Conv2d;
 pub use var_causal_conv1d::var_causal_conv1d_silu;
+pub(crate) use var_causal_conv1d_check::check_segments;

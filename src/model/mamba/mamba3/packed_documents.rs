@@ -9,12 +9,12 @@
 mod tests {
     use crate::model::mamba::mamba3::config::Mamba3Config;
     use crate::model::mamba::mamba3::layer::{Mamba3, Mamba3Weights};
-    use crate::model::mamba::packed_support::{
-        check_no_leak, check_packed_vs_separate, check_single_document_equals_none, t64,
-    };
     use crate::nn::segment_masks::SegmentMasks;
     use crate::nn::{Conv1d, Linear, RmsNorm};
     use crate::test_utils::Lcg;
+    use crate::test_utils::{
+        check_no_leak, check_packed_vs_separate, check_single_document_equals_none, t64,
+    };
     use numr::autograd::Var;
     use numr::ops::PaddingMode;
     use numr::runtime::cpu::{CpuClient, CpuRuntime};

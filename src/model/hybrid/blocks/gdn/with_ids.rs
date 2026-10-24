@@ -212,8 +212,8 @@ mod tests {
         assert_eq!(Module::trainable_parameters(&rebuilt).len(), 9);
 
         let x = input(&client, &device, DType::F64, 0x6d4e_0101, false);
-        let want = block.forward_train(&client, &x).unwrap();
-        let got = rebuilt.forward_train(&client, &x).unwrap();
+        let want = block.forward_train(&client, &x, None).unwrap();
+        let got = rebuilt.forward_train(&client, &x, None).unwrap();
         assert_eq!(f64_bits(got.tensor()), f64_bits(want.tensor()));
     }
 
@@ -227,8 +227,8 @@ mod tests {
         let rebuilt = rebuild(&client, &block, true, nudge).unwrap();
 
         let x = input(&client, &device, DType::F64, 0x6d4e_0111, true);
-        let before = block.forward_train(&client, &x).unwrap();
-        let y = rebuilt.forward_train(&client, &x).unwrap();
+        let before = block.forward_train(&client, &x, None).unwrap();
+        let y = rebuilt.forward_train(&client, &x, None).unwrap();
         assert_ne!(
             f64_bits(y.tensor()),
             f64_bits(before.tensor()),

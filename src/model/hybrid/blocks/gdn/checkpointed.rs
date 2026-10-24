@@ -6,6 +6,7 @@
 
 use super::layer::GdnBlock;
 use crate::error::{Error, Result};
+use crate::nn::segment_masks::SegmentMasks;
 use crate::ops::traits::GatedDeltaNetOps;
 use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::{Var, checkpoint_with_client};
@@ -22,6 +23,10 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
     /// Values equal `forward_train` bit for bit: the same ops run in the
     /// same order on `client`. The recompute runs on `client` too.
     ///
+    /// `segments` packs documents as in `forward_train`. The segment closure
+    /// owns a clone of the masks, which copies handles only, so the
+    /// recompute sees the same document starts.
+    ///
     /// The segment closure must be `'static`, so it captures
     /// [`Self::alias`], which keeps every `TensorId`. The segment inputs are
     /// `x` followed by every parameter that requires grad: trainable
@@ -35,7 +40,12 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
     /// As [`Self::forward_train`]. The shape and projection checks run
     /// before the segment, so they keep their error variants. An error
     /// inside the segment arrives as [`Error::Numr`].
-    pub fn forward_train_checkpointed<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>
+    pub fn forward_train_checkpointed<C>(
+        &self,
+        client: &C,
+        x: &Var<R>,
+        segments: Option<&SegmentMasks<R>>,
+    ) -> Result<Var<R>>
     where
         C: RuntimeClient<R>
             + TensorOps<R>
@@ -59,8 +69,9 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
             + DequantOps<R>
             + GatedDeltaNetOps<R>,
     {
-        self.check_train_input(x)?;
+        self.check_train_input(x, segments)?;
         let block = self.alias();
+        let masks = segments.cloned();
         let trainable = self.trainable_parameters();
         let mut inputs: Vec<&Var<R>> = Vec::with_capacity(trainable.len() + 1);
         inputs.push(x);
@@ -72,9 +83,11 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
                         "checkpointed GdnBlock segment received no input".to_string(),
                     )
                 })?;
-                block.forward_train(client, input).map_err(|e| {
-                    numr::error::Error::Backend(format!("checkpointed GdnBlock forward: {e}"))
-                })
+                block
+                    .forward_train(client, input, masks.as_ref())
+                    .map_err(|e| {
+                        numr::error::Error::Backend(format!("checkpointed GdnBlock forward: {e}"))
+                    })
             },
             &inputs,
             client,
@@ -87,14 +100,18 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
 mod tests {
     use super::super::GdnProjection;
     use super::super::init::tests::{
-        cfg, f64_bits, init_block, input, seeded_weighted_loss, uniform,
+        BATCH, SEQ, cfg, f64_bits, init_block, input, seeded_weighted_loss, uniform,
     };
+    use super::super::train_fixtures::{HIDDEN, KERNEL, build64, cfg64, init_params};
     use crate::nn::LoraFactors;
-    use crate::test_utils::cpu_setup;
+    use crate::nn::segment_masks::SegmentMasks;
+    use crate::test_utils::{check_packed_vs_separate_tol, cpu_setup, ids_for};
+    use numr::autograd::Var;
     use numr::autograd::backward;
     use numr::dtype::DType;
     use numr::runtime::RuntimeClient;
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
+    use numr::tensor::Tensor;
     use numr::tensor::TensorId;
 
     type Block = super::GdnBlock<CpuRuntime>;
@@ -107,13 +124,22 @@ mod tests {
         block: &Block,
         dtype: DType,
         checkpointed: bool,
+        lens: Option<&[usize]>,
     ) -> (Vec<u64>, Vec<(TensorId, Vec<u64>)>) {
         let device = client.device().clone();
         let x = input(client, &device, dtype, 0x6d4e_0300, true);
+        let masks = lens.map(|lens| {
+            let row = ids_for(lens);
+            let ids: Vec<i32> = row.iter().chain(&row).copied().collect();
+            let ids = Tensor::<CpuRuntime>::from_slice(&ids, &[BATCH, row.len()], &device).unwrap();
+            SegmentMasks::from_ids(client, &ids, cfg().conv_kernel, dtype).unwrap()
+        });
         let y = if checkpointed {
-            block.forward_train_checkpointed(client, &x).unwrap()
+            block
+                .forward_train_checkpointed(client, &x, masks.as_ref())
+                .unwrap()
         } else {
-            block.forward_train(client, &x).unwrap()
+            block.forward_train(client, &x, masks.as_ref()).unwrap()
         };
         let grads = backward(&seeded_weighted_loss(client, &y, 0x6d4e_0301), client).unwrap();
         let mut ids = vec![x.id()];
@@ -131,8 +157,12 @@ mod tests {
     }
 
     fn assert_same(client: &CpuClient, block: &Block, dtype: DType) {
-        let plain = run(client, block, dtype, false);
-        let checkpointed = run(client, block, dtype, true);
+        assert_same_packed(client, block, dtype, None);
+    }
+
+    fn assert_same_packed(client: &CpuClient, block: &Block, dtype: DType, lens: Option<&[usize]>) {
+        let plain = run(client, block, dtype, false, lens);
+        let checkpointed = run(client, block, dtype, true, lens);
         assert_eq!(checkpointed.0, plain.0, "{dtype:?}: output bits");
         assert_eq!(checkpointed.1.len(), plain.1.len());
         for ((id, got), (_, want)) in checkpointed.1.iter().zip(&plain.1) {
@@ -240,12 +270,37 @@ mod tests {
         assert_same(&client, &block, DType::F64);
 
         let x = input(&client, &device, DType::F64, 0x6d4e_0324, false);
-        let y = block.forward_train_checkpointed(&client, &x).unwrap();
+        let y = block.forward_train_checkpointed(&client, &x, None).unwrap();
         let grads = backward(&seeded_weighted_loss(&client, &y, 0x6d4e_0325), &client).unwrap();
         for (name, var) in block.named_parameters() {
             if name.contains("proj") && !var.requires_grad() {
                 assert!(grads.get(var.id()).is_none(), "frozen {name} gets none");
             }
         }
+    }
+
+    /// Packed rows: the recompute sees the same document starts, so values
+    /// and gradients equal `forward_train` bit for bit. Starts at 3 and 4
+    /// fall inside and on the edge of a chunk of four.
+    #[test]
+    fn checkpointed_packed_equals_forward_train() {
+        let (client, device) = cpu_setup();
+        let block = init_block(&client, &device, DType::F64, 0x6d4e_0326, true);
+        let lens = [3, 1, SEQ - 4];
+        assert_same_packed(&client, &block, DType::F64, Some(&lens));
+    }
+
+    /// The checkpointed packed forward equals the documents run alone, in
+    /// output, input gradient and every parameter gradient.
+    #[test]
+    fn checkpointed_packed_equals_separate_documents() {
+        let (client, device) = cpu_setup();
+        let cfg = cfg64(2, false);
+        let block = build64(&client, &device, &cfg, &init_params(&cfg, 0x6d4e_0327));
+        let params = block.trainable_parameters();
+        let fwd = |c: &CpuClient, x: &Var<CpuRuntime>, s: Option<&SegmentMasks<CpuRuntime>>| {
+            block.forward_train_checkpointed(c, x, s)
+        };
+        check_packed_vs_separate_tol(&fwd, &params, HIDDEN, KERNEL, &[6, 1, 3], 1e-9);
     }
 }

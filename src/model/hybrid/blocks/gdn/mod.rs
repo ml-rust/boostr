@@ -1,7 +1,8 @@
 //! Gated DeltaNet block for `qwen35`: [`GdnBlock`] (`layer`), stable-id
 //! construction (`with_ids`), `VarBuilder` init and load (`init`), the
 //! inference forward (`forward`, `prefill`, `gate_proj`, `graph_mode`), the
-//! tracked training forward (`train`, `gate_proj_var`, `checkpointed`), head
+//! tracked training forward (`train`, `train_proj`, `train_scan`,
+//! `gate_proj_var`, `checkpointed`), head
 //! order (`heads`), training switch (`trainable`), parameters (`params`) and
 //! LoRA adapters (`adapter`, `gate_adapter`).
 
@@ -18,6 +19,10 @@ mod layer;
 mod params;
 mod prefill;
 mod train;
+#[cfg(test)]
+mod train_fixtures;
+mod train_proj;
+mod train_scan;
 mod trainable;
 mod with_ids;
 

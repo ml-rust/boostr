@@ -39,7 +39,7 @@ pub(super) fn check_shapes<R: Runtime>(
 }
 
 /// Check that `masks` covers a `[batch, seq]` input of `dtype` and `kernel` taps.
-pub(super) fn check_segments<R: Runtime<DType = DType>>(
+pub(crate) fn check_segments<R: Runtime<DType = DType>>(
     masks: &SegmentMasks<R>,
     batch: usize,
     seq: usize,

@@ -263,9 +263,9 @@ where
     let x_data = Lcg(0x6d4e_7000 + seq as u64).vec(BATCH * seq * HIDDEN, 1.0);
     let x = Var::new(upload::<R>(&x_data, &[BATCH, seq, HIDDEN], device), true);
     let y = if checkpointed {
-        block.forward_train_checkpointed(client, &x)
+        block.forward_train_checkpointed(client, &x, None)
     } else {
-        block.forward_train(client, &x)
+        block.forward_train(client, &x, None)
     }
     .expect("GDN training forward");
     let grads = backward(&weighted_loss::<R>(client, &y, 0x6d4e_7001), client).expect("backward");

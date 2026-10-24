@@ -9,6 +9,7 @@ pub mod lanes;
 pub mod memory;
 pub mod prefix_cache;
 mod reexports;
+pub mod sampling;
 pub mod scheduler;
 pub mod speculative;
 pub mod ssm_state;

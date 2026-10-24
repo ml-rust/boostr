@@ -22,6 +22,10 @@ pub use super::prefix_cache::{
     CacheResult, GpuRadixStats, GpuRadixTree, PrefixCache, PrefixCacheConfig, PrefixCacheStats,
     PrefixLookup,
 };
+pub use super::sampling::{
+    DryParams, DynaTemp, LogitBias, MIN_DYNAMIC_TEMPERATURE, MirostatV2, MirostatV2State,
+    apply_dry_penalty, apply_typical_filter, penalty_window,
+};
 pub use super::scheduler::{
     ScheduledBatch, SchedulerConfig, SchedulerStats, SchedulingPriority, SequenceId,
     SequenceRequest, SequenceScheduler, SequenceState,

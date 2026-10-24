@@ -31,6 +31,14 @@ Adds exact-resume optimizer state export and import, keyed by parameter name. Ad
 
 ### Added
 
+- **`inference::sampling`** — host-side logit shaping for one logits row:
+  - `penalty_window` — the distinct ids and counts of the last `last_n` tokens, ascending by id. `0` takes the whole history, as `SampleRule::penalty_last_n` does. The result feeds `SamplingOps::apply_sampling_penalties`.
+  - `DryParams`, `apply_dry_penalty` — the DRY n-gram penalty. `DryParams::check` rejects a negative or non-finite multiplier and a base of 0.
+  - `apply_typical_filter` — the typical-p filter. Atypical logits become `-inf`.
+  - `DynaTemp` — temperature from the entropy of the row, in `[base - range, base + range]`, floored at `MIN_DYNAMIC_TEMPERATURE`.
+  - `MirostatV2`, `MirostatV2State` — the Mirostat v2 sampler on ChaCha12, the `StdRng` algorithm. A seed gives the stream of `StdRng::seed_from_u64`. No seed takes one from `numr::random::next_call_seed`. `state` and `from_state` export and restore `mu` and the stream position. `sample` rejects an empty row, a NaN or `+inf` logit, a row of only `-inf` and a non-finite temperature.
+  - `LogitBias` — a `logit_bias` map as a `[1, 1, vocab]` tensor in the logits dtype, and its add to the logits.
+- **Dependencies** — `rand` and `chacha20`, without default features and without an OS entropy source.
 - **`VarLenAttentionOps`** — `window_size` works on CPU, CUDA and WebGPU, forward and backward. `0` turns the window off. Key `j` is masked for query `i` when `j + window_size <= key_offset + i`, with `key_offset = max(0, seq_len_k - seq_len_q)`. A query row with no unmasked key outputs zeros with `lse = -inf` and adds no gradient. It used to be an error for a nonzero window.
 - **`distributed::all_reduce_flat_sum`, `all_reduce_flat_sum_bucketed`** — data-parallel gradient sum in caller order. The caller passes `(TensorId, shape)` per parameter, in model order, the same on every rank. Each gradient widens to f32 and packs into new flat buffers. A buffer holds at most `DEFAULT_ORDERED_BUCKET_BYTES` (64 MiB), or a given size. A missing gradient sends zeros. The buffer tail carries one presence flag per parameter and caller scalars such as the logged loss. The sum is never divided by the world size. A parameter some rank produced a gradient for gets the f32 sum with its shape on every rank. A parameter no rank produced a gradient for stays without one. The caller's gradient storage is never reduced in place. World size 1 returns at once and changes nothing.
 - **`distributed::broadcast_params_ordered`, `broadcast_params_ordered_bucketed`** — broadcast of named tensors from a root rank, in slice order. Consecutive tensors of one dtype share a flat buffer, so no tensor is cast. Non-root ranks copy each slice back into the tensor's storage, so frozen and trainable tensors both work.

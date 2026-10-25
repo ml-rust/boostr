@@ -19,7 +19,7 @@ use anyhow::{Result, anyhow, bail};
 pub const FRAME_MAGIC: u32 = 0xB005_D15A;
 
 /// Version every frame writes. A reader refuses any other version.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Byte length of the header, request id included.
 pub const HEADER_LEN: usize = 17;
@@ -34,8 +34,10 @@ pub enum FrameKind {
     KvHandoff = 2,
     /// Router → worker: stop the request and free its state.
     Cancel = 3,
-    /// Worker → router: one token or one error.
+    /// Worker → router: one token, one error, or a handoff confirmation.
     Event = 4,
+    /// Decode worker → prefill worker: the KV handoff arrived.
+    HandoffAck = 5,
 }
 
 impl FrameKind {
@@ -45,6 +47,7 @@ impl FrameKind {
             2 => Self::KvHandoff,
             3 => Self::Cancel,
             4 => Self::Event,
+            5 => Self::HandoffAck,
             other => bail!("unknown disaggregated frame kind {other}"),
         })
     }
@@ -64,7 +67,7 @@ pub fn peek_request_id(buf: &[u8]) -> Option<u64> {
 #[derive(Debug)]
 pub struct Writer {
     buf: Vec<u8>,
-    /// Largest count or length a `u32` prefix may carry.
+    /// Largest count or length a `u32` prefix can carry.
     max_len: usize,
     /// The first oversize field. [`Self::finish`] returns it.
     error: Option<anyhow::Error>,

@@ -117,7 +117,8 @@ impl SwarmWorker {
     /// Run the worker's compute loop.
     ///
     /// Each request is one [`tags::GEN_REQUEST`] frame from the previous
-    /// stage, or from the leader when this worker has no previous stage. Its
+    /// stage, or from the leader when this worker has no previous stage.
+    /// Requests arrive in send order, and the loop serves them in that order. Its
     /// payload is `i64` LE token ids on the first stage and `f32` LE
     /// activations on every later stage. The loop runs the forward closure,
     /// then sends the output in a request frame to the next stage, or as a

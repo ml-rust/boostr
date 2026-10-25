@@ -18,9 +18,11 @@ use super::stream::{Generation, TokenStream};
 /// - Prefill: the worker with the fewest requests in prefill.
 /// - Decode: the worker a session key last used, else round-robin.
 ///
-/// The router listens to every worker on one task per rank. It reorders each
-/// request's events by seq and ends a request with an error when its worker
-/// disconnects or nexar reports the worker dead.
+/// The router listens to every worker on one task per rank. It holds a
+/// request's decode events until its first prefill event arrives. It ends a
+/// request with an error when a worker it waits on disconnects or nexar
+/// reports it dead, and when decode does not confirm the KV handoff within
+/// [`DisaggConfig::handoff_timeout`].
 pub struct DisaggRouter {
     pub(super) shared: Arc<Shared>,
     pub(super) config: DisaggConfig,
@@ -51,7 +53,11 @@ impl DisaggRouter {
         }
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| anyhow!("DisaggRouter::new must run inside a tokio runtime"))?;
-        let shared = Arc::new(Shared::new(Arc::clone(&client), &config.prefill_workers));
+        let shared = Arc::new(Shared::new(
+            Arc::clone(&client),
+            &config.prefill_workers,
+            config.handoff_timeout,
+        ));
         let ranks: BTreeSet<Rank> = config
             .prefill_workers
             .iter()
@@ -250,7 +256,7 @@ fn spawn_failure_watch(runtime: &tokio::runtime::Handle, shared: Arc<Shared>) ->
 mod tests {
     use super::super::super::protocol::{FinishReason, Stage};
     use super::super::super::test_harness::{Cluster, MockDecode};
-    use super::super::dispatch::WorkerError;
+    use super::super::pending::WorkerError;
     use super::*;
     use std::sync::atomic::Ordering as AtomicOrdering;
     use std::time::Duration;

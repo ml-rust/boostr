@@ -41,6 +41,27 @@ pub(crate) async fn send_frame(
         })
 }
 
+/// Tells each of `ranks` to stop request `request_id`, on a task of the
+/// current tokio runtime. Outside a runtime it logs and sends nothing.
+pub(crate) fn spawn_cancel(client: &Arc<NexarClient>, ranks: Vec<Rank>, request_id: u64) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        tracing::warn!(
+            request_id,
+            "cancel outside a tokio runtime: workers finish the request unobserved"
+        );
+        return;
+    };
+    let client = Arc::clone(client);
+    let frame = Cancel { request_id }.to_bytes();
+    handle.spawn(async move {
+        for rank in ranks {
+            if let Err(e) = send_frame(&client, rank, tags::CANCEL, &frame).await {
+                tracing::warn!(request_id, rank, "cancel not delivered: {e:#}");
+            }
+        }
+    });
+}
+
 /// Sends one event to the router.
 pub(crate) async fn send_event(client: &NexarClient, router: Rank, event: &Event) -> Result<()> {
     send_frame(client, router, tags::EVENT, &event.to_bytes()?).await
@@ -53,7 +74,6 @@ pub(crate) async fn send_error(
     rank: Rank,
     stage: Stage,
     request_id: u64,
-    seq: u32,
     e: anyhow::Error,
 ) -> Result<()> {
     let name = match stage {
@@ -61,15 +81,14 @@ pub(crate) async fn send_error(
         Stage::Decode => "decode",
     };
     tracing::warn!(rank, request_id, "{name} failed: {e:#}");
-    let ev = Event::error(request_id, seq, stage, format!("{e:#}"));
+    let ev = Event::error(request_id, stage, format!("{e:#}"));
     send_event(client, router, &ev).await
 }
 
 /// Drains every frame from `src` on `tag` into `tx`, parsed by `parse`.
 ///
-/// A dedicated task keeps nexar's per-tag channel empty. nexar holds one lock
-/// across all tags of a peer while a full channel waits, so a slow consumer
-/// stalls every other tag of that peer. The task ends when the peer
+/// Frames reach `tx` in the order `src` sent them. One task per source
+/// merges several sources into one channel. The task ends when the peer
 /// disconnects or `tx` closes.
 pub(crate) fn spawn_listener<T, F>(
     client: Arc<NexarClient>,
@@ -141,4 +160,43 @@ where
     tokio::task::spawn_blocking(f)
         .await
         .map_err(|e| anyhow!("forward task did not complete: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::protocol::{EventBody, TokenEvent};
+    use super::super::test_harness::local_clients;
+    use super::*;
+
+    /// A large event first, so a later small event can finish its stream first.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn events_of_one_worker_arrive_in_send_order() {
+        let mut clients = local_clients(2).await.into_iter().map(Arc::new);
+        let (router, worker) = (clients.next().unwrap(), clients.next().unwrap());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let _listener = spawn_listener(Arc::clone(&router), 1, tags::EVENT, tx, |buf: &[u8]| {
+            Event::from_bytes(buf).unwrap()
+        });
+        let big = Event::error(1, Stage::Decode, "x".repeat(1 << 20));
+        send_event(&worker, 0, &big).await.unwrap();
+        for token in 0..16 {
+            let t = TokenEvent {
+                index: 0,
+                token,
+                finish: None,
+            };
+            send_event(&worker, 0, &Event::token(1, t)).await.unwrap();
+        }
+        assert_eq!(rx.recv().await.unwrap(), big);
+        for want in 0..16 {
+            let got = rx.recv().await.unwrap().body;
+            assert_eq!(
+                got,
+                EventBody::Token {
+                    token: want,
+                    finish: None
+                }
+            );
+        }
+    }
 }

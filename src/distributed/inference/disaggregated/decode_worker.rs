@@ -9,11 +9,11 @@ use std::time::Duration;
 
 use super::cancel::CancelBook;
 use super::forward::{DecodeOpenFn, DecodeStepFn};
-use super::protocol::{Event, KvHandoff, Stage, TokenEvent, peek_request_id, tags};
+use super::handoff::spawn_handoff_listener;
+use super::protocol::{Event, KvHandoff, Stage, TokenEvent};
 use super::sampler::RequestSampler;
 use super::wire::{
-    TaskGuard, run_blocking, send_error, send_event, spawn_cancel_listener, spawn_listener,
-    spawn_shutdown_listener,
+    TaskGuard, run_blocking, send_error, send_event, spawn_cancel_listener, spawn_shutdown_listener,
 };
 use crate::distributed::inference::transport::shutdown_shared;
 use crate::ops::traits::inference::SamplingOps;
@@ -38,11 +38,6 @@ where
         let sampler = RequestSampler::resume(handoff.params, handoff.context, handoff.generated)?;
         let step = open(&handoff.kv_cache).map_err(|e| e.context("opening the KV cache failed"))?;
         Ok(Self { step, sampler })
-    }
-
-    /// The index of the token the next [`Self::advance`] samples.
-    pub(crate) fn next_index(&self) -> u32 {
-        self.sampler.generated()
     }
 
     /// Feeds the last token and samples the next one.
@@ -140,15 +135,7 @@ where
         let _listeners: Vec<TaskGuard> = self
             .prefill_workers
             .iter()
-            .map(|&src| {
-                spawn_listener(
-                    Arc::clone(&self.client),
-                    src,
-                    tags::KV_HANDOFF,
-                    tx.clone(),
-                    |buf: &[u8]| KvHandoff::from_bytes(buf).map_err(|e| (peek_request_id(buf), e)),
-                )
-            })
+            .map(|&src| spawn_handoff_listener(Arc::clone(&self.client), src, tx.clone()))
             .collect();
         drop(tx);
         let (mut stop, _stop) = spawn_shutdown_listener(Arc::clone(&self.client), self.router_rank);
@@ -166,8 +153,7 @@ where
             };
             match frame {
                 Ok(handoff) => self.serve(handoff, &book).await?,
-                // Prefill always hands off after its one token, so decode's first seq is 1.
-                Err((Some(id), e)) => self.fail(id, 1, e).await?,
+                Err((Some(id), e)) => self.fail(id, e).await?,
                 Err((None, e)) => {
                     tracing::warn!(rank = self.rank, "dropping a malformed KV handoff: {e:#}")
                 }
@@ -186,7 +172,6 @@ where
 
     async fn decode(&self, handoff: KvHandoff, book: &CancelBook) -> Result<()> {
         let id = handoff.request_id;
-        let first_seq = handoff.generated;
         if book.is_cancelled(id) {
             return Ok(());
         }
@@ -196,20 +181,19 @@ where
                 handoff.kv_cache.len(),
                 self.max_kv_transfer_bytes
             );
-            return self.fail(id, first_seq, e).await;
+            return self.fail(id, e).await;
         }
         let open_fn = Arc::clone(&self.open_fn);
         let opened = run_blocking(move || ActiveDecode::open(&open_fn, handoff)).await;
         let mut active = match opened.and_then(|r| r) {
             Ok(a) => a,
-            Err(e) => return self.fail(id, first_seq, e).await,
+            Err(e) => return self.fail(id, e).await,
         };
         loop {
             if book.is_cancelled(id) {
                 tracing::debug!(rank = self.rank, request_id = id, "decode cancelled");
                 return Ok(());
             }
-            let seq = active.next_index();
             let client = self.sampler_client.clone();
             let stepped = run_blocking(move || {
                 let r = active.advance(&client);
@@ -218,7 +202,7 @@ where
             .await;
             let (back, result) = match stepped {
                 Ok(pair) => pair,
-                Err(e) => return self.fail(id, seq, e).await,
+                Err(e) => return self.fail(id, e).await,
             };
             active = back;
             match result {
@@ -228,19 +212,18 @@ where
                         return Ok(());
                     }
                 }
-                Err(e) => return self.fail(id, seq, e).await,
+                Err(e) => return self.fail(id, e).await,
             }
         }
     }
 
-    async fn fail(&self, id: u64, seq: u32, e: anyhow::Error) -> Result<()> {
+    async fn fail(&self, id: u64, e: anyhow::Error) -> Result<()> {
         send_error(
             &self.client,
             self.router_rank,
             self.rank,
             Stage::Decode,
             id,
-            seq,
             e,
         )
         .await
@@ -285,7 +268,6 @@ mod tests {
         p.eos_tokens = vec![9];
         let open = MockDecode::default().open_fn();
         let mut a = ActiveDecode::open(&open, handoff(p)).unwrap();
-        assert_eq!(a.next_index(), 1);
         assert_eq!(run(&mut a), (vec![7, 8, 9], Some(FinishReason::Eos)));
     }
 

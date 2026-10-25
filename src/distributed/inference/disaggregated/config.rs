@@ -2,6 +2,10 @@
 
 use anyhow::{Result, anyhow, bail};
 use nexar::Rank;
+use std::time::Duration;
+
+/// Default of [`DisaggConfig::handoff_timeout`].
+pub const DEFAULT_HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Role of a disaggregated inference rank.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +30,13 @@ pub struct DisaggConfig {
     /// Largest serialized KV cache one request can transfer. A larger cache
     /// ends the request with an error event.
     pub max_kv_transfer_bytes: usize,
+    /// Longest wait for a KV handoff to reach its decode worker.
+    ///
+    /// The router starts the clock at the first token. A request whose
+    /// decode worker has not confirmed the handoff by then ends with an
+    /// error. A prefill worker that stops waits this long for the
+    /// confirmations of its last handoffs. Default [`DEFAULT_HANDOFF_TIMEOUT`].
+    pub handoff_timeout: Duration,
 }
 
 impl DisaggConfig {
@@ -58,6 +69,7 @@ impl DisaggConfig {
             decode_workers: (prefill_count + 1..world).collect(),
             router_rank: 0,
             max_kv_transfer_bytes,
+            handoff_timeout: DEFAULT_HANDOFF_TIMEOUT,
         })
     }
 
@@ -93,9 +105,15 @@ impl DisaggConfig {
     ///
     /// # Errors
     ///
-    /// No prefill or no decode worker, a rank at or past `world_size`, or a
-    /// rank listed twice across the roles.
+    /// No prefill or no decode worker, a rank at or past `world_size`, a
+    /// rank listed twice across the roles, or a zero `handoff_timeout`.
     pub fn check(&self, world_size: u32) -> Result<()> {
+        if self.handoff_timeout.is_zero() {
+            bail!(
+                "disaggregated config has a zero handoff_timeout: every request with a decode \
+                 phase would fail. Use a positive duration, for example {DEFAULT_HANDOFF_TIMEOUT:?}"
+            );
+        }
         if self.prefill_workers.is_empty() {
             bail!("disaggregated config lists no prefill workers: add at least one rank");
         }
@@ -132,6 +150,7 @@ mod tests {
             decode_workers: vec![2, 3],
             router_rank: 0,
             max_kv_transfer_bytes: 1 << 20,
+            handoff_timeout: DEFAULT_HANDOFF_TIMEOUT,
         }
     }
 
@@ -160,6 +179,12 @@ mod tests {
             ..config()
         };
         assert!(none.check(4).unwrap_err().to_string().contains("decode"));
+        let zero = DisaggConfig {
+            handoff_timeout: Duration::ZERO,
+            ..config()
+        };
+        let err = zero.check(4).unwrap_err().to_string();
+        assert!(err.contains("handoff_timeout"), "{err}");
     }
 
     #[test]

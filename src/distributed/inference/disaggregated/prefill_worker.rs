@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::cancel::CancelBook;
+use super::config::DEFAULT_HANDOFF_TIMEOUT;
 use super::forward::PrefillFn;
+use super::handoff::AckListeners;
 use super::protocol::{Event, KvHandoff, PrefillRequest, Stage, TokenEvent, peek_request_id, tags};
 use super::sampler::RequestSampler;
 use super::wire::{
@@ -85,6 +87,7 @@ pub struct PrefillWorker<R: Runtime> {
     max_kv_transfer_bytes: usize,
     sampler_client: R::Client,
     prefill_fn: Arc<PrefillFn<R>>,
+    handoff_timeout: Duration,
 }
 
 impl<R> PrefillWorker<R>
@@ -112,11 +115,25 @@ where
             max_kv_transfer_bytes,
             sampler_client,
             prefill_fn: Arc::new(prefill_fn),
+            handoff_timeout: DEFAULT_HANDOFF_TIMEOUT,
         }
+    }
+
+    /// Sets how long a stopping worker waits for the acks of its last
+    /// handoffs. Pass [`super::DisaggConfig::handoff_timeout`]. Default
+    /// [`DEFAULT_HANDOFF_TIMEOUT`].
+    pub fn with_handoff_timeout(mut self, handoff_timeout: Duration) -> Self {
+        self.handoff_timeout = handoff_timeout;
+        self
     }
 
     pub fn rank(&self) -> Rank {
         self.rank
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_client(self) -> Arc<NexarClient> {
+        self.client
     }
 
     /// Shuts down this worker's nexar client. Call it after the run loop
@@ -132,6 +149,10 @@ where
     /// Serves prefill requests one at a time until the router's
     /// [`tags::SHUTDOWN`] notice or disconnect. Call
     /// [`PrefillWorker::shutdown`] after it returns.
+    ///
+    /// After the shutdown notice, the loop waits up to the handoff timeout
+    /// for decode to ack its last handoffs, so the router never fails a
+    /// request whose handoff is still in flight.
     ///
     /// # Errors
     ///
@@ -154,11 +175,13 @@ where
             |buf: &[u8]| PrefillRequest::from_bytes(buf).map_err(|e| (peek_request_id(buf), e)),
         );
         let (mut stop, _stop) = spawn_shutdown_listener(Arc::clone(&self.client), self.router_rank);
+        let mut acks = AckListeners::new(Arc::clone(&self.client), self.router_rank);
         loop {
             let frame = tokio::select! {
                 biased;
                 _ = &mut stop => {
                     tracing::info!(rank = self.rank, "prefill worker received the shutdown notice");
+                    self.wait_for_acks(&acks).await;
                     break;
                 }
                 frame = rx.recv() => match frame {
@@ -167,8 +190,8 @@ where
                 },
             };
             match frame {
-                Ok(req) => self.serve(req, &book).await?,
-                Err((Some(id), e)) => self.fail(id, 0, e).await?,
+                Ok(req) => self.serve(req, &book, &mut acks).await?,
+                Err((Some(id), e)) => self.fail(id, e).await?,
                 Err((None, e)) => tracing::warn!(
                     rank = self.rank,
                     "dropping a malformed prefill frame: {e:#}"
@@ -179,7 +202,24 @@ where
         Ok(())
     }
 
-    async fn serve(&self, req: PrefillRequest, book: &CancelBook) -> Result<()> {
+    async fn wait_for_acks(&self, acks: &AckListeners) {
+        let left = acks.unacked().drained(self.handoff_timeout).await;
+        if left > 0 {
+            tracing::warn!(
+                rank = self.rank,
+                "{left} KV handoff(s) had no ack from their decode worker within {:?}: \
+                 the router fails those requests at its handoff timeout",
+                self.handoff_timeout
+            );
+        }
+    }
+
+    async fn serve(
+        &self,
+        req: PrefillRequest,
+        book: &CancelBook,
+        acks: &mut AckListeners,
+    ) -> Result<()> {
         let id = req.request_id;
         let decode_rank = req.decode_rank;
         if book.is_cancelled(id) {
@@ -197,30 +237,32 @@ where
         let out = match result {
             Ok(_) if cancelled => return Ok(()),
             Ok(out) => out,
-            Err(e) => return self.fail(id, 0, e).await,
+            Err(e) => return self.fail(id, e).await,
         };
+        // The router holds decode's events until this one arrives.
         send_event(&self.client, self.router_rank, &Event::token(id, out.first)).await?;
         if let Some(handoff) = out.handoff {
+            acks.expect(id, decode_rank);
             let sent = match handoff.to_bytes() {
                 Ok(frame) => send_frame(&self.client, decode_rank, tags::KV_HANDOFF, &frame).await,
                 Err(e) => Err(e),
             };
             if let Err(e) = sent {
+                acks.unacked().remove(id);
                 let e = anyhow!("KV handoff to decode rank {decode_rank} failed: {e:#}");
-                return self.fail(id, out.first.index + 1, e).await;
+                return self.fail(id, e).await;
             }
         }
         Ok(())
     }
 
-    async fn fail(&self, id: u64, seq: u32, e: anyhow::Error) -> Result<()> {
+    async fn fail(&self, id: u64, e: anyhow::Error) -> Result<()> {
         send_error(
             &self.client,
             self.router_rank,
             self.rank,
             Stage::Prefill,
             id,
-            seq,
             e,
         )
         .await

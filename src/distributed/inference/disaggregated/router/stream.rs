@@ -5,9 +5,10 @@ use nexar::Rank;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use super::super::protocol::{Cancel, FinishReason, TokenEvent, tags};
-use super::super::wire::send_frame;
-use super::dispatch::{Shared, StreamItem};
+use super::super::protocol::{FinishReason, TokenEvent};
+use super::super::wire::spawn_cancel;
+use super::dispatch::Shared;
+use super::pending::StreamItem;
 
 /// Every token of a finished request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,26 +93,10 @@ impl Drop for TokenStream {
         if !tracked {
             return;
         }
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            tracing::warn!(
-                request_id = self.request_id,
-                "token stream dropped outside a tokio runtime: workers finish the request unobserved"
-            );
-            return;
-        };
-        let client = Arc::clone(&self.shared.client);
-        let frame = Cancel {
-            request_id: self.request_id,
-        }
-        .to_bytes();
-        let ranks = [self.prefill_rank, self.decode_rank];
-        let id = self.request_id;
-        handle.spawn(async move {
-            for rank in ranks {
-                if let Err(e) = send_frame(&client, rank, tags::CANCEL, &frame).await {
-                    tracing::warn!(request_id = id, rank, "cancel not delivered: {e:#}");
-                }
-            }
-        });
+        spawn_cancel(
+            &self.shared.client,
+            vec![self.prefill_rank, self.decode_rank],
+            self.request_id,
+        );
     }
 }

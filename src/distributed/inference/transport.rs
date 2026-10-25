@@ -1,9 +1,13 @@
 //! Swarm pipeline protocol over nexar.
 //!
-//! Every message is one frame on `send_bytes_tagged`, on its own tag. nexar
-//! sends each message on its own QUIC stream, so two messages to one peer
-//! can arrive in either order. A frame therefore carries everything its
-//! receiver needs, and each tag has at most one frame in flight per peer.
+//! Every message is one frame on `send_bytes_tagged`, on its own tag.
+//!
+//! - A receive for `(src, tag)` takes only frames of that tag.
+//! - Frames of one tag from one sender arrive in send order. Several
+//!   requests can be in flight on one stage: each stage serves them in order.
+//! - Frames of different tags, or from different senders, have no order.
+//!   A [`tags::GEN_REQUEST`] frame holds its header and its payload, so no
+//!   receiver pairs two messages.
 
 use anyhow::{Result, anyhow, bail};
 use nexar::{CpuAdapter, DeviceAdapter, NexarClient, Rank};
@@ -224,6 +228,25 @@ mod tests {
         clients.sort_by_key(|c| c.rank());
         let c1 = Arc::new(clients.pop().unwrap());
         (Arc::new(clients.pop().unwrap()), c1)
+    }
+
+    /// A large frame first, so a later small frame can finish its stream first.
+    #[tokio::test]
+    async fn test_frames_of_one_tag_arrive_in_send_order() {
+        let (c0, c1) = pair().await;
+        let frames: Vec<Vec<u8>> = (0..8u8)
+            .map(|i| vec![i; if i == 0 { 1 << 20 } else { usize::from(i) }])
+            .collect();
+        for f in &frames {
+            send_frame(&c0, 1, tags::GEN_REQUEST, f).await.unwrap();
+            send_frame(&c0, 1, tags::LOGITS, &f[..1]).await.unwrap();
+        }
+        for i in 0..8u8 {
+            assert_eq!(recv_frame(&c1, 0, tags::LOGITS).await.unwrap(), [i]);
+        }
+        for f in &frames {
+            assert_eq!(&recv_frame(&c1, 0, tags::GEN_REQUEST).await.unwrap(), f);
+        }
     }
 
     #[tokio::test]

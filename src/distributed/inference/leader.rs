@@ -25,6 +25,9 @@ pub struct SwarmLeader {
     rank_nodes: HashMap<Rank, SwarmNode>,
     /// Vocabulary size (needed to determine logits output size).
     vocab_size: usize,
+    /// Held across one request's send and its logits receive, so concurrent
+    /// [`SwarmLeader::pipeline_forward`] calls never take each other's logits.
+    forward_lock: tokio::sync::Mutex<()>,
 }
 
 impl SwarmLeader {
@@ -120,6 +123,7 @@ impl SwarmLeader {
             schedule,
             rank_nodes,
             vocab_size,
+            forward_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -215,6 +219,8 @@ impl SwarmLeader {
     /// 2. Wait for the logits from the last stage: `seq_len.max(1) * vocab_size`
     ///    values. A pipeline of the leader alone returns `input_data`.
     ///
+    /// Concurrent calls run one at a time.
+    ///
     /// # Errors
     ///
     /// No stage, a failed send or receive, or logits of the wrong length.
@@ -246,6 +252,7 @@ impl SwarmLeader {
             position: 0,
         };
         let input_bytes = bytemuck::cast_slice::<f32, u8>(input_data);
+        let _one_request = self.forward_lock.lock().await;
         transport::send_frame(
             &self.client,
             target,

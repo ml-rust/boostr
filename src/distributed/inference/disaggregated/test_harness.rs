@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
-use super::config::DisaggConfig;
+use super::config::{DEFAULT_HANDOFF_TIMEOUT, DisaggConfig};
 use super::decode_worker::DecodeWorker;
 use super::forward::{DecodeOpenFn, PrefillFn, PrefillOutput};
 use super::prefill_worker::PrefillWorker;
@@ -129,6 +129,61 @@ pub(crate) async fn local_clients(n: u32) -> Vec<NexarClient> {
     clients
 }
 
+/// The layout of every test cluster: router 0, prefill 1, decode 2.
+pub(crate) fn config(handoff_timeout: Duration) -> DisaggConfig {
+    DisaggConfig {
+        prefill_workers: vec![1],
+        decode_workers: vec![2],
+        router_rank: 0,
+        max_kv_transfer_bytes: 1 << 20,
+        handoff_timeout,
+    }
+}
+
+/// A prefill worker on rank 1 over the mock model.
+pub(crate) fn prefill_worker(
+    client: Arc<NexarClient>,
+    fail: Option<&'static str>,
+    handoff_timeout: Duration,
+) -> PrefillWorker<CpuRuntime> {
+    let sampler = CpuClient::new(CpuDevice::new());
+    PrefillWorker::new(client, 1, 0, 1 << 20, sampler, mock_prefill(fail))
+        .with_handoff_timeout(handoff_timeout)
+}
+
+/// A decode worker on rank 2 over the mock model.
+pub(crate) fn decode_worker(
+    client: Arc<NexarClient>,
+    decode: &MockDecode,
+) -> DecodeWorker<CpuRuntime> {
+    let sampler = CpuClient::new(CpuDevice::new());
+    DecodeWorker::new(client, 2, 0, vec![1], 1 << 20, sampler, decode.open_fn())
+}
+
+/// A router on rank 0 and the bare clients of ranks 1 and 2. The test runs
+/// a worker, or a fake one, on each.
+pub(crate) struct Parts {
+    pub router: DisaggRouter,
+    pub prefill: Arc<NexarClient>,
+    pub decode: Arc<NexarClient>,
+}
+
+impl Parts {
+    pub(crate) async fn start(handoff_timeout: Duration) -> Self {
+        let mut clients = local_clients(3).await.into_iter().map(Arc::new);
+        let (router, prefill, decode) = (
+            clients.next().expect("rank 0"),
+            clients.next().expect("rank 1"),
+            clients.next().expect("rank 2"),
+        );
+        Self {
+            router: DisaggRouter::new(router, config(handoff_timeout)).expect("router"),
+            prefill,
+            decode,
+        }
+    }
+}
+
 /// Router on rank 0, one prefill worker on rank 1, one decode worker on rank 2.
 pub(crate) struct Cluster {
     pub router: DisaggRouter,
@@ -137,34 +192,15 @@ pub(crate) struct Cluster {
 
 impl Cluster {
     pub(crate) async fn start(prefill_fail: Option<&'static str>, decode: MockDecode) -> Self {
-        let mut clients = local_clients(3).await.into_iter().map(Arc::new);
-        let (router, prefill, decode_c) = (
-            clients.next().expect("rank 0"),
-            clients.next().expect("rank 1"),
-            clients.next().expect("rank 2"),
-        );
-        let config = DisaggConfig {
-            prefill_workers: vec![1],
-            decode_workers: vec![2],
-            router_rank: 0,
-            max_kv_transfer_bytes: 1 << 20,
-        };
-        let sampler = CpuClient::new(CpuDevice::new());
-        let p = PrefillWorker::new(
-            prefill,
-            1,
-            0,
-            1 << 20,
-            sampler.clone(),
-            mock_prefill(prefill_fail),
-        );
-        let d = DecodeWorker::new(decode_c, 2, 0, vec![1], 1 << 20, sampler, decode.open_fn());
+        let parts = Parts::start(DEFAULT_HANDOFF_TIMEOUT).await;
+        let p = prefill_worker(parts.prefill, prefill_fail, DEFAULT_HANDOFF_TIMEOUT);
+        let d = decode_worker(parts.decode, &decode);
         let workers = vec![
             tokio::spawn(async move { p.run_loop().await }),
             tokio::spawn(async move { d.run_loop().await }),
         ];
         Self {
-            router: DisaggRouter::new(router, config).expect("router"),
+            router: parts.router,
             _workers: workers,
         }
     }

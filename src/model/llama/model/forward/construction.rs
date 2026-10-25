@@ -4,12 +4,12 @@
 use super::types::Llama;
 use crate::error::{Error, Result};
 use crate::model::config::ModelConfig;
-use crate::model::llama::model::blocks::{
-    BlockNorm, build_block_from_config, build_block_from_varbuilder,
-};
+use crate::model::llama::model::blocks::{BlockNorm, build_block_from_config};
 use crate::model::llama::model::lm_head::build_lm_head;
+use crate::model::llama::model::parts::{
+    Dims, cast_rope, rope_of, take_embedding, take_final_norm, take_layer,
+};
 use crate::model::traits::{Model, ModelClient};
-use crate::model::vocab_growth::fit_vocab_rows;
 use crate::nn::{Embedding, Linear, MaybeQuantLinear, RmsNorm, RoPE};
 use crate::quant::traits::DequantOps;
 use numr::autograd::Var;
@@ -30,83 +30,20 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
             + ShapeOps<R>,
     {
         config.validate()?;
-
-        let attn_cfg = config.attention.as_ref().ok_or_else(|| Error::ModelError {
-            reason: "LLaMA requires attention config".into(),
-        })?;
-
-        let hidden = config.hidden_size;
-        let num_heads = attn_cfg.num_heads;
-        let num_kv_heads = attn_cfg.kv_heads();
-        let head_dim = attn_cfg.head_dim(hidden);
-
-        // RoPE cache (borrow device before mutable borrows). A partial
-        // rotary head rotates its leading `rotary_dim` dims only.
-        let rope = RoPE::<R>::precompute_freqs_partial(
-            config.max_seq_len,
-            head_dim,
-            config.block.rotary_dim(head_dim),
-            attn_cfg.rope_theta,
-            attn_cfg.rope_scaling.as_ref(),
-            vb.device(),
-        )?;
+        let dims = Dims::of(config)?;
+        let rope = rope_of(config, dims, vb.device())?;
 
         let mut model_vb = vb.pp("model");
+        // Dequantized when the GGUF stored it quantized.
+        let (embed_tokens, embed_name) = take_embedding(&mut model_vb, config)?;
+        let layers = (0..config.num_layers)
+            .map(|i| take_layer(&mut model_vb, config, i, dims))
+            .collect::<Result<Vec<_>>>()?;
+        let norm = take_final_norm(&mut model_vb, config)?;
 
-        // Embedding (dequantize if GGUF stored it as quantized)
-        // The checkpoint key is captured here, from the builder that reads
-        // it, and handed to `build_lm_head`: a TIED head multiplies by this
-        // very tensor and an importance collection records it under this
-        // name. Reading it off the builder is what stops the name from
-        // becoming a second copy that can drift from the loader.
-        let embed_name = model_vb.full_name("embed_tokens.weight");
-        let embed_weight = model_vb.take_tensor_dequant("embed_tokens.weight", DType::F32)?;
-        // `model_vb.device()` here, not `vb.device()`: `vb` is mutably borrowed by
-        // `model_vb` for the rest of this scope.
-        let embed_weight = fit_vocab_rows(
-            embed_weight,
-            config,
-            model_vb.device(),
-            "embed_tokens.weight",
-        )?;
-        let embed_tokens = Embedding::new(embed_weight, false);
-
-        // Transformer layers
-        let mut layers = Vec::with_capacity(config.num_layers);
-        for i in 0..config.num_layers {
-            let mut layers_vb = model_vb.pp("layers");
-            let mut layer_vb = layers_vb.pp(&i.to_string());
-            let block = build_block_from_varbuilder(
-                &mut layer_vb,
-                config,
-                i,
-                num_heads,
-                num_kv_heads,
-                head_dim,
-            )?;
-            layers.push(block);
-        }
-
-        // Final norm
-        let norm_weight = model_vb.take_tensor("norm.weight")?;
-        let norm_bias = model_vb.take_tensor_optional("norm.bias")?;
-        let norm = BlockNorm::build(
-            norm_weight,
-            norm_bias,
-            config.rms_norm_eps as f32,
-            &config.block,
-            false,
-        )?;
-
-        // LM head (may be tied to embedding weights)
-        let lm_head = build_lm_head(vb, config, &embed_tokens, &embed_name)?;
-
-        // Pre-cast RoPE caches to match weight dtype (avoids per-token F32→BF16 casts)
-        let mut rope = rope;
-        if let Some(first_layer) = layers.first() {
-            let weight_dtype = first_layer.input_layernorm.weight().tensor().dtype();
-            rope.cast_caches(weight_dtype)?;
-        }
+        // LM head (tied to the embedding weights when configured)
+        let lm_head = build_lm_head(vb, config, Some((&embed_tokens, embed_name.as_str())))?;
+        let rope = cast_rope(rope, &layers)?;
 
         Ok(Self {
             config: config.clone(),

@@ -12,24 +12,31 @@ use numr::runtime::Runtime;
 /// Build `lm_head`, tying it to `embed_tokens` when configured, otherwise
 /// loading it from `vb` and reconciling its row count with `config.vocab_size`.
 ///
-/// `embed_name` is the checkpoint key `embed_tokens` was read from. Both
-/// branches below can mint a FRESH autograd id — the tied head wraps a clone
-/// of the embedding, and a grown head wraps a reshaped tensor — and an
-/// importance collection keys on that id, so each rebuilt layer re-binds its
-/// checkpoint key through `imatrix::register_name`. Without it the head's
-/// statistics would arrive nameless and `imatrix::finish` would refuse the
-/// whole run rather than guess.
+/// `embed` is the loaded embedding and the checkpoint key it was read from.
+/// A tied head needs it. An untied head reads `lm_head.weight` and takes
+/// `None`. Both branches below can mint a FRESH autograd id — the tied head
+/// wraps a clone of the embedding, and a grown head wraps a reshaped tensor
+/// — and an importance collection keys on that id, so each rebuilt layer
+/// re-binds its checkpoint key through `imatrix::register_name`. Without it
+/// the head's statistics would arrive nameless and `imatrix::finish` would
+/// refuse the whole run rather than guess.
+///
+/// # Errors
+///
+/// A tied head with no `embed`, or a head that does not load or grow.
 pub(super) fn build_lm_head<R: Runtime<DType = DType>>(
     vb: &mut crate::nn::VarBuilder<R>,
     config: &ModelConfig,
-    embed_tokens: &Embedding<R>,
-    embed_name: &str,
+    embed: Option<(&Embedding<R>, &str)>,
 ) -> Result<MaybeQuantLinear<R>>
 where
     R::Client:
         crate::quant::DequantOps<R> + numr::ops::TypeConversionOps<R> + ReduceOps<R> + ShapeOps<R>,
 {
     if config.tie_word_embeddings {
+        let (embed_tokens, embed_name) = embed.ok_or_else(|| Error::ModelError {
+            reason: "a tied LM head multiplies by the token embedding, and none was loaded".into(),
+        })?;
         // `embed_tokens` was already grown to `config.vocab_size` before this
         // call — cloning it here is what keeps the tied embedding and
         // lm_head structurally identical.
@@ -104,6 +111,100 @@ fn weight_rows(shape: &[usize]) -> usize {
     shape.first().copied().unwrap_or(0)
 }
 
+/// `embed_tokens(input_ids)`, times `block.embedding_multiplier` when set
+/// (Gemma).
+pub(super) fn embed_with<R, C>(
+    client: &C,
+    embed_tokens: &Embedding<R>,
+    config: &ModelConfig,
+    input_ids: &numr::tensor::Tensor<R>,
+) -> Result<numr::autograd::Var<R>>
+where
+    R: Runtime<DType = DType>,
+    C: crate::model::traits::ModelClient<R>,
+    R::Client: numr::ops::IndexingOps<R> + numr::ops::ScalarOps<R> + numr::ops::TensorOps<R>,
+{
+    let hidden = embed_tokens.forward(client, input_ids)?;
+    match config.block.embedding_multiplier {
+        Some(m) => {
+            numr::autograd::var_mul_scalar(&hidden, f64::from(m), client).map_err(Error::Numr)
+        }
+        None => Ok(hidden),
+    }
+}
+
+/// `lm_head(hidden)`, times `block.logit_scale` (Cohere), then
+/// `cap * tanh(logits / cap)` for `block.final_logit_softcap` (Gemma 2).
+pub(super) fn head_with<R, C>(
+    client: &C,
+    lm_head: &MaybeQuantLinear<R>,
+    config: &ModelConfig,
+    hidden: &numr::autograd::Var<R>,
+) -> Result<numr::autograd::Var<R>>
+where
+    R: Runtime<DType = DType>,
+    C: crate::model::traits::ModelClient<R>,
+    R::Client: numr::ops::TensorOps<R>
+        + numr::ops::ScalarOps<R>
+        + numr::ops::ReduceOps<R>
+        + numr::ops::IndexingOps<R>
+        + numr::ops::ShapeOps<R>
+        + numr::ops::ActivationOps<R>
+        + numr::ops::BinaryOps<R>
+        + numr::ops::UnaryOps<R>
+        + numr::ops::CompareOps<R>
+        + numr::ops::ConditionalOps<R>
+        + crate::quant::traits::DequantOps<R>,
+{
+    use numr::autograd::{var_mul_scalar, var_tanh};
+    let mut logits = lm_head.forward(client, hidden)?;
+    if let Some(scale) = config.block.logit_scale {
+        logits = var_mul_scalar(&logits, f64::from(scale), client).map_err(Error::Numr)?;
+    }
+    if let Some(cap) = config.block.final_logit_softcap {
+        let cap = f64::from(cap);
+        let t = var_mul_scalar(&logits, cap.recip(), client).map_err(Error::Numr)?;
+        let t = var_tanh(&t, client).map_err(Error::Numr)?;
+        logits = var_mul_scalar(&t, cap, client).map_err(Error::Numr)?;
+    }
+    Ok(logits)
+}
+
+/// Logits of the last layer's output: the deferred MLP residual added to
+/// `hidden`, then the final norm and [`head_with`].
+pub(super) fn final_logits<R, C>(
+    client: &C,
+    norm: &super::blocks::BlockNorm<R>,
+    lm_head: &MaybeQuantLinear<R>,
+    config: &ModelConfig,
+    hidden: numr::autograd::Var<R>,
+    prev_mlp_out: Option<numr::autograd::Var<R>>,
+) -> Result<numr::tensor::Tensor<R>>
+where
+    R: Runtime<DType = DType>,
+    C: crate::model::traits::ModelClient<R>,
+    R::Client: numr::ops::TensorOps<R>
+        + numr::ops::ScalarOps<R>
+        + numr::ops::ReduceOps<R>
+        + numr::ops::IndexingOps<R>
+        + numr::ops::ShapeOps<R>
+        + numr::ops::ActivationOps<R>
+        + numr::ops::BinaryOps<R>
+        + numr::ops::UnaryOps<R>
+        + numr::ops::CompareOps<R>
+        + numr::ops::ConditionalOps<R>
+        + crate::quant::traits::DequantOps<R>,
+{
+    let mut hidden = hidden;
+    if let Some(last_mlp) = prev_mlp_out {
+        hidden = numr::autograd::var_add(&hidden, &last_mlp, client).map_err(Error::Numr)?;
+    }
+    let hidden = norm.forward(client, &hidden)?;
+    Ok(head_with(client, lm_head, config, &hidden)?
+        .tensor()
+        .clone())
+}
+
 impl<R: Runtime<DType = DType>> super::Llama<R> {
     /// Token embeddings, times `block.embedding_multiplier` when set (Gemma).
     pub(crate) fn embed<C>(
@@ -115,17 +216,10 @@ impl<R: Runtime<DType = DType>> super::Llama<R> {
         C: crate::model::traits::ModelClient<R>,
         R::Client: numr::ops::IndexingOps<R> + numr::ops::ScalarOps<R> + numr::ops::TensorOps<R>,
     {
-        let hidden = self.embed_tokens.forward(client, input_ids)?;
-        match self.config.block.embedding_multiplier {
-            Some(m) => {
-                numr::autograd::var_mul_scalar(&hidden, f64::from(m), client).map_err(Error::Numr)
-            }
-            None => Ok(hidden),
-        }
+        embed_with(client, &self.embed_tokens, &self.config, input_ids)
     }
 
-    /// `lm_head(hidden)`, times `block.logit_scale` (Cohere), then
-    /// `cap * tanh(logits / cap)` for `block.final_logit_softcap` (Gemma 2).
+    /// The scaled and capped logits of `hidden`. See [`head_with`].
     pub(crate) fn head<C>(
         &self,
         client: &C,
@@ -145,18 +239,7 @@ impl<R: Runtime<DType = DType>> super::Llama<R> {
             + numr::ops::ConditionalOps<R>
             + crate::quant::traits::DequantOps<R>,
     {
-        use numr::autograd::{var_mul_scalar, var_tanh};
-        let mut logits = self.lm_head.forward(client, hidden)?;
-        if let Some(scale) = self.config.block.logit_scale {
-            logits = var_mul_scalar(&logits, f64::from(scale), client).map_err(Error::Numr)?;
-        }
-        if let Some(cap) = self.config.block.final_logit_softcap {
-            let cap = f64::from(cap);
-            let t = var_mul_scalar(&logits, cap.recip(), client).map_err(Error::Numr)?;
-            let t = var_tanh(&t, client).map_err(Error::Numr)?;
-            logits = var_mul_scalar(&t, cap, client).map_err(Error::Numr)?;
-        }
-        Ok(logits)
+        head_with(client, &self.lm_head, &self.config, hidden)
     }
 
     /// An error unless every block is the plain Llama block, for the CUDA

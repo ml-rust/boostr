@@ -37,6 +37,7 @@ where
             LoadedModel::Mamba3(_) => Err(Error::ModelError {
                 reason: "Mamba3 needs a Mamba3-specific recurrent cache (trapezoidal prev x/B plus optional MIMO state); LayeredSsmState is Mamba2-shaped".into(),
             }),
+            LoadedModel::LlamaStage(m) => Err(m.full_model_refusal("forward_with_ssm_state")),
             LoadedModel::Llama(_) | LoadedModel::LlamaTp(_) => Err(Error::ModelError {
                 reason: "Llama does not use SSM state — use forward_with_kv_cache() instead".into(),
             }),
@@ -76,6 +77,7 @@ where
             LoadedModel::Hybrid(m) => {
                 m.forward_hybrid(&client, input_ids, kv_cache, ssm_state, position)
             }
+            LoadedModel::LlamaStage(m) => Err(m.full_model_refusal("forward_hybrid")),
             LoadedModel::Llama(_) | LoadedModel::LlamaTp(_) => Err(Error::ModelError {
                 reason: "Llama model does not support forward_hybrid — use forward_with_kv_cache()"
                     .into(),
@@ -116,6 +118,7 @@ where
             LoadedModel::Qwen35(m) => {
                 m.forward_qwen35(&client, input_ids, kv_cache, gdn_state, rope_pos)
             }
+            LoadedModel::LlamaStage(m) => Err(m.full_model_refusal("forward_qwen35")),
             LoadedModel::Llama(_) | LoadedModel::LlamaTp(_) => Err(Error::ModelError {
                 reason: "Llama model does not support forward_qwen35 — use forward_with_kv_cache()"
                     .into(),

@@ -44,6 +44,7 @@ where
             LoadedModel::Llama(m) => {
                 m.forward_with_kv_cache(&client, input_ids, kv_cache, position)
             }
+            LoadedModel::LlamaStage(m) => Err(m.full_model_refusal("forward_with_kv_cache")),
             LoadedModel::LlamaTp(m) => {
                 m.forward_with_kv_cache(&client, input_ids, kv_cache, position)
             }
@@ -103,6 +104,7 @@ where
                 kv_seq_len,
                 rope_positions,
             ),
+            LoadedModel::LlamaStage(m) => Err(m.full_model_refusal("forward_with_paged_kv_cache")),
             LoadedModel::LlamaTp(_) => Err(Error::ModelError {
                 reason: "LlamaTp does not yet support paged KV cache".into(),
             }),
@@ -143,6 +145,7 @@ where
         let client = R::default_client(device);
         match self {
             LoadedModel::Llama(m) => m.forward_embed(&client, input_ids),
+            LoadedModel::LlamaStage(m) => m.forward_embed(&client, input_ids),
             LoadedModel::LlamaTp(_) => Err(Error::ModelError {
                 reason: "LlamaTp does not support pipeline-parallel forward_embed".into(),
             }),
@@ -174,6 +177,7 @@ where
         let client = R::default_client(device);
         match self {
             LoadedModel::Llama(m) => m.forward_hidden(&client, input_ids),
+            LoadedModel::LlamaStage(m) => Err(m.full_model_refusal("forward_hidden")),
             LoadedModel::LlamaTp(_) => Err(Error::ModelError {
                 reason: "LlamaTp does not support forward_hidden (use a single-GPU model for embeddings)".into(),
             }),
@@ -190,7 +194,8 @@ where
     ///
     /// Used for pipeline parallelism. Only supported for Llama-family models.
     /// `kv_cache` holds exactly `end_layer - start_layer` layers, and its slot
-    /// `0` holds layer `start_layer`. See `Llama::forward_layers_range`.
+    /// `0` holds layer `start_layer`. See `Llama::forward_layers_range`. A
+    /// `LlamaStage` runs a range inside the layers it holds only.
     #[allow(clippy::too_many_arguments)]
     pub fn forward_layers_range(
         &self,
@@ -208,6 +213,15 @@ where
         let client = R::default_client(device);
         match self {
             LoadedModel::Llama(m) => m.forward_layers_range(
+                &client,
+                hidden,
+                prev_mlp_out,
+                kv_cache,
+                start_layer,
+                end_layer,
+                position,
+            ),
+            LoadedModel::LlamaStage(m) => m.forward_layers_range(
                 &client,
                 hidden,
                 prev_mlp_out,
@@ -256,6 +270,7 @@ where
         let client = R::default_client(device);
         match self {
             LoadedModel::Llama(m) => m.forward_head(&client, hidden, prev_mlp_out),
+            LoadedModel::LlamaStage(m) => m.forward_head(&client, hidden, prev_mlp_out),
             LoadedModel::LlamaTp(_) => Err(Error::ModelError {
                 reason: "LlamaTp does not support pipeline-parallel forward_head".into(),
             }),

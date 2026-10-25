@@ -26,6 +26,10 @@ pub enum LoadedModel<R: Runtime> {
     /// | `starcoder2`     | StarCoder2 3B/7B/15B                    |
     /// | `internlm2`      | InternLM2 7B/20B                        |
     Llama(Box<crate::model::llama::Llama<R>>),
+    /// One pipeline stage of a `Llama`: the weights of one layer range only.
+    /// It runs the pipeline-stage forwards, and every full-model path
+    /// refuses it.
+    LlamaStage(Box<crate::model::llama::LlamaStage<R>>),
     /// Tensor-parallel LLaMA model (sharded across multiple GPUs via NCCL)
     LlamaTp(Box<crate::model::llama::LlamaTp<R>>),
     /// Mamba1 SSM model (original selective SSM + depthwise convolution)
@@ -47,6 +51,7 @@ impl<R: Runtime> std::fmt::Debug for LoadedModel<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LoadedModel::Llama(_) => f.debug_tuple("Llama").finish(),
+            LoadedModel::LlamaStage(_) => f.debug_tuple("LlamaStage").finish(),
             LoadedModel::LlamaTp(_) => f.debug_tuple("LlamaTp").finish(),
             LoadedModel::Mamba1(_) => f.debug_tuple("Mamba1").finish(),
             LoadedModel::Mamba2(_) => f.debug_tuple("Mamba2").finish(),

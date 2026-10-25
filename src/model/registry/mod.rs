@@ -1,6 +1,7 @@
 //! Model registry for loading models by name.
 
 mod accessors;
+mod dims;
 mod load;
 mod model;
 

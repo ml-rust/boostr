@@ -4,6 +4,7 @@ use super::model::LoadedModel;
 use crate::error::{Error, Result};
 use crate::format::peft::PeftAdapter;
 use crate::model::config::UniversalConfig;
+use crate::model::llama::LayerSpan;
 use crate::model::traits::Model;
 use crate::nn::VarBuilder;
 use numr::dtype::DType;
@@ -85,10 +86,35 @@ where
                 reason: format!(
                     "Unknown model type '{other}' without attention config. \
                      Only pure SSM models (mamba1/mamba2/mamba3) and hybrid models are \
-                     supported without attention configuration."
+                     supported without an attention config."
                 ),
             }),
         }
+    }
+
+    /// Load the layers of `span` as a [`LlamaStage`](crate::model::llama::LlamaStage),
+    /// from a `vb` that needs to hold only the tensors [`LayerSpan::reads`]
+    /// names. A multimodal config loads its text model: a stage runs token
+    /// ids and activations only.
+    ///
+    /// # Errors
+    ///
+    /// A model [`layer_range_refusal`](crate::model::llama::layer_range_refusal)
+    /// refuses, a span over another layer count, or a tensor the span reads
+    /// that `vb` does not hold.
+    pub fn load_layers(
+        config: &UniversalConfig,
+        vb: &mut VarBuilder<R>,
+        span: LayerSpan,
+    ) -> Result<Self> {
+        if let Some(reason) = crate::model::llama::layer_range_refusal(config) {
+            return Err(Error::ModelError { reason });
+        }
+        let mut text = with_quant_formats(config, vb).into_owned();
+        text.vision = None;
+        text.audio = None;
+        let stage = crate::model::llama::LlamaStage::from_varbuilder(vb, &text, span)?;
+        Ok(LoadedModel::LlamaStage(Box::new(stage)))
     }
 
     /// Load a tensor-parallel model. Requires a NCCL communicator.

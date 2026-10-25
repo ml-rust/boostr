@@ -33,6 +33,24 @@ impl<R: Runtime<DType = DType>> VarMap<R> {
     where
         R::Client: numr::ops::ShapeOps<R>,
     {
+        Self::from_gguf_reader_where(gguf, device, |_| true)
+    }
+
+    /// [`from_gguf_reader`](Self::from_gguf_reader) over the tensors whose
+    /// HuggingFace name `keep` accepts. Every other tensor stays unread:
+    /// its bytes are never copied, and on a memory map its pages are never
+    /// touched. The quantized formats cover the kept tensors only.
+    ///
+    /// A pipeline stage passes [`LayerSpan::reads`](crate::model::llama::LayerSpan::reads),
+    /// so it reads its own layers only.
+    pub fn from_gguf_reader_where(
+        gguf: &mut Gguf,
+        device: &R::Device,
+        keep: impl Fn(&str) -> bool,
+    ) -> Result<Self>
+    where
+        R::Client: numr::ops::ShapeOps<R>,
+    {
         use crate::format::gguf::gguf_to_hf_name_for_arch;
 
         let arch = gguf.metadata().architecture().map(str::to_string);
@@ -42,6 +60,9 @@ impl<R: Runtime<DType = DType>> VarMap<R> {
 
         for name in &names {
             let hf_name = gguf_to_hf_name_for_arch(arch.as_deref(), name);
+            if !keep(&hf_name) {
+                continue;
+            }
             let info = gguf.tensor_info(name)?.clone();
             if let Some(fmt) = info.ggml_type.to_quant_format() {
                 quant_formats.insert(fmt);
@@ -223,6 +244,20 @@ mod tests {
             .map(|row| half::f16::from_le_bytes([row[0], row[1]]).to_f32() - 1.0)
             .collect();
         assert_eq!(scales, iota(8));
+    }
+
+    /// A filtered load reads the kept tensors only, and reports the
+    /// quantized formats of those alone.
+    #[test]
+    fn a_filtered_load_leaves_other_tensors_unread() {
+        let tmp = create_test_gguf_file();
+        let mut gguf = Gguf::open(tmp.path()).unwrap();
+        let map = VarMap::<CpuRuntime>::from_gguf_reader_where(&mut gguf, &device(), |n| {
+            n == "weight_f32"
+        })
+        .unwrap();
+        assert_eq!(map.names().collect::<Vec<_>>(), ["weight_f32"]);
+        assert!(map.quant_formats().is_empty());
     }
 
     // ── GGUF test file helper ─────────────────────────────────────────

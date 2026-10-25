@@ -29,6 +29,7 @@ impl LoadedModel<numr::runtime::cuda::CudaRuntime> {
                 cos_slice,
                 sin_slice,
             ),
+            LoadedModel::LlamaStage(m) => Err(m.full_model_refusal("forward_graph_mode")),
             LoadedModel::LlamaTp(_) => Err(Error::ModelError {
                 reason: "LlamaTp does not yet support CUDA graph mode".into(),
             }),

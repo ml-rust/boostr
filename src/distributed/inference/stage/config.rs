@@ -59,7 +59,7 @@ where
     R::Client: IndexingOps<R>,
 {
     match model {
-        LoadedModel::Llama(_) => None,
+        LoadedModel::Llama(_) | LoadedModel::LlamaStage(_) => None,
         LoadedModel::Multimodal(m) => refusal(m.llm()),
         LoadedModel::LlamaTp(_) => Some(
             "a tensor-parallel shard cannot run as a pipeline stage. Load the model on each \
@@ -114,6 +114,30 @@ pub(super) fn check_assignment(assignment: &LayerAssignment, num_layers: usize) 
         );
     }
     Ok(())
+}
+
+/// Checks that `model` holds the layers of `assignment`. A model loaded
+/// whole holds every layer. A `LlamaStage` holds its span only.
+///
+/// # Errors
+///
+/// An assignment that reaches a layer outside the model's span.
+pub(super) fn check_held<R>(assignment: &LayerAssignment, model: &LoadedModel<R>) -> Result<()>
+where
+    R: Runtime<DType = DType>,
+    R::Client: IndexingOps<R>,
+{
+    let (start, end) = (
+        assignment.start_layer as usize,
+        assignment.end_layer as usize,
+    );
+    match model.layer_span() {
+        Some(span) if !span.contains(start, end) => bail!(
+            "stage layers {start}..{end}: the model holds {span} only. Load the stage's \
+             own layer range"
+        ),
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]

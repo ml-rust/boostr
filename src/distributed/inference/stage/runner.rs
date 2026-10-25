@@ -1,7 +1,7 @@
 //! [`StageRunner`]: one pipeline stage over a [`LoadedModel`].
 //!
-//! The model holds every layer's weights: the loaders build whole models,
-//! so each stage's memory tracks the whole checkpoint, not its range. The
+//! The model is a [`LlamaStage`](crate::model::llama::LlamaStage) that holds
+//! the weights of the stage's layer range only, or a whole model. The
 //! runner executes only its range, and its KV caches cover only that range.
 
 use anyhow::{Result, anyhow, bail};
@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use super::super::transport::{Activation, GenRequestHeader, LayerAssignment, StagePayload};
 use super::book::RequestBook;
-use super::config::{StageConfig, check_assignment, refusal};
+use super::config::{StageConfig, check_assignment, check_held, refusal};
 use super::contract::{Stage, StageOutput};
 use super::tensors::{host_f32, input_vars};
 use crate::inference::LayeredKvCache;
@@ -50,6 +50,7 @@ where
     /// - a model with SSM or Gated DeltaNet state, or a tensor-parallel shard
     /// - a model with no KV head count or head dimension
     /// - an assignment `check_assignment` refuses for this model
+    /// - an assignment outside the layers a `LlamaStage` model holds
     /// - a config [`StageConfig::check`] refuses
     pub fn new(
         model: Arc<LoadedModel<R>>,
@@ -65,6 +66,7 @@ where
             );
         }
         check_assignment(&assignment, model.num_layers())?;
+        check_held(&assignment, &*model)?;
         config.check(model.max_seq_len())?;
         let (Some(kv_heads), Some(head_dim)) = (model.num_kv_heads(), model.head_dim()) else {
             bail!(
@@ -320,6 +322,46 @@ mod tests {
         let h = header(1, StageOp::Prefill, 0, prompt.len());
         assert_close(&pipeline(&mut whole, h, &prompt).unwrap(), &want);
         assert_close(&pipeline(&mut split, h, &prompt).unwrap(), &want);
+    }
+
+    /// Stages that each loaded only their own layers' tensors give the
+    /// logits of the whole model, and a stage refuses a range it lacks.
+    #[test]
+    fn test_range_loaded_stages_match_the_full_model() {
+        use crate::model::llama::LayerSpan;
+        use crate::nn::VarBuilder;
+        use crate::test_utils::{random_llama_checkpoint, span_map};
+        let (client, device) = cpu_setup();
+        let (map, model_config) = random_llama_checkpoint(&client, &device, LAYERS, false);
+        let all = LayerSpan::new(0..LAYERS, LAYERS).unwrap();
+        let mut whole = span_map(&map, &model_config, &all);
+        let mut vb = VarBuilder::new(&mut whole, &device);
+        let rig = Rig {
+            model: Arc::new(LoadedModel::load(&model_config, &mut vb).unwrap()),
+            device: device.clone(),
+        };
+        let load = |start: u32, end: u32| {
+            let span = LayerSpan::new(start as usize..end as usize, LAYERS).unwrap();
+            let mut part = span_map(&map, &model_config, &span);
+            let mut vb = VarBuilder::new(&mut part, &device);
+            Arc::new(LoadedModel::load_layers(&model_config, &mut vb, span).unwrap())
+        };
+        let prompt = [2i64, 7, 1, 8];
+        let want = rig.reference(&prompt);
+        let mut stages: Vec<StageRunner<CpuRuntime>> = (0..LAYERS as u32)
+            .map(|l| StageRunner::new(load(l, l + 1), device.clone(), range(l, l + 1), config()))
+            .collect::<Result<_>>()
+            .unwrap();
+        let h = header(4, StageOp::Prefill, 0, prompt.len());
+        assert_close(&pipeline(&mut stages, h, &prompt).unwrap(), &want);
+
+        let err = StageRunner::new(load(1, 2), device, range(1, 3), config())
+            .err()
+            .unwrap();
+        assert!(
+            format!("{err:#}").contains("holds layers 1..2 of 3"),
+            "{err:#}"
+        );
     }
 
     #[test]

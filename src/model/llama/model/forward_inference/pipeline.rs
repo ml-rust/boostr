@@ -2,6 +2,8 @@
 //! KV cache forward pass.
 
 use super::super::Llama;
+use super::super::lm_head::final_logits;
+use super::super::parts::run_layers;
 use crate::error::{Error, Result};
 use crate::inference::LayeredKvCache;
 use crate::inference::kv_cache::LayeredPagedKvCache;
@@ -131,34 +133,16 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
                 ),
             });
         }
-        if kv_cache.num_layers() != end_layer - start_layer {
-            return Err(Error::ModelError {
-                reason: format!(
-                    "layer range {start_layer}..{end_layer} needs a KV cache of {} layers, \
-                     and this one holds {}",
-                    end_layer - start_layer,
-                    kv_cache.num_layers()
-                ),
-            });
-        }
-        let mut hidden = hidden;
-        let mut prev_mlp_out = prev_mlp_out;
-        for (slot, layer) in self.layers[start_layer..end_layer].iter().enumerate() {
-            let cache = kv_cache.layer_mut(slot).ok_or_else(|| Error::ModelError {
-                reason: format!("KV cache missing for layer {}", start_layer + slot),
-            })?;
-            let (h, mlp_out) = layer.forward_with_kv_cache(
-                client,
-                &hidden,
-                prev_mlp_out.as_ref(),
-                &self.rope,
-                cache,
-                position,
-            )?;
-            hidden = h;
-            prev_mlp_out = Some(mlp_out);
-        }
-        Ok((hidden, prev_mlp_out))
+        run_layers(
+            client,
+            &self.layers[start_layer..end_layer],
+            start_layer,
+            &self.rope,
+            hidden,
+            prev_mlp_out,
+            kv_cache,
+            position,
+        )
     }
 
     /// Apply the final norm and LM head to produce logits.
@@ -190,13 +174,14 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
             + ConditionalOps<R>
             + DequantOps<R>,
     {
-        let mut hidden = hidden;
-        if let Some(last_mlp) = prev_mlp_out {
-            hidden = numr::autograd::var_add(&hidden, &last_mlp, client).map_err(Error::Numr)?;
-        }
-        hidden = self.norm.forward(client, &hidden)?;
-        let logits = self.head(client, &hidden)?;
-        Ok(logits.tensor().clone())
+        final_logits(
+            client,
+            &self.norm,
+            &self.lm_head,
+            &self.config,
+            hidden,
+            prev_mlp_out,
+        )
     }
 
     /// Forward pass for inference with paged KV cache.

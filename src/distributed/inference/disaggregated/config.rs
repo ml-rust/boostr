@@ -7,6 +7,38 @@ use std::time::Duration;
 /// Default of [`DisaggConfig::handoff_timeout`].
 pub const DEFAULT_HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Default of [`DecodeQueueLimits::max_requests`].
+pub const DEFAULT_DECODE_QUEUE_REQUESTS: usize = 8;
+
+/// Default of [`DecodeQueueLimits::max_bytes`]: 4 GiB.
+pub const DEFAULT_DECODE_QUEUE_BYTES: u64 = 4 << 30;
+
+/// Bounds on the KV handoffs that wait for a decode worker.
+///
+/// A decode worker runs one request at a time. Every other handoff waits in
+/// its queue and holds a whole serialized KV cache. A handoff that finds the
+/// queue full gets no place: decode sends the router an error event for it,
+/// and the router ends the request. The request in decode counts against
+/// neither bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeQueueLimits {
+    /// Most handoffs that wait at once. Must be at least 1.
+    pub max_requests: usize,
+    /// Most KV cache bytes that wait at once. An empty queue takes one
+    /// handoff of any size up to `max_kv_transfer_bytes`, so a large cache
+    /// never waits forever.
+    pub max_bytes: u64,
+}
+
+impl Default for DecodeQueueLimits {
+    fn default() -> Self {
+        Self {
+            max_requests: DEFAULT_DECODE_QUEUE_REQUESTS,
+            max_bytes: DEFAULT_DECODE_QUEUE_BYTES,
+        }
+    }
+}
+
 /// Role of a disaggregated inference rank.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisaggRole {
@@ -28,8 +60,13 @@ pub struct DisaggConfig {
     /// Rank of the router node.
     pub router_rank: Rank,
     /// Largest serialized KV cache one request can transfer. A larger cache
-    /// ends the request with an error event.
+    /// ends the request with an error event. Decode checks it when the
+    /// handoff arrives, before the handoff takes a queue place.
     pub max_kv_transfer_bytes: usize,
+    /// Bounds on the handoffs that wait for each decode worker. Pass it to
+    /// [`super::DecodeWorker::with_queue_limits`]. Default
+    /// [`DecodeQueueLimits::default`].
+    pub decode_queue: DecodeQueueLimits,
     /// Longest wait for a KV handoff to reach its decode worker.
     ///
     /// The router starts the clock at the first token. A request whose
@@ -69,6 +106,7 @@ impl DisaggConfig {
             decode_workers: (prefill_count + 1..world).collect(),
             router_rank: 0,
             max_kv_transfer_bytes,
+            decode_queue: DecodeQueueLimits::default(),
             handoff_timeout: DEFAULT_HANDOFF_TIMEOUT,
         })
     }
@@ -106,12 +144,19 @@ impl DisaggConfig {
     /// # Errors
     ///
     /// No prefill or no decode worker, a rank at or past `world_size`, a
-    /// rank listed twice across the roles, or a zero `handoff_timeout`.
+    /// rank listed twice across the roles, a zero `handoff_timeout`, or a
+    /// zero `decode_queue.max_requests`.
     pub fn check(&self, world_size: u32) -> Result<()> {
         if self.handoff_timeout.is_zero() {
             bail!(
                 "disaggregated config has a zero handoff_timeout: every request with a decode \
-                 phase would fail. Use a positive duration, for example {DEFAULT_HANDOFF_TIMEOUT:?}"
+                 phase fails. Use a positive duration, for example {DEFAULT_HANDOFF_TIMEOUT:?}"
+            );
+        }
+        if self.decode_queue.max_requests == 0 {
+            bail!(
+                "disaggregated config has decode_queue.max_requests = 0: decode refuses every \
+                 handoff. Use at least 1, for example {DEFAULT_DECODE_QUEUE_REQUESTS}"
             );
         }
         if self.prefill_workers.is_empty() {
@@ -150,6 +195,7 @@ mod tests {
             decode_workers: vec![2, 3],
             router_rank: 0,
             max_kv_transfer_bytes: 1 << 20,
+            decode_queue: DecodeQueueLimits::default(),
             handoff_timeout: DEFAULT_HANDOFF_TIMEOUT,
         }
     }
@@ -185,6 +231,15 @@ mod tests {
         };
         let err = zero.check(4).unwrap_err().to_string();
         assert!(err.contains("handoff_timeout"), "{err}");
+        let no_queue = DisaggConfig {
+            decode_queue: DecodeQueueLimits {
+                max_requests: 0,
+                ..DecodeQueueLimits::default()
+            },
+            ..config()
+        };
+        let err = no_queue.check(4).unwrap_err().to_string();
+        assert!(err.contains("decode_queue.max_requests"), "{err}");
     }
 
     #[test]

@@ -1,14 +1,16 @@
 //! KV handoff confirmation.
 //!
-//! 1. Decode receives a handoff and sends its prefill worker a `HandoffAck`
-//!    at once, before the handoff waits for its turn.
+//! 1. Decode receives a handoff, checks its size and gives it a place in
+//!    its bounded queue, then sends its prefill worker a `HandoffAck` at
+//!    once, before the handoff waits for its turn. A handoff decode refuses
+//!    gets an error event to the router first, then the ack: the error ends
+//!    the request, and the ack frees the prefill worker's hold on it.
 //! 2. Prefill sends the router a handoff-accepted event. It travels behind
 //!    the first token on prefill's event lane, so the router reads it before
 //!    it reads prefill's disconnect.
 //! 3. A prefill worker that stops waits for the acks of its last handoffs,
 //!    then exits. A graceful prefill exit never fails a running request.
 
-use anyhow::Result;
 use nexar::{NexarClient, Rank};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -16,22 +18,35 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::protocol::{Event, EventBody, HandoffAck, KvHandoff, peek_request_id, tags};
-use super::wire::{TaskGuard, send_event, send_frame};
+use super::decode_queue::{DecodeQueue, Queued};
+use super::protocol::{Event, EventBody, HandoffAck, KvHandoff, Stage, peek_request_id, tags};
+use super::wire::{TaskGuard, send_error, send_event, send_frame};
 
-/// A received handoff, or its parse error with the request id when the header has one.
-pub(crate) type HandoffItem = Result<KvHandoff, (Option<u64>, anyhow::Error)>;
+/// The decode worker a handoff listener serves.
+pub(crate) struct DecodeIntake {
+    pub(crate) client: Arc<NexarClient>,
+    /// This decode worker's rank, for its error events.
+    pub(crate) rank: Rank,
+    pub(crate) router: Rank,
+    pub(crate) queue: Arc<DecodeQueue>,
+}
 
-/// Decode side: drains every handoff from `src` into `tx` and acks each one
-/// whose request id it can read.
+/// Decode side: takes every handoff from `src` into the queue and `tx`.
+///
+/// Per frame, in order:
+/// - A frame that parses and gets a queue place is acked, then sent to `tx`.
+/// - A frame decode refuses, malformed or past a queue bound, gets an error
+///   event to the router, then an ack. A frame with no readable request id
+///   is logged and dropped.
 ///
 /// The task ends when `src` disconnects or `tx` closes.
 pub(crate) fn spawn_handoff_listener(
-    client: Arc<NexarClient>,
+    intake: Arc<DecodeIntake>,
     src: Rank,
-    tx: UnboundedSender<HandoffItem>,
+    tx: UnboundedSender<Queued>,
 ) -> TaskGuard {
     let handle = tokio::spawn(async move {
+        let client = &intake.client;
         loop {
             let buf = match client.recv_bytes_tagged(src, tags::KV_HANDOFF).await {
                 Ok(buf) => buf,
@@ -40,18 +55,41 @@ pub(crate) fn spawn_handoff_listener(
                     break;
                 }
             };
-            let item = KvHandoff::from_bytes(&buf).map_err(|e| (peek_request_id(&buf), e));
-            let id = match &item {
-                Ok(h) => Some(h.request_id),
-                Err((id, _)) => *id,
+            let id = peek_request_id(&buf);
+            let admitted = KvHandoff::from_bytes(&buf).and_then(|h| intake.queue.admit(h));
+            drop(buf);
+            let queued = match (admitted, id) {
+                (Ok(queued), _) => Some(queued),
+                (Err(e), Some(request_id)) => {
+                    let sent = send_error(
+                        client,
+                        intake.router,
+                        intake.rank,
+                        Stage::Decode,
+                        request_id,
+                        e.context(format!("KV handoff from prefill rank {src} refused")),
+                    )
+                    .await;
+                    if let Err(e) = sent {
+                        tracing::warn!(request_id, "handoff refusal not sent to the router: {e:#}");
+                    }
+                    None
+                }
+                (Err(e), None) => {
+                    tracing::warn!(src, "dropping a malformed KV handoff: {e:#}");
+                    continue;
+                }
             };
+            // A frame that parsed has a readable id, so `id` is set here.
             if let Some(request_id) = id {
                 let ack = HandoffAck { request_id }.to_bytes();
-                if let Err(e) = send_frame(&client, src, tags::HANDOFF_ACK, &ack).await {
+                if let Err(e) = send_frame(client, src, tags::HANDOFF_ACK, &ack).await {
                     tracing::warn!(src, request_id, "KV handoff ack not sent: {e:#}");
                 }
             }
-            if tx.send(item).is_err() {
+            if let Some(queued) = queued
+                && tx.send(queued).is_err()
+            {
                 break;
             }
         }

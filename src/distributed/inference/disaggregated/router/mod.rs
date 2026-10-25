@@ -7,14 +7,18 @@
 //!   and fails if that confirmation does not arrive within `DisaggConfig::handoff_timeout`.
 //! - Cancel: dropping a `TokenStream` early tells both workers to stop and free the request.
 //! - Shutdown: `DisaggRouter::stop_workers` ends every worker's run loop.
+//! - Lost workers: a lost worker stays lost and gets no new request. A request
+//!   with no live worker of a role fails at once.
 //!
-//! - `routing`: `DisaggRouter`
+//! - `routing`: `DisaggRouter`, worker choice, request ids
 //! - `dispatch`: in-flight requests, lost workers, the handoff clock
+//! - `health`: `DisaggRouter::lost_workers`, `is_degraded`, `fault`
 //! - `pending`: one request, prefill-before-decode event order, `WorkerError`
 //! - `shutdown`: `DisaggRouter::stop_workers`
 //! - `stream`: `TokenStream`, `Generation`
 
 pub mod dispatch;
+pub mod health;
 pub mod pending;
 pub mod routing;
 pub mod shutdown;

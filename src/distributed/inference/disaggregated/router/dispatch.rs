@@ -1,9 +1,9 @@
 //! Router state shared by its listeners and its streams: in-flight requests,
 //! prefill load, lost workers and the handoff clock.
 
-use anyhow::anyhow;
+use anyhow::{Result, anyhow, bail};
 use nexar::{NexarClient, Rank};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
@@ -25,6 +25,9 @@ pub(crate) struct Shared {
     pub(crate) prefill_loads: Vec<PrefillLoad>,
     handoff_timeout: Duration,
     pending: Mutex<HashMap<u64, Pending>>,
+    /// Workers lost for good: a closed event channel or a nexar dead-peer
+    /// report. Lock order: `pending`, then `lost`.
+    lost: Mutex<BTreeSet<Rank>>,
 }
 
 impl Shared {
@@ -44,12 +47,28 @@ impl Shared {
                 .collect(),
             handoff_timeout,
             pending: Mutex::new(HashMap::new()),
+            lost: Mutex::new(BTreeSet::new()),
         }
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<u64, Pending>> {
         // A panic elsewhere leaves the map consistent: every update is one insert or remove.
         self.pending.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn lock_lost(&self) -> MutexGuard<'_, BTreeSet<Rank>> {
+        // Every update is one insert, so a panic elsewhere leaves the set consistent.
+        self.lost.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The workers the router lost, in rank order. A lost rank never comes back.
+    pub(crate) fn lost_ranks(&self) -> BTreeSet<Rank> {
+        self.lock_lost().clone()
+    }
+
+    /// Whether the router lost at least one worker.
+    pub(crate) fn any_lost(&self) -> bool {
+        !self.lock_lost().is_empty()
     }
 
     fn unload(&self, prefill_rank: Rank) {
@@ -65,18 +84,37 @@ impl Shared {
     }
 
     /// Tracks request `id`, counting it against `prefill_rank`.
+    ///
+    /// The check and the insert hold the request lock that [`Self::fail_rank`]
+    /// takes, so a worker lost after the router chose it either refuses the
+    /// request here or fails it there. No request waits on a lost worker.
+    ///
+    /// # Errors
+    ///
+    /// `prefill_rank` or `decode_rank` is a lost worker.
     pub(crate) fn register(
         &self,
         id: u64,
         tx: UnboundedSender<StreamItem>,
         prefill_rank: Rank,
         decode_rank: Rank,
-    ) {
+    ) -> Result<()> {
+        let mut map = self.lock();
+        {
+            let lost = self.lock_lost();
+            for (role, rank) in [("prefill", prefill_rank), ("decode", decode_rank)] {
+                if lost.contains(&rank) {
+                    bail!(
+                        "request {id}: {role} worker rank {rank} is lost. Send the request again"
+                    );
+                }
+            }
+        }
         if let Some(load) = self.prefill_loads.iter().find(|l| l.rank == prefill_rank) {
             load.in_flight.fetch_add(1, Ordering::Relaxed);
         }
-        self.lock()
-            .insert(id, Pending::new(tx, prefill_rank, decode_rank));
+        map.insert(id, Pending::new(tx, prefill_rank, decode_rank));
+        Ok(())
     }
 
     /// Stops tracking `id`. Returns whether it was still tracked.
@@ -163,14 +201,18 @@ impl Shared {
         }
     }
 
-    /// Ends every request that waits on `rank` with an error naming `reason`,
-    /// and tells the request's other worker to stop it.
+    /// Marks `rank` lost, ends every request that waits on it with an error
+    /// naming `reason`, and tells the request's other worker to stop it.
     ///
+    /// The router chooses no lost rank for a later request.
     /// A request waits on its decode worker until it finishes. It waits on
     /// its prefill worker until decode confirms the KV handoff, so a prefill
     /// worker lost between the first token and that confirmation fails it.
     pub(crate) fn fail_rank(&self, rank: Rank, reason: &str) {
         let mut map = self.lock();
+        if self.lock_lost().insert(rank) {
+            tracing::warn!(rank, "the router lost a worker: {reason}");
+        }
         let ids: Vec<u64> = map
             .iter()
             .filter(|(_, p)| p.decode_rank == rank || (p.prefill_rank == rank && !p.accepted))
@@ -251,8 +293,29 @@ mod tests {
 
     fn start(s: &Shared) -> UnboundedReceiver<StreamItem> {
         let (tx, rx) = unbounded_channel();
-        s.register(7, tx, 1, 2);
+        s.register(7, tx, 1, 2).unwrap();
         rx
+    }
+
+    #[tokio::test]
+    async fn a_lost_rank_stays_lost_and_refuses_new_requests() {
+        let s = shared(LONG).await;
+        assert!(!s.any_lost());
+        s.fail_rank(2, "peer closed");
+        assert!(s.any_lost());
+        assert_eq!(s.lost_ranks().into_iter().collect::<Vec<_>>(), [2]);
+        let (tx, _rx) = unbounded_channel();
+        let err = s.register(7, tx, 1, 2).unwrap_err().to_string();
+        assert!(err.contains("decode worker rank 2 is lost"), "{err}");
+        assert_eq!(
+            (s.tracked(), load(&s)),
+            (0, 0),
+            "a refused request takes no load"
+        );
+        s.fail_rank(1, "peer closed");
+        let (tx, _rx) = unbounded_channel();
+        let err = s.register(8, tx, 1, 3).unwrap_err().to_string();
+        assert!(err.contains("prefill worker rank 1 is lost"), "{err}");
     }
 
     fn load(s: &Shared) -> u64 {
@@ -317,6 +380,7 @@ mod tests {
         assert_eq!(got, [10, 20]);
         assert_eq!(s.tracked(), 0);
 
+        let s = shared(LONG).await;
         let mut rx = start(&s);
         s.deliver(2, tok(20, None));
         s.fail_rank(1, "peer closed");

@@ -3,6 +3,7 @@
 use anyhow::{Result, anyhow, bail};
 use nexar::{NexarClient, Rank};
 use std::collections::{BTreeSet, HashMap};
+use std::hash::{BuildHasher, RandomState};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -15,14 +16,20 @@ use super::stream::{Generation, TokenStream};
 /// Router: assigns each request a prefill and a decode worker and streams its tokens back.
 ///
 /// Routing policy:
-/// - Prefill: the worker with the fewest requests in prefill.
-/// - Decode: the worker a session key last used, else round-robin.
+/// - Prefill: the live worker with the fewest requests in prefill.
+/// - Decode: the live worker a session key last used, else round-robin over
+///   the live workers. A session pinned to a lost worker moves to a live one.
 ///
 /// The router listens to every worker on one task per rank. It holds a
 /// request's decode events until its first prefill event arrives. It ends a
 /// request with an error when a worker it waits on disconnects or nexar
 /// reports it dead, and when decode does not confirm the KV handoff within
-/// [`DisaggConfig::handoff_timeout`].
+/// [`DisaggConfig::handoff_timeout`]. A worker lost once stays lost: see
+/// [`Self::lost_workers`], [`Self::is_degraded`] and [`Self::fault`].
+///
+/// Request ids start at a random 64-bit origin drawn when the router starts,
+/// then count up. A restarted router therefore reuses no id that a
+/// long-running worker still remembers from the previous router.
 pub struct DisaggRouter {
     pub(super) shared: Arc<Shared>,
     pub(super) config: DisaggConfig,
@@ -72,31 +79,77 @@ impl DisaggRouter {
         Ok(Self {
             shared,
             config,
-            next_request_id: AtomicU64::new(1),
+            next_request_id: AtomicU64::new(request_id_origin()),
             decode_cursor: AtomicU64::new(0),
             kv_affinity: Mutex::new(HashMap::new()),
             _tasks: tasks,
         })
     }
 
-    fn choose_prefill_worker(&self) -> Rank {
+    /// The live prefill worker with the fewest requests in prefill.
+    ///
+    /// # Errors
+    ///
+    /// Every prefill worker is lost.
+    pub(super) fn choose_prefill_worker(&self) -> Result<Rank> {
+        let lost = self.shared.lost_ranks();
         self.shared
             .prefill_loads
             .iter()
+            .filter(|l| !lost.contains(&l.rank))
             .min_by_key(|l| l.in_flight.load(Ordering::Relaxed))
-            .map_or(self.config.prefill_workers[0], |l| l.rank)
+            .map(|l| l.rank)
+            .ok_or_else(|| {
+                anyhow!(
+                    "no live prefill worker: the router lost every prefill rank {:?}. Restart \
+                     the cluster",
+                    self.config.prefill_workers
+                )
+            })
     }
 
-    fn choose_decode_worker(&self, session_key: Option<&str>) -> Rank {
+    /// The live decode worker `session_key` last used, else the next live
+    /// worker in round-robin order. A pin to a lost worker is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Every decode worker is lost.
+    pub(super) fn choose_decode_worker(&self, session_key: Option<&str>) -> Result<Rank> {
+        let lost = self.shared.lost_ranks();
         if let Some(key) = session_key {
-            let affinity = self.kv_affinity.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(&rank) = affinity.get(key) {
-                return rank;
+            let mut affinity = self.kv_affinity.lock().unwrap_or_else(|e| e.into_inner());
+            match affinity.get(key) {
+                Some(rank) if !lost.contains(rank) => return Ok(*rank),
+                Some(_) => {
+                    affinity.remove(key);
+                }
+                None => {}
             }
         }
-        let workers = &self.config.decode_workers;
-        let idx = self.decode_cursor.fetch_add(1, Ordering::Relaxed) % workers.len() as u64;
-        workers[idx as usize]
+        let live: Vec<Rank> = self
+            .config
+            .decode_workers
+            .iter()
+            .copied()
+            .filter(|r| !lost.contains(r))
+            .collect();
+        if live.is_empty() {
+            bail!(
+                "no live decode worker: the router lost every decode rank {:?}. Restart the cluster",
+                self.config.decode_workers
+            );
+        }
+        let idx = self.decode_cursor.fetch_add(1, Ordering::Relaxed) % live.len() as u64;
+        Ok(live[idx as usize])
+    }
+
+    #[cfg(test)]
+    pub(super) fn kv_affinity_of(&self, session_key: &str) -> Option<Rank> {
+        self.kv_affinity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session_key)
+            .copied()
     }
 
     /// Routes later requests of `session_key` to `decode_rank`.
@@ -122,8 +175,9 @@ impl DisaggRouter {
     ///
     /// # Errors
     ///
-    /// An empty prompt, params that fail [`GenerationParams::check`], or a
-    /// failed send to the prefill worker. Later errors arrive on the stream.
+    /// An empty prompt, params that fail [`GenerationParams::check`], no live
+    /// prefill or no live decode worker, or a failed send to the prefill
+    /// worker. Later errors arrive on the stream.
     pub async fn route_request_stream(
         &self,
         prompt: &[u32],
@@ -134,8 +188,8 @@ impl DisaggRouter {
             bail!("the prompt has no tokens: pass at least one token id");
         }
         params.check()?;
-        let decode_rank = self.choose_decode_worker(session_key);
-        let prefill_rank = self.choose_prefill_worker();
+        let decode_rank = self.choose_decode_worker(session_key)?;
+        let prefill_rank = self.choose_prefill_worker()?;
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(
             request_id,
@@ -147,7 +201,7 @@ impl DisaggRouter {
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.shared
-            .register(request_id, tx, prefill_rank, decode_rank);
+            .register(request_id, tx, prefill_rank, decode_rank)?;
         let stream = TokenStream {
             request_id,
             rx,
@@ -210,6 +264,20 @@ impl Drop for DisaggRouter {
     fn drop(&mut self) {
         self.shared.fail_all("the router was dropped");
     }
+}
+
+/// The first request id of a new router: 64 random bits from the OS-seeded
+/// keys of [`RandomState`], mixed with the clock and the process id.
+///
+/// Ids then count up from it with wrapping. Two routers collide only when
+/// their id ranges overlap, which for `n` requests each has a chance near
+/// `2n / 2^64`. A seeded numr generator never feeds it, so a fixed
+/// `numr::random` seed cannot replay the ids of an earlier router.
+fn request_id_origin() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    RandomState::new().hash_one((nanos, std::process::id()))
 }
 
 fn spawn_event_listener(
@@ -462,6 +530,32 @@ mod tests {
             "the worker serves the next request"
         );
         assert_eq!(c.router.shared.tracked(), 0);
+    }
+
+    #[test]
+    fn each_router_draws_a_fresh_request_id_origin() {
+        let origins: BTreeSet<u64> = (0..64).map(|_| request_id_origin()).collect();
+        assert_eq!(origins.len(), 64, "no two origins repeat");
+    }
+
+    /// A restarted router must not reuse the ids of the router before it: a
+    /// long-running worker drops a cancel of an id it already finished.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_restarted_router_reuses_no_request_id() {
+        let mut ids = BTreeSet::new();
+        for _ in 0..2 {
+            let c = Cluster::start(None, MockDecode::default()).await;
+            for _ in 0..3 {
+                let s = c
+                    .router
+                    .route_request_stream(&[1], GenerationParams::greedy(2), None)
+                    .await
+                    .unwrap();
+                assert!(ids.insert(s.request_id()), "id {} repeats", s.request_id());
+                s.collect().await.unwrap();
+            }
+        }
+        assert!(!ids.contains(&1), "ids no longer start at 1");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

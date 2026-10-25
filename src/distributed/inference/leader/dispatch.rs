@@ -6,6 +6,10 @@
 //! reports. One dispatcher task owns the table of waiting requests, so no
 //! lock is held across a send or a receive. A lost stage fails every
 //! waiting request, and every later one.
+//!
+//! A waiting request waits for the reply to one frame id. A reply to
+//! another frame id of the same request id answers a frame whose caller
+//! stopped waiting, and the dispatcher drops it.
 
 use anyhow::{Result, anyhow, bail};
 use nexar::{NexarClient, Rank};
@@ -14,7 +18,7 @@ use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
-use super::super::transport::reply::peek_request_id;
+use super::super::transport::reply::peek_reply_key;
 use super::super::transport::tasks::TaskGuard;
 use super::super::transport::{LogitsFrame, StageError, tags};
 
@@ -22,21 +26,24 @@ use super::super::transport::{LogitsFrame, StageError, tags};
 pub(super) type Reply = Result<Vec<f32>>;
 
 enum Event {
-    /// A request waits for its reply.
+    /// A request waits for the reply to frame `frame_id`.
     Await {
         request_id: u64,
+        frame_id: u64,
         reply: oneshot::Sender<Reply>,
     },
-    /// A request no longer waits.
+    /// A request no longer waits: for frame `frame_id` only, or for any frame when `None`.
     Forget {
         request_id: u64,
+        frame_id: Option<u64>,
     },
     Logits(LogitsFrame),
     Failed(StageError),
-    /// A frame that did not parse. `request_id` is set when the frame named one.
+    /// A frame that did not parse, with the request id and frame id it holds.
     Malformed {
         rank: Rank,
         request_id: Option<u64>,
+        frame_id: Option<u64>,
         error: anyhow::Error,
     },
     /// A stage rank disconnected or died.
@@ -97,28 +104,38 @@ impl Dispatch {
         })
     }
 
-    /// Registers `request_id` as waiting. Call it before the request's frame
-    /// goes out, so its reply never arrives first.
+    /// Registers `request_id` as waiting for the reply to frame `frame_id`.
+    /// Call it before the frame goes out, so its reply never arrives first.
     ///
     /// # Errors
     ///
     /// The dispatcher stopped. A duplicate id or a lost stage fails the
     /// returned receiver instead.
-    pub(super) fn expect(&self, request_id: u64) -> Result<oneshot::Receiver<Reply>> {
+    pub(super) fn expect(
+        &self,
+        request_id: u64,
+        frame_id: u64,
+    ) -> Result<oneshot::Receiver<Reply>> {
         let (reply, rx) = oneshot::channel();
-        if self
-            .events
-            .send(Event::Await { request_id, reply })
-            .is_err()
-        {
+        let event = Event::Await {
+            request_id,
+            frame_id,
+            reply,
+        };
+        if self.events.send(event).is_err() {
             bail!("the swarm leader's dispatcher stopped");
         }
         Ok(rx)
     }
 
-    /// Stops waiting for `request_id`. A reply that arrives later drops.
-    pub(super) fn forget(&self, request_id: u64) {
-        let _ = self.events.send(Event::Forget { request_id });
+    /// Stops waiting for `request_id`: for frame `frame_id` only, so a
+    /// later frame of the id keeps its waiter, or for any frame when `None`.
+    /// A reply that arrives later drops.
+    pub(super) fn forget(&self, request_id: u64, frame_id: Option<u64>) {
+        let _ = self.events.send(Event::Forget {
+            request_id,
+            frame_id,
+        });
     }
 }
 
@@ -135,10 +152,14 @@ fn listen(
     TaskGuard::new(runtime.spawn(async move {
         loop {
             let event = match client.recv_bytes_tagged(src, tag).await {
-                Ok(buf) => parse(&buf).unwrap_or_else(|error| Event::Malformed {
-                    rank: src,
-                    request_id: peek_request_id(&buf),
-                    error,
+                Ok(buf) => parse(&buf).unwrap_or_else(|error| {
+                    let (request_id, frame_id) = peek_reply_key(&buf);
+                    Event::Malformed {
+                        rank: src,
+                        request_id,
+                        frame_id,
+                        error,
+                    }
                 }),
                 Err(e) => Event::Lost {
                     rank: src,
@@ -175,13 +196,38 @@ fn watch_failures(
     }))
 }
 
+/// One waiting request: the frame it waits for, and where its reply goes.
+struct Waiter {
+    frame_id: u64,
+    reply: oneshot::Sender<Reply>,
+}
+
+/// Removes and returns the waiter of `request_id` when it waits for
+/// `frame_id`, or for any frame when `frame_id` is `None`.
+fn take(
+    waiting: &mut HashMap<u64, Waiter>,
+    request_id: u64,
+    frame_id: Option<u64>,
+) -> Option<oneshot::Sender<Reply>> {
+    match waiting.entry(request_id) {
+        Entry::Occupied(slot) if frame_id.is_none_or(|f| f == slot.get().frame_id) => {
+            Some(slot.remove().reply)
+        }
+        _ => None,
+    }
+}
+
 /// The dispatcher: owns the table of waiting requests.
 async fn route(mut rx: mpsc::UnboundedReceiver<Event>, vocab_size: usize) {
-    let mut waiting: HashMap<u64, oneshot::Sender<Reply>> = HashMap::new();
+    let mut waiting: HashMap<u64, Waiter> = HashMap::new();
     let mut lost: Option<String> = None;
     while let Some(event) = rx.recv().await {
         match event {
-            Event::Await { request_id, reply } => {
+            Event::Await {
+                request_id,
+                frame_id,
+                reply,
+            } => {
                 if let Some(reason) = &lost {
                     let _ = reply.send(Err(anyhow!("request {request_id}: {reason}")));
                     continue;
@@ -194,16 +240,27 @@ async fn route(mut rx: mpsc::UnboundedReceiver<Event>, vocab_size: usize) {
                         )));
                     }
                     Entry::Vacant(slot) => {
-                        slot.insert(reply);
+                        slot.insert(Waiter { frame_id, reply });
                     }
                 }
             }
-            Event::Forget { request_id } => {
-                waiting.remove(&request_id);
+            Event::Forget {
+                request_id,
+                frame_id,
+            } => {
+                take(&mut waiting, request_id, frame_id);
             }
-            Event::Logits(LogitsFrame { request_id, logits }) => {
-                let Some(reply) = waiting.remove(&request_id) else {
-                    tracing::warn!(request_id, "dropping logits of a request nobody waits for");
+            Event::Logits(LogitsFrame {
+                request_id,
+                frame_id,
+                logits,
+            }) => {
+                let Some(reply) = take(&mut waiting, request_id, Some(frame_id)) else {
+                    tracing::debug!(
+                        request_id,
+                        frame_id,
+                        "dropping logits of a frame nobody waits for"
+                    );
                     continue;
                 };
                 let result = if logits.len() == vocab_size {
@@ -217,18 +274,23 @@ async fn route(mut rx: mpsc::UnboundedReceiver<Event>, vocab_size: usize) {
                 };
                 let _ = reply.send(result);
             }
-            Event::Failed(error) => match waiting.remove(&error.request_id) {
-                Some(reply) => {
-                    let _ = reply.send(Err(anyhow::Error::new(error)));
+            Event::Failed(error) => {
+                match take(&mut waiting, error.request_id, Some(error.frame_id)) {
+                    Some(reply) => {
+                        let _ = reply.send(Err(anyhow::Error::new(error)));
+                    }
+                    None => tracing::debug!("dropping a stage error nobody waits for: {error}"),
                 }
-                None => tracing::warn!("dropping a stage error nobody waits for: {error}"),
-            },
+            }
             Event::Malformed {
                 rank,
                 request_id,
+                frame_id,
                 error,
             } => {
-                let reply = request_id.and_then(|id| waiting.remove(&id));
+                // A reply with no readable frame id fails its request: it can
+                // be the reply the request waits for.
+                let reply = request_id.and_then(|id| take(&mut waiting, id, frame_id));
                 match reply {
                     Some(reply) => {
                         let _ = reply.send(Err(
@@ -240,8 +302,10 @@ async fn route(mut rx: mpsc::UnboundedReceiver<Event>, vocab_size: usize) {
             }
             Event::Lost { rank, reason } => {
                 let reason = format!("the pipeline lost stage rank {rank}: {reason}");
-                for (request_id, reply) in waiting.drain() {
-                    let _ = reply.send(Err(anyhow!("request {request_id}: {reason}")));
+                for (request_id, waiter) in waiting.drain() {
+                    let _ = waiter
+                        .reply
+                        .send(Err(anyhow!("request {request_id}: {reason}")));
                 }
                 lost.get_or_insert(reason);
             }

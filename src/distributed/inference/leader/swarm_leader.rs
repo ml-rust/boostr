@@ -30,6 +30,23 @@ pub struct SwarmLeader {
     /// every stage runs on the leader.
     remote: Option<(Route, Dispatch)>,
     next_request_id: AtomicU64,
+    /// The frame id of the next request frame. Release frames use 0.
+    next_frame_id: AtomicU64,
+}
+
+/// A waiter of [`SwarmLeader::pipeline_forward`]. Dropping it, when the call
+/// ends or its future drops, removes the waiter of its frame, so the
+/// request id takes its next frame. A late reply to the frame drops.
+struct WaitGuard<'a> {
+    dispatch: &'a Dispatch,
+    request_id: u64,
+    frame_id: u64,
+}
+
+impl Drop for WaitGuard<'_> {
+    fn drop(&mut self) {
+        self.dispatch.forget(self.request_id, Some(self.frame_id));
+    }
 }
 
 impl SwarmLeader {
@@ -113,6 +130,7 @@ impl SwarmLeader {
             rank_nodes,
             remote,
             next_request_id: AtomicU64::new(1),
+            next_frame_id: AtomicU64::new(1),
         })
     }
 
@@ -144,6 +162,11 @@ impl SwarmLeader {
     /// request takes one frame at a time: wait for its reply before its
     /// next frame. Call [`SwarmLeader::release`] when the request ends, also
     /// after an error.
+    ///
+    /// Dropping the returned future stops the wait: the id takes its next
+    /// frame at once, and the reply to the dropped frame drops when it
+    /// arrives. The stages still run the dropped frame, so release the id
+    /// before a new prefill of it.
     ///
     /// # Errors
     ///
@@ -185,14 +208,17 @@ impl SwarmLeader {
                 ids.len()
             );
         }
-        let frame = header.frame(&payload.encode()?);
-        let reply = dispatch.expect(id)?;
-        if let Err(e) =
-            transport::send_frame(&self.client, route.entry, tags::GEN_REQUEST, &frame).await
-        {
-            dispatch.forget(id);
-            return Err(e.context(format!("request {id}")));
-        }
+        let frame_id = self.next_frame_id.fetch_add(1, Ordering::Relaxed);
+        let frame = header.frame(frame_id, &payload.encode()?);
+        let reply = dispatch.expect(id, frame_id)?;
+        let _waiter = WaitGuard {
+            dispatch,
+            request_id: id,
+            frame_id,
+        };
+        transport::send_frame(&self.client, route.entry, tags::GEN_REQUEST, &frame)
+            .await
+            .map_err(|e| e.context(format!("request {id}")))?;
         reply
             .await
             .map_err(|_| anyhow!("request {id}: the swarm leader shut down before its reply"))?
@@ -209,8 +235,8 @@ impl SwarmLeader {
     /// No worker stage, or a failed send.
     pub async fn release(&self, request_id: u64) -> Result<()> {
         let (route, dispatch) = self.remote()?;
-        dispatch.forget(request_id);
-        let frame = GenRequestHeader::release(request_id).frame(&[]);
+        dispatch.forget(request_id, None);
+        let frame = GenRequestHeader::release(request_id).frame(0, &[]);
         transport::send_frame(&self.client, route.entry, tags::GEN_REQUEST, &frame).await
     }
 

@@ -8,8 +8,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::cancel::CancelBook;
+use super::config::DecodeQueueLimits;
+use super::decode_queue::{DecodeQueue, Queued};
 use super::forward::{DecodeOpenFn, DecodeStepFn};
-use super::handoff::spawn_handoff_listener;
+use super::handoff::{DecodeIntake, spawn_handoff_listener};
 use super::protocol::{Event, KvHandoff, Stage, TokenEvent};
 use super::sampler::RequestSampler;
 use super::wire::{
@@ -56,6 +58,10 @@ where
 /// Decode worker: takes KV handoffs from any prefill worker, then runs one
 /// request at a time to its finish.
 ///
+/// Handoffs wait in a queue bounded by [`DecodeQueueLimits`]. A handoff
+/// above `max_kv_transfer_bytes` or past a queue bound gets a
+/// [`Stage::Decode`] error event when it arrives, and never waits.
+///
 /// Each step feeds the last sampled token, samples the next with the
 /// request's seeded sampler and streams it to the router. The stream ends on
 /// an EOS id, a stop id or `max_new_tokens`. A cancel from the router ends
@@ -67,6 +73,7 @@ pub struct DecodeWorker<R: Runtime> {
     router_rank: Rank,
     prefill_workers: Vec<Rank>,
     max_kv_transfer_bytes: usize,
+    queue_limits: DecodeQueueLimits,
     sampler_client: R::Client,
     open_fn: Arc<DecodeOpenFn<R>>,
 }
@@ -97,9 +104,22 @@ where
             router_rank,
             prefill_workers,
             max_kv_transfer_bytes,
+            queue_limits: DecodeQueueLimits::default(),
             sampler_client,
             open_fn: Arc::new(open_fn),
         }
+    }
+
+    /// Sets the bounds on the handoffs that wait. Pass
+    /// [`super::DisaggConfig::decode_queue`]. Default [`DecodeQueueLimits::default`].
+    ///
+    /// A `max_requests` of 0 counts as 1, so the queue takes at least one handoff.
+    pub fn with_queue_limits(mut self, limits: DecodeQueueLimits) -> Self {
+        self.queue_limits = DecodeQueueLimits {
+            max_requests: limits.max_requests.max(1),
+            ..limits
+        };
+        self
     }
 
     pub fn rank(&self) -> Rank {
@@ -131,11 +151,18 @@ where
             self.router_rank,
             Arc::clone(&book),
         );
+        // The channel holds only handoffs with a queue place, so the queue bounds it.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let intake = Arc::new(DecodeIntake {
+            client: Arc::clone(&self.client),
+            rank: self.rank,
+            router: self.router_rank,
+            queue: DecodeQueue::new(self.queue_limits, self.max_kv_transfer_bytes),
+        });
         let _listeners: Vec<TaskGuard> = self
             .prefill_workers
             .iter()
-            .map(|&src| spawn_handoff_listener(Arc::clone(&self.client), src, tx.clone()))
+            .map(|&src| spawn_handoff_listener(Arc::clone(&intake), src, tx.clone()))
             .collect();
         drop(tx);
         let (mut stop, _stop) = spawn_shutdown_listener(Arc::clone(&self.client), self.router_rank);
@@ -151,19 +178,15 @@ where
                     None => break,
                 },
             };
-            match frame {
-                Ok(handoff) => self.serve(handoff, &book).await?,
-                Err((Some(id), e)) => self.fail(id, e).await?,
-                Err((None, e)) => {
-                    tracing::warn!(rank = self.rank, "dropping a malformed KV handoff: {e:#}")
-                }
-            }
+            self.serve(frame, &book).await?;
         }
         tracing::info!(rank = self.rank, "decode worker loop ended");
         Ok(())
     }
 
-    async fn serve(&self, handoff: KvHandoff, book: &CancelBook) -> Result<()> {
+    /// Runs one queued handoff. Its queue place frees as it leaves the queue.
+    async fn serve(&self, queued: Queued, book: &CancelBook) -> Result<()> {
+        let handoff = queued.take();
         let id = handoff.request_id;
         let result = self.decode(handoff, book).await;
         book.finish(id);
@@ -174,14 +197,6 @@ where
         let id = handoff.request_id;
         if book.is_cancelled(id) {
             return Ok(());
-        }
-        if handoff.kv_cache.len() > self.max_kv_transfer_bytes {
-            let e = anyhow!(
-                "the KV cache is {} bytes, above this decode worker's {}-byte limit",
-                handoff.kv_cache.len(),
-                self.max_kv_transfer_bytes
-            );
-            return self.fail(id, e).await;
         }
         let open_fn = Arc::clone(&self.open_fn);
         let opened = run_blocking(move || ActiveDecode::open(&open_fn, handoff)).await;
@@ -295,6 +310,80 @@ mod tests {
         let b = run(&mut ActiveDecode::open(&open, handoff(p)).unwrap());
         assert_eq!(a, b);
         assert_eq!(a.0.len(), 11);
+    }
+
+    /// Decode holds request A at its first step and has one queue place.
+    /// B takes the place. C finds the queue full, and D's cache passes the
+    /// transfer limit: both fail at once while A still holds decode.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_full_queue_and_an_oversize_cache_fail_on_arrival() {
+        use super::super::config::DEFAULT_HANDOFF_TIMEOUT;
+        use super::super::router::TokenStream;
+        use super::super::test_harness::{Parts, prefill_worker};
+        use std::sync::atomic::Ordering;
+
+        const WAIT: Duration = Duration::from_secs(10);
+        async fn next(s: &mut TokenStream) -> Result<TokenEvent> {
+            tokio::time::timeout(WAIT, s.next())
+                .await
+                .expect("an item arrives")
+                .expect("the stream has an item")
+        }
+
+        let parts = Parts::start(DEFAULT_HANDOFF_TIMEOUT).await;
+        let (mock, gate) = MockDecode::gated();
+        let steps = Arc::clone(&mock.steps);
+        let sampler = CpuClient::new(CpuDevice::new());
+        // The mock cache is 4 bytes per prompt token: 8 bytes fit two tokens.
+        let d = DecodeWorker::new(parts.decode, 2, 0, vec![1], 8, sampler, mock.open_fn())
+            .with_queue_limits(DecodeQueueLimits {
+                max_requests: 1,
+                max_bytes: 1 << 20,
+            });
+        let p = prefill_worker(parts.prefill, None, DEFAULT_HANDOFF_TIMEOUT);
+        let _tasks = [
+            TaskGuard::new(tokio::spawn(async move { d.run_loop().await })),
+            TaskGuard::new(tokio::spawn(async move { p.run_loop().await })),
+        ];
+        let router = &parts.router;
+        let route = move |prompt: &'static [u32]| {
+            router.route_request_stream(prompt, GenerationParams::greedy(3), None)
+        };
+
+        let mut a = route(&[1]).await.unwrap();
+        assert_eq!(next(&mut a).await.unwrap().token, 2);
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while steps.load(Ordering::Relaxed) == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "A never reached decode"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let mut b = route(&[1]).await.unwrap();
+        assert_eq!(next(&mut b).await.unwrap().token, 2);
+        let mut c = route(&[1]).await.unwrap();
+        assert_eq!(next(&mut c).await.unwrap().token, 2);
+        let err = format!("{:#}", next(&mut c).await.unwrap_err());
+        assert!(err.contains("decode queue is full"), "{err}");
+        let mut d = route(&[1, 2, 3]).await.unwrap();
+        assert_eq!(next(&mut d).await.unwrap().token, 4);
+        let err = format!("{:#}", next(&mut d).await.unwrap_err());
+        assert!(
+            err.contains("12 bytes") && err.contains("8-byte limit"),
+            "{err}"
+        );
+
+        for _ in 0..4 {
+            gate.send(()).unwrap();
+        }
+        for s in [a, b] {
+            let g = tokio::time::timeout(WAIT, s.collect())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(g.tokens, [3, 4], "A and B finish after the refusals");
+        }
     }
 
     #[test]

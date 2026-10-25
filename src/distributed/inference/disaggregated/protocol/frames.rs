@@ -136,9 +136,12 @@ impl Cancel {
     }
 }
 
-/// Decode worker → prefill worker: the KV handoff of `request_id` arrived.
+/// Decode worker → prefill worker: decode is done receiving the KV handoff of `request_id`.
 ///
-/// Decode sends it on receipt, before the handoff waits for its turn.
+/// Decode sends it on receipt, before the handoff waits for its turn. A
+/// handoff that took a queue place gets it after the admission. A handoff
+/// decode refused gets it after the error event to the router, so the
+/// prefill worker stops holding either one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HandoffAck {
     pub request_id: u64,

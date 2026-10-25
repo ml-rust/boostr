@@ -301,6 +301,32 @@ async fn concurrent_requests_fill_the_pipeline_and_never_cross() {
     .await;
 }
 
+/// The first frame of request 5 stays in the slow stage while its future
+/// drops. The id then takes a new prefill at once, and the late reply to the
+/// dropped frame never reaches the new call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dropped_forward_frees_its_id_and_its_late_reply_drops() {
+    let s = Swarm::start(Options {
+        delay: Duration::from_millis(300),
+        ..opts(2)
+    })
+    .await;
+    let l = &s.leader;
+    let dropped = tokio::time::timeout(
+        Duration::from_millis(50),
+        forward(l, frame(5, StageOp::Prefill, 0, &[1.0])),
+    )
+    .await;
+    assert!(dropped.is_err(), "the slow stage holds the first frame");
+    l.release(5).await.unwrap();
+    // The one worker stage adds 1.0: the dropped frame sums to 2, this one to 11.
+    let row = forward(l, frame(5, StageOp::Prefill, 0, &[10.0]))
+        .await
+        .unwrap();
+    assert_eq!(row, [5.0, 0.0, 11.0, 1.0]);
+    s.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lost_stage_fails_the_request_in_flight_and_every_later_one() {
     let _ = rustls::crypto::ring::default_provider().install_default();

@@ -8,6 +8,7 @@
 
 mod cancel;
 pub mod config;
+mod decode_queue;
 pub mod decode_worker;
 pub mod forward;
 mod handoff;
@@ -19,7 +20,7 @@ pub mod sampler;
 mod test_harness;
 mod wire;
 
-pub use config::{DisaggConfig, DisaggRole};
+pub use config::{DecodeQueueLimits, DisaggConfig, DisaggRole};
 pub use decode_worker::DecodeWorker;
 pub use forward::{DecodeOpenFn, DecodeStepFn, PrefillCancel, PrefillFn, PrefillOutput};
 pub use prefill_worker::PrefillWorker;

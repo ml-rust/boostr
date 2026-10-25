@@ -37,6 +37,7 @@ where
                     ids.len()
                 );
             }
+            check_token_ids(&ids, model.vocab_size())?;
             let ids = Tensor::<R>::from_slice(&ids, &[1, seq_len], device)?;
             Ok((model.forward_embed(&ids)?, None))
         }
@@ -67,6 +68,25 @@ where
             bail!("the stage with the embedding takes token ids, not an activation")
         }
     }
+}
+
+/// Checks that every id of a frame indexes the embedding: `0..vocab_size`.
+///
+/// The ids come off the wire, so an id outside the table stops here, before
+/// the embedding gather.
+///
+/// # Errors
+///
+/// The first id below 0 or at or past `vocab_size`, with its position.
+fn check_token_ids(ids: &[i64], vocab_size: usize) -> Result<()> {
+    let in_range = |id: i64| usize::try_from(id).is_ok_and(|i| i < vocab_size);
+    if let Some((pos, &id)) = ids.iter().enumerate().find(|&(_, &id)| !in_range(id)) {
+        bail!(
+            "token id {id} at position {pos} is outside the vocabulary: ids must be in \
+             0..{vocab_size}"
+        );
+    }
+    Ok(())
 }
 
 /// `values` as a `[1, seq_len, hidden]` tensor in the model's dtype.
@@ -115,6 +135,21 @@ mod tests {
     use super::*;
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::CpuRuntime;
+
+    #[test]
+    fn token_ids_outside_the_vocabulary_are_refused() {
+        check_token_ids(&[0, 5, 9], 10).unwrap();
+        check_token_ids(&[], 10).unwrap();
+        let err = check_token_ids(&[3, -1], 10).unwrap_err().to_string();
+        assert!(
+            err.contains("token id -1 at position 1") && err.contains("0..10"),
+            "{err}"
+        );
+        let err = check_token_ids(&[10], 10).unwrap_err().to_string();
+        assert!(err.contains("token id 10 at position 0"), "{err}");
+        assert!(check_token_ids(&[i64::MAX], 10).is_err());
+        assert!(check_token_ids(&[i64::MIN], 10).is_err());
+    }
 
     #[test]
     fn test_host_f32_reads_a_narrowed_view_and_a_half_tensor() {

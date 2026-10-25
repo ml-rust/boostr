@@ -14,7 +14,8 @@ use std::time::Duration;
 use super::stage::{Stage, StageOutput};
 use super::transport::tasks::{run_blocking, spawn_notice_listener};
 use super::transport::{
-    self, GenRequestHeader, LayerAssignment, LogitsFrame, StageError, StageOp, StagePayload, tags,
+    self, GenRequestHeader, LayerAssignment, LogitsFrame, RequestFrame, StageError, StageOp,
+    StagePayload, tags,
 };
 
 /// Worker state after connecting to the swarm and receiving assignment.
@@ -63,6 +64,10 @@ impl SwarmWorker {
     }
 
     /// Wait for layer assignment from the leader.
+    ///
+    /// # Errors
+    ///
+    /// A failed receive, or a frame [`LayerAssignment::from_frame`] refuses.
     pub async fn receive_assignment(
         client: &NexarClient,
         leader_rank: Rank,
@@ -75,10 +80,10 @@ impl SwarmWorker {
     ///
     /// # Errors
     ///
-    /// A failed receive, or a path that is not UTF-8.
+    /// A failed receive, another protocol version, or a path that is not UTF-8.
     pub async fn receive_model_path(client: &NexarClient, leader_rank: Rank) -> Result<String> {
         let frame = transport::recv_frame(client, leader_rank, tags::MODEL_PATH).await?;
-        String::from_utf8(frame).map_err(|e| anyhow!("the model path is not UTF-8: {e}"))
+        transport::model_path_from_frame(&frame)
     }
 
     /// Send readiness acknowledgment to leader.
@@ -151,7 +156,11 @@ impl SwarmWorker {
 
     /// Serves one request frame. An error ends the loop.
     async fn serve(&mut self, frame: &[u8]) -> Result<()> {
-        let (header, payload) = GenRequestHeader::split_frame(frame).map_err(|e| {
+        let RequestFrame {
+            header,
+            frame_id,
+            payload,
+        } = GenRequestHeader::split_frame(frame).map_err(|e| {
             e.context(format!(
                 "rank {} got a request frame it cannot read",
                 self.rank
@@ -160,7 +169,7 @@ impl SwarmWorker {
         if header.op == StageOp::Release {
             self.stage_mut()?.release(header.request_id);
             if let Some(next) = self.next_rank {
-                let release = header.frame(&[]);
+                let release = header.frame(frame_id, &[]);
                 transport::send_frame(&self.client, next, tags::GEN_REQUEST, &release).await?;
             }
             return Ok(());
@@ -174,15 +183,16 @@ impl SwarmWorker {
             (Ok(StageOutput::Activation(a)), Some(next)) => {
                 match StagePayload::Activation(a).encode() {
                     Ok(bytes) => {
-                        let out = header.frame(&bytes);
+                        let out = header.frame(frame_id, &bytes);
                         transport::send_frame(&self.client, next, tags::GEN_REQUEST, &out).await
                     }
-                    Err(e) => self.fail(&header, e).await,
+                    Err(e) => self.fail(&header, frame_id, e).await,
                 }
             }
             (Ok(StageOutput::Logits(logits)), None) => {
                 let out = LogitsFrame {
                     request_id: header.request_id,
+                    frame_id,
                     logits,
                 }
                 .to_frame();
@@ -190,13 +200,13 @@ impl SwarmWorker {
             }
             (Ok(StageOutput::Activation(_)), None) => {
                 let e = anyhow!("the last stage returned an activation, not logits");
-                self.fail(&header, e).await
+                self.fail(&header, frame_id, e).await
             }
             (Ok(StageOutput::Logits(_)), Some(next)) => {
                 let e = anyhow!("the stage returned logits, and the stage on rank {next} follows");
-                self.fail(&header, e).await
+                self.fail(&header, frame_id, e).await
             }
-            (Err(e), _) => self.fail(&header, e).await,
+            (Err(e), _) => self.fail(&header, frame_id, e).await,
         }
     }
 
@@ -226,8 +236,14 @@ impl SwarmWorker {
         Ok(result)
     }
 
-    /// Frees the request of `header` and sends the leader its [`StageError`].
-    async fn fail(&mut self, header: &GenRequestHeader, e: anyhow::Error) -> Result<()> {
+    /// Frees the request of `header` and sends the leader the [`StageError`]
+    /// of frame `frame_id`.
+    async fn fail(
+        &mut self,
+        header: &GenRequestHeader,
+        frame_id: u64,
+        e: anyhow::Error,
+    ) -> Result<()> {
         tracing::warn!(
             rank = self.rank,
             request_id = header.request_id,
@@ -236,6 +252,7 @@ impl SwarmWorker {
         self.stage_mut()?.release(header.request_id);
         let err = StageError {
             request_id: header.request_id,
+            frame_id,
             rank: self.rank,
             message: format!("{e:#}"),
         };

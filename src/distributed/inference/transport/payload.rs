@@ -3,13 +3,20 @@
 //!
 //! ```text
 //! tokens:     [id: i64 LE] × seq_len
-//! activation: [hidden_n: u32 LE][mlp_n: u32 LE][hidden: f32 LE × hidden_n][mlp: f32 LE × mlp_n]
+//! activation: [version: u8][hidden_n: u32 LE][mlp_n: u32 LE]
+//!             [hidden: f32 LE × hidden_n][mlp: f32 LE × mlp_n]
 //! ```
 //!
 //! `mlp` is the deferred MLP residual of the last layer the previous stage
-//! ran. `mlp_n` of 0 means no residual.
+//! ran. `mlp_n` of 0 means no residual. Token ids carry no version byte:
+//! they travel only after the versioned request header.
 
 use anyhow::{Result, anyhow, bail};
+
+use super::version::{body, versioned};
+
+/// Byte length of the activation counts, after the version byte.
+const COUNTS_LEN: usize = 8;
 
 /// A hidden state on the wire, with the deferred MLP residual of the last
 /// layer that ran.
@@ -34,7 +41,8 @@ impl Activation {
         };
         let hidden_n = count(self.hidden.len(), "hidden state")?;
         let mlp_n = count(mlp.len(), "MLP residual")?;
-        let mut buf = Vec::with_capacity(8 + (self.hidden.len() + mlp.len()) * 4);
+        let values = value_bytes(hidden_n, mlp_n)?;
+        let mut buf = versioned(COUNTS_LEN + values);
         buf.extend_from_slice(&hidden_n.to_le_bytes());
         buf.extend_from_slice(&mlp_n.to_le_bytes());
         for v in self.hidden.iter().chain(mlp) {
@@ -47,17 +55,20 @@ impl Activation {
     ///
     /// # Errors
     ///
-    /// A buffer shorter than its counts say, or longer.
+    /// Another protocol version, counts whose byte length overflows `usize`,
+    /// or a buffer shorter than its counts say, or longer.
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        let Some((counts, values)) = bytes.split_first_chunk::<8>() else {
+        let rest = body(bytes, "activation")?;
+        let Some((counts, values)) = rest.split_first_chunk::<COUNTS_LEN>() else {
             bail!(
-                "an activation of {} bytes has no 8-byte count header",
+                "an activation of {} bytes has no {COUNTS_LEN}-byte count header after its \
+                 version byte",
                 bytes.len()
             );
         };
-        let hidden_n = u32::from_le_bytes([counts[0], counts[1], counts[2], counts[3]]) as usize;
-        let mlp_n = u32::from_le_bytes([counts[4], counts[5], counts[6], counts[7]]) as usize;
-        let want = (hidden_n + mlp_n) * 4;
+        let hidden_n = u32::from_le_bytes([counts[0], counts[1], counts[2], counts[3]]);
+        let mlp_n = u32::from_le_bytes([counts[4], counts[5], counts[6], counts[7]]);
+        let want = value_bytes(hidden_n, mlp_n)?;
         if values.len() != want {
             bail!(
                 "an activation of {hidden_n} hidden and {mlp_n} residual values needs {want} \
@@ -65,12 +76,30 @@ impl Activation {
                 values.len()
             );
         }
-        let (hidden, mlp) = values.split_at(hidden_n * 4);
+        // `want` fits a usize, so the hidden part's byte length fits too.
+        let (hidden, mlp) = values.split_at(hidden_n as usize * 4);
         Ok(Self {
             hidden: f32s_le(hidden),
             mlp: (mlp_n > 0).then(|| f32s_le(mlp)),
         })
     }
+}
+
+/// Byte length of `hidden_n + mlp_n` `f32` values.
+///
+/// # Errors
+///
+/// The length overflows `usize`, as it can on a 32-bit target.
+fn value_bytes(hidden_n: u32, mlp_n: u32) -> Result<usize> {
+    usize::try_from(u64::from(hidden_n) + u64::from(mlp_n))
+        .ok()
+        .and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| {
+            anyhow!(
+                "an activation of {hidden_n} hidden and {mlp_n} residual values needs more \
+                 bytes than this target addresses"
+            )
+        })
 }
 
 fn f32s_le(bytes: &[u8]) -> Vec<f32> {
@@ -139,6 +168,7 @@ impl StagePayload {
 
 #[cfg(test)]
 mod tests {
+    use super::super::version::PROTOCOL_VERSION;
     use super::*;
 
     #[test]
@@ -161,9 +191,45 @@ mod tests {
             hidden: vec![1.0],
             mlp: None,
         };
-        let mut want = vec![1, 0, 0, 0, 0, 0, 0, 0];
+        let mut want = vec![PROTOCOL_VERSION, 1, 0, 0, 0, 0, 0, 0, 0];
         want.extend_from_slice(&1.0f32.to_le_bytes());
         assert_eq!(a.encode().unwrap(), want);
+    }
+
+    #[test]
+    fn test_an_activation_of_another_version_is_refused() {
+        let mut bytes = Activation {
+            hidden: vec![1.0],
+            mlp: None,
+        }
+        .encode()
+        .unwrap();
+        bytes[0] = PROTOCOL_VERSION + 1;
+        let err = Activation::decode(&bytes).unwrap_err().to_string();
+        assert!(err.contains("activation of protocol version"), "{err}");
+        assert!(Activation::decode(&[]).is_err());
+    }
+
+    #[test]
+    fn test_huge_counts_are_refused_without_overflow() {
+        let mut bytes = vec![PROTOCOL_VERSION];
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(&[0; 16]);
+        assert!(Activation::decode(&bytes).is_err());
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(
+            value_bytes(u32::MAX, u32::MAX).unwrap(),
+            (2 * u32::MAX as usize) * 4
+        );
+        #[cfg(target_pointer_width = "32")]
+        {
+            let err = value_bytes(u32::MAX, 1).unwrap_err().to_string();
+            assert!(
+                err.contains("more bytes than this target addresses"),
+                "{err}"
+            );
+        }
     }
 
     #[test]

@@ -12,6 +12,13 @@
 //! Every version keeps `magic` and `request_id` at these offsets. A reader
 //! that refuses a version still reads the request id, so the refusal reaches
 //! the router as an error frame for that request.
+//!
+//! The router numbers requests from a random 64-bit origin it draws at
+//! start, with wrapping. Ids of one router never repeat, and a restarted
+//! router misses the ids a long-running worker remembers from the router
+//! before it, except by a chance near `2n / 2^64` for `n` requests each.
+//! A worker treats an id as an opaque key: no reader orders or compares
+//! ids, so the full `u64` range is valid, 0 included.
 
 use anyhow::{Result, anyhow, bail};
 
@@ -36,7 +43,8 @@ pub enum FrameKind {
     Cancel = 3,
     /// Worker → router: one token, one error, or a handoff confirmation.
     Event = 4,
-    /// Decode worker → prefill worker: the KV handoff arrived.
+    /// Decode worker → prefill worker: decode holds the KV handoff in its
+    /// queue, or refused it with an error event to the router.
     HandoffAck = 5,
 }
 

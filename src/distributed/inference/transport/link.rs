@@ -25,7 +25,8 @@ pub mod tags {
     pub const LAYER_ASSIGNMENT: u64 = BASE | 1;
     /// Worker → leader: a one-byte readiness frame.
     pub const WORKER_READY: u64 = BASE | 2;
-    /// Leader → worker: the model path as UTF-8.
+    /// Leader → worker: the version byte, then the model path as UTF-8.
+    /// See [`model_path_frame`](super::super::model_path_frame).
     pub const MODEL_PATH: u64 = BASE | 3;
     /// Previous stage → next stage: a
     /// [`GenRequestHeader`](super::super::GenRequestHeader) frame with its

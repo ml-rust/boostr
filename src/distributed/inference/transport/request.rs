@@ -1,21 +1,38 @@
 //! The header of a [`tags::GEN_REQUEST`](super::tags::GEN_REQUEST) frame.
 //!
 //! ```text
-//! [version:    u8 = PROTOCOL_VERSION]
+//! [version:    u8 = PROTOCOL_VERSION]  — the shared byte of `super::version`
 //! [op:         u8]                     — StageOp
 //! [request_id: u64 LE]
 //! [position:   u32 LE]                 — first position of the payload
 //! [seq_len:    u32 LE]                 — positions the payload covers
+//! [frame_id:   u64 LE]                 — the leader's number for this frame, 0 in a release
 //! [payload]                            — StagePayload, empty for a release
 //! ```
+//!
+//! The first [`HEADER_LEN`] bytes are the [`GenRequestHeader`]. Each stage
+//! forwards `frame_id` unchanged, and the reply to the frame carries it back.
 
 use anyhow::{Result, anyhow, bail};
 
-/// Version every request frame writes. A reader refuses any other version.
-pub const PROTOCOL_VERSION: u8 = 2;
+use super::version::{PROTOCOL_VERSION, check_version};
 
 /// Byte length of [`GenRequestHeader`] on the wire.
 pub const HEADER_LEN: usize = 18;
+
+/// Byte length of the header and the frame id, the part before the payload.
+const PREFIX_LEN: usize = HEADER_LEN + 8;
+
+/// One request frame read off the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestFrame<'a> {
+    pub header: GenRequestHeader,
+    /// The leader's number for this frame, unique per leader. The reply to
+    /// it carries the number back, so the leader drops a reply to an earlier
+    /// frame of the same request id. 0 in a release, which gets no reply.
+    pub frame_id: u64,
+    pub payload: &'a [u8],
+}
 
 /// What a request frame asks a stage to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -94,13 +111,7 @@ impl GenRequestHeader {
     ///
     /// Another protocol version, or an unknown op.
     pub fn from_bytes(buf: &[u8; HEADER_LEN]) -> Result<Self> {
-        if buf[0] != PROTOCOL_VERSION {
-            bail!(
-                "a swarm request frame of protocol version {} reached a reader of version \
-                 {PROTOCOL_VERSION}. Run the same boostr release on every rank",
-                buf[0]
-            );
-        }
+        check_version(buf[0], "request frame")?;
         let u32_at = |i: usize| u32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
         let mut id = [0u8; 8];
         id.copy_from_slice(&buf[2..10]);
@@ -112,29 +123,33 @@ impl GenRequestHeader {
         })
     }
 
-    /// A [`tags::GEN_REQUEST`](super::tags::GEN_REQUEST) frame: this header, then `payload`.
-    pub fn frame(&self, payload: &[u8]) -> Vec<u8> {
-        let mut frame = Vec::with_capacity(HEADER_LEN + payload.len());
+    /// A [`tags::GEN_REQUEST`](super::tags::GEN_REQUEST) frame: this header,
+    /// `frame_id`, then `payload`.
+    pub fn frame(&self, frame_id: u64, payload: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(PREFIX_LEN + payload.len());
         frame.extend_from_slice(&self.to_bytes());
+        frame.extend_from_slice(&frame_id.to_le_bytes());
         frame.extend_from_slice(payload);
         frame
     }
 
-    /// The header and payload of a request frame.
+    /// The header, frame id and payload of a request frame.
     ///
     /// # Errors
     ///
-    /// A frame shorter than the header, a header [`Self::from_bytes`]
-    /// refuses, a release with positions or a payload, or a prefill or
-    /// decode with no positions.
-    pub fn split_frame(frame: &[u8]) -> Result<(Self, &[u8])> {
-        let Some((header, payload)) = frame.split_first_chunk::<HEADER_LEN>() else {
+    /// A frame shorter than the header and frame id, a header
+    /// [`Self::from_bytes`] refuses, a release with positions or a payload,
+    /// or a prefill or decode with no positions.
+    pub fn split_frame(frame: &[u8]) -> Result<RequestFrame<'_>> {
+        let Some((prefix, payload)) = frame.split_first_chunk::<PREFIX_LEN>() else {
             bail!(
-                "a swarm request frame of {} bytes has no {HEADER_LEN}-byte header",
+                "a swarm request frame of {} bytes has no {PREFIX_LEN}-byte header and frame id",
                 frame.len()
             );
         };
-        let header = Self::from_bytes(header)?;
+        let (header, frame_id) = prefix.split_at(HEADER_LEN);
+        let header = Self::from_bytes(header.try_into()?)?;
+        let frame_id = u64::from_le_bytes(frame_id.try_into()?);
         match header.op {
             StageOp::Release if header.seq_len != 0 || !payload.is_empty() => bail!(
                 "the release of request {} carries {} positions and {} payload bytes, not none",
@@ -147,7 +162,11 @@ impl GenRequestHeader {
                 header.request_id,
                 header.op
             ),
-            _ => Ok((header, payload)),
+            _ => Ok(RequestFrame {
+                header,
+                frame_id,
+                payload,
+            }),
         }
     }
 }
@@ -166,14 +185,15 @@ mod tests {
     }
 
     #[test]
-    fn test_header_roundtrips_with_its_payload() {
+    fn test_header_roundtrips_with_its_frame_id_and_payload() {
         let header = decode(4, 2);
-        let frame = header.frame(&[9, 8, 7]);
-        assert_eq!(frame.len(), HEADER_LEN + 3);
-        let (back, payload) = GenRequestHeader::split_frame(&frame).unwrap();
-        assert_eq!(back, header);
-        assert_eq!(payload, [9, 8, 7]);
-        assert!(GenRequestHeader::split_frame(&frame[..HEADER_LEN - 1]).is_err());
+        let frame = header.frame(0x1122_3344_5566_7788, &[9, 8, 7]);
+        assert_eq!(frame.len(), HEADER_LEN + 8 + 3);
+        let back = GenRequestHeader::split_frame(&frame).unwrap();
+        assert_eq!(back.header, header);
+        assert_eq!(back.frame_id, 0x1122_3344_5566_7788);
+        assert_eq!(back.payload, [9, 8, 7]);
+        assert!(GenRequestHeader::split_frame(&frame[..HEADER_LEN + 7]).is_err());
     }
 
     #[test]
@@ -194,14 +214,14 @@ mod tests {
     #[test]
     fn test_a_release_is_empty_and_a_forward_is_not() {
         let release = GenRequestHeader::release(5);
-        let frame = release.frame(&[]);
-        let (back, payload) = GenRequestHeader::split_frame(&frame).unwrap();
+        let frame = release.frame(0, &[]);
+        let back = GenRequestHeader::split_frame(&frame).unwrap();
         assert_eq!(
-            (back.op, back.request_id, payload.len()),
+            (back.header.op, back.header.request_id, back.payload.len()),
             (StageOp::Release, 5, 0)
         );
-        assert!(GenRequestHeader::split_frame(&release.frame(&[1])).is_err());
-        assert!(GenRequestHeader::split_frame(&decode(3, 0).frame(&[])).is_err());
+        assert!(GenRequestHeader::split_frame(&release.frame(0, &[1])).is_err());
+        assert!(GenRequestHeader::split_frame(&decode(3, 0).frame(1, &[])).is_err());
     }
 
     #[test]

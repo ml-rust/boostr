@@ -61,8 +61,8 @@ impl SwarmLeader {
                 has_embedding: stage.has_embedding,
                 has_lm_head: stage.has_lm_head,
             };
-            let bytes = assignment.to_bytes();
-            transport::send_frame(&self.client, rank, tags::LAYER_ASSIGNMENT, &bytes).await?;
+            let frame = assignment.to_frame();
+            transport::send_frame(&self.client, rank, tags::LAYER_ASSIGNMENT, &frame).await?;
             tracing::info!(rank, layers, "Sent layer assignment to worker");
         }
         Ok(())
@@ -89,8 +89,9 @@ impl SwarmLeader {
 
     /// Send every worker the path of the model to load.
     pub async fn send_model_path(&self, path: &str) -> Result<()> {
+        let frame = transport::model_path_frame(path);
         for rank in 1..self.client.world_size() {
-            transport::send_frame(&self.client, rank, tags::MODEL_PATH, path.as_bytes()).await?;
+            transport::send_frame(&self.client, rank, tags::MODEL_PATH, &frame).await?;
             tracing::info!(rank, path, "Sent model path to worker");
         }
         Ok(())

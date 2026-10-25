@@ -5,14 +5,14 @@
 //! and each step checks that `position` equals the cache length.
 
 use anyhow::{Result, anyhow, bail};
-use nexar::NexarClient;
+use nexar::{NexarClient, Rank};
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
-use super::config::{DEFAULT_HANDOFF_TIMEOUT, DisaggConfig};
+use super::config::{DEFAULT_HANDOFF_TIMEOUT, DecodeQueueLimits, DisaggConfig};
 use super::decode_worker::DecodeWorker;
 use super::forward::{DecodeOpenFn, PrefillCancel, PrefillFn, PrefillOutput};
 use super::prefill_worker::PrefillWorker;
@@ -136,6 +136,7 @@ pub(crate) fn config(handoff_timeout: Duration) -> DisaggConfig {
         decode_workers: vec![2],
         router_rank: 0,
         max_kv_transfer_bytes: 1 << 20,
+        decode_queue: DecodeQueueLimits::default(),
         handoff_timeout,
     }
 }
@@ -156,8 +157,17 @@ pub(crate) fn decode_worker(
     client: Arc<NexarClient>,
     decode: &MockDecode,
 ) -> DecodeWorker<CpuRuntime> {
+    decode_worker_on(client, 2, decode)
+}
+
+/// A decode worker on `rank` over the mock model, fed by prefill rank 1.
+pub(crate) fn decode_worker_on(
+    client: Arc<NexarClient>,
+    rank: Rank,
+    decode: &MockDecode,
+) -> DecodeWorker<CpuRuntime> {
     let sampler = CpuClient::new(CpuDevice::new());
-    DecodeWorker::new(client, 2, 0, vec![1], 1 << 20, sampler, decode.open_fn())
+    DecodeWorker::new(client, rank, 0, vec![1], 1 << 20, sampler, decode.open_fn())
 }
 
 /// A router on rank 0 and the bare clients of ranks 1 and 2. The test runs

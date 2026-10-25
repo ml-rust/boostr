@@ -6,5 +6,6 @@ pub use blocks::Qwen35GraphStep;
 pub use blocks::{
     GdnBlock, GdnProjection, GdnWeights, GdnWeightsWithIds, Qwen35AttentionBlock,
     Qwen35AttentionProjection, Qwen35AttentionWeights, Qwen35AttentionWeightsWithIds,
+    SSM_PRENORM_EPS,
 };
 pub use model::HybridModel;

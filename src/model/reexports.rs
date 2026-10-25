@@ -19,7 +19,7 @@ pub use super::mamba::{
 };
 pub use super::multimodal::{ModelInput, MultimodalModel};
 pub use super::qwen35::{Qwen35Model, qwen35_config_from_gguf, qwen35_config_from_hf};
-pub use super::registry::LoadedModel;
+pub use super::registry::{LoadedModel, unsupported_model_refusal};
 pub use super::speech_lm::{
     ALL_SPECIAL_TOKENS, CodecVocab, DEFAULT_CONTROL_REGION, ExpressiveTtsLayout, OwnedSpeechRecord,
     SpecialToken, SpeechLayout, SpeechRecord, SpeechVocab, pack_record, pack_records,

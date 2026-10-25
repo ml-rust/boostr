@@ -22,6 +22,9 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
         comm: Arc<dyn Communicator>,
     ) -> Result<Self> {
         config.validate()?;
+        if let Some(reason) = crate::model::llama::mla_refusal(config) {
+            return Err(Error::ModelError { reason });
+        }
         if !config.block.is_llama() {
             return Err(Error::ModelError {
                 reason: format!(
@@ -187,6 +190,9 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
         comm: Arc<dyn Communicator>,
     ) -> Result<Self> {
         config.validate()?;
+        if let Some(reason) = crate::model::llama::mla_refusal(config) {
+            return Err(Error::ModelError { reason });
+        }
         if !config.block.is_llama() {
             return Err(Error::ModelError {
                 reason: format!(

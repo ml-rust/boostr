@@ -19,7 +19,11 @@ impl HuggingFaceConfig {
             // Order matters: check specific variants before generic ones
             // (e.g. "qwen2moe" before "qwen", "phi3" before "phi",
             //  "gemma2" before "gemma").
-            if arch_lower.contains("llava") {
+            if arch_lower.contains("deepseekv2") {
+                return "deepseek_v2".to_string();
+            } else if arch_lower.contains("deepseekv3") {
+                return "deepseek_v3".to_string();
+            } else if arch_lower.contains("llava") {
                 return "llava".to_string();
             } else if arch_lower.contains("qwen_vl") || arch_lower.contains("qwenvl") {
                 return "qwen_vl".to_string();

@@ -54,10 +54,11 @@ where
                         .into(),
                 })
             }
-            LoadedModel::Hybrid(_) => Err(Error::ModelError {
-                reason: "Hybrid model does not support forward_with_kv_cache — use forward_hybrid() instead"
-                    .into(),
-            }),
+            // A hybrid with no SSM layer (an MLA model) runs on the KV cache
+            // alone. One with SSM layers refuses: it needs forward_hybrid.
+            LoadedModel::Hybrid(m) => {
+                m.forward_with_kv_cache(&client, input_ids, kv_cache, position)
+            }
             LoadedModel::Qwen35(_) => Err(Error::ModelError {
                 reason: "qwen35 model does not support forward_with_kv_cache — use forward_qwen35() instead"
                     .into(),

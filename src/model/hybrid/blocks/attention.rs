@@ -1,6 +1,7 @@
 //! The hybrid model's attention block: pre-norm, RoPE (or ALiBi), KV-cached
-//! multi-head attention, and the gated MLP.
+//! multi-head attention, and the feed-forward block (MLP or MoE).
 
+use super::ffn::FeedForward;
 use crate::error::{Error, Result};
 use crate::inference::KvCache;
 use crate::model::traits::ModelClient;
@@ -8,7 +9,8 @@ use crate::nn::var_ops::{repeat_kv, var_contiguous};
 use crate::nn::{Linear, RmsNorm, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
 use crate::ops::impl_generic::attention::rope::apply_rope_impl;
-use numr::autograd::{Var, var_add, var_mul, var_narrow, var_reshape, var_silu};
+use crate::quant::traits::DequantOps;
+use numr::autograd::{Var, var_add, var_narrow, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
@@ -16,7 +18,8 @@ use numr::ops::{
 };
 use numr::runtime::Runtime;
 
-/// Attention block: pre-norm → multi-head attention → residual + pre-norm → MLP → residual
+/// Attention block: pre-norm → multi-head attention → residual + pre-norm →
+/// feed-forward → residual
 pub(in crate::model::hybrid) struct AttentionBlock<R: Runtime> {
     pub(in crate::model::hybrid) input_layernorm: RmsNorm<R>,
     pub(in crate::model::hybrid) q_proj: Linear<R>,
@@ -24,9 +27,7 @@ pub(in crate::model::hybrid) struct AttentionBlock<R: Runtime> {
     pub(in crate::model::hybrid) v_proj: Linear<R>,
     pub(in crate::model::hybrid) o_proj: Linear<R>,
     pub(in crate::model::hybrid) post_attention_layernorm: RmsNorm<R>,
-    pub(in crate::model::hybrid) gate_proj: Linear<R>,
-    pub(in crate::model::hybrid) up_proj: Linear<R>,
-    pub(in crate::model::hybrid) down_proj: Linear<R>,
+    pub(in crate::model::hybrid) ffn: FeedForward<R>,
     pub(in crate::model::hybrid) num_heads: usize,
     pub(in crate::model::hybrid) num_kv_heads: usize,
     pub(in crate::model::hybrid) head_dim: usize,
@@ -63,7 +64,8 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         // Pre-norm attention + residual
         let normed = self.input_layernorm.forward(client, x)?;
@@ -72,7 +74,7 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
 
         // Pre-norm MLP + residual
         let normed = self.post_attention_layernorm.forward(client, &h)?;
-        let mlp_out = self.mlp_forward(client, &normed)?;
+        let mlp_out = self.ffn.forward(client, &normed)?;
         var_add(&h, &mlp_out, client).map_err(Error::Numr)
     }
 
@@ -184,27 +186,6 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
         // Output projection
         self.o_proj.forward(client, &attn_out)
     }
-
-    fn mlp_forward<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>
-    where
-        C: ModelClient<R>,
-        R::Client: TensorOps<R>
-            + ScalarOps<R>
-            + ReduceOps<R>
-            + IndexingOps<R>
-            + ShapeOps<R>
-            + ActivationOps<R>
-            + BinaryOps<R>
-            + UnaryOps<R>
-            + CompareOps<R>
-            + ConditionalOps<R>,
-    {
-        let gate = self.gate_proj.forward(client, x)?;
-        let up = self.up_proj.forward(client, x)?;
-        let gate_silu = var_silu(&gate, client).map_err(Error::Numr)?;
-        let hidden = var_mul(&gate_silu, &up, client).map_err(Error::Numr)?;
-        self.down_proj.forward(client, &hidden)
-    }
 }
 
 #[cfg(test)]
@@ -231,9 +212,11 @@ mod tests {
             v_proj: Linear::new(w(), None, false),
             o_proj: Linear::new(w(), None, false),
             post_attention_layernorm: RmsNorm::new(n(), 1e-5, false),
-            gate_proj: Linear::new(w(), None, false),
-            up_proj: Linear::new(w(), None, false),
-            down_proj: Linear::new(w(), None, false),
+            ffn: FeedForward::Mlp(Box::new(super::super::ffn::GatedMlp {
+                gate_proj: Linear::new(w(), None, false),
+                up_proj: Linear::new(w(), None, false),
+                down_proj: Linear::new(w(), None, false),
+            })),
             num_heads: 2,
             num_kv_heads: 2,
             head_dim: 4,

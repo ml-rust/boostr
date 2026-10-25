@@ -40,10 +40,9 @@ where
     /// Whether this model uses SSM state.
     pub fn needs_ssm_state(&self) -> bool {
         match self {
-            LoadedModel::Mamba1(_)
-            | LoadedModel::Mamba2(_)
-            | LoadedModel::Mamba3(_)
-            | LoadedModel::Hybrid(_) => true,
+            LoadedModel::Mamba1(_) | LoadedModel::Mamba2(_) | LoadedModel::Mamba3(_) => true,
+            // An MLA model is a hybrid with no SSM layer.
+            LoadedModel::Hybrid(m) => m.num_ssm_layers() > 0,
             LoadedModel::Multimodal(m) => m.llm().needs_ssm_state(),
             LoadedModel::Llama(_)
             | LoadedModel::LlamaStage(_)
@@ -104,10 +103,23 @@ where
                         .to_string(),
                 );
             }
-            LoadedModel::Hybrid(_) => {
+            LoadedModel::Hybrid(m) if m.num_ssm_layers() > 0 => {
                 return Some(
                     "model type 'hybrid' uses SSM layers, which keep recurrent state instead of \
                      a paged KV cache; turn paged attention off"
+                        .to_string(),
+                );
+            }
+            LoadedModel::Hybrid(m) if m.is_mla() => {
+                return Some(
+                    "this model uses MLA attention over a latent KV cache, which the \
+                     paged-attention path does not run; turn paged attention off"
+                        .to_string(),
+                );
+            }
+            LoadedModel::Hybrid(_) => {
+                return Some(
+                    "model type 'hybrid' has no paged-attention forward; turn paged attention off"
                         .to_string(),
                 );
             }
@@ -198,7 +210,7 @@ where
         match self {
             LoadedModel::Mamba2(m) => Some(m.mamba_config()),
             LoadedModel::Mamba1(_) | LoadedModel::Mamba3(_) => None,
-            LoadedModel::Hybrid(m) => Some(m.mamba_config()),
+            LoadedModel::Hybrid(m) => m.mamba_config(),
             LoadedModel::Multimodal(m) => m.llm().mamba_config(),
             LoadedModel::Llama(_)
             | LoadedModel::LlamaStage(_)
@@ -237,19 +249,37 @@ where
         }
     }
 
-    /// Layers that read the `LayeredKvCache`. `Some` for `qwen35`, whose
-    /// cache is sized per attention layer rather than per model layer.
+    /// Layers that read the `LayeredKvCache`. `Some` for `qwen35` and
+    /// `hybrid`, whose cache is sized per attention layer rather than per
+    /// model layer.
     pub fn num_attention_layers(&self) -> Option<usize> {
         match self {
             LoadedModel::Qwen35(m) => Some(m.num_attention_layers()),
+            LoadedModel::Hybrid(m) => Some(m.num_attention_layers()),
             LoadedModel::Multimodal(m) => m.llm().num_attention_layers(),
             LoadedModel::Llama(_)
             | LoadedModel::LlamaStage(_)
             | LoadedModel::LlamaTp(_)
             | LoadedModel::Mamba1(_)
             | LoadedModel::Mamba2(_)
+            | LoadedModel::Mamba3(_) => None,
+        }
+    }
+
+    /// Layers that read the `LayeredSsmState` of a `hybrid` model, whose
+    /// state is sized per SSM layer rather than per model layer. `None` for
+    /// every other model; a pure SSM model reads one state per layer.
+    pub fn num_ssm_layers(&self) -> Option<usize> {
+        match self {
+            LoadedModel::Hybrid(m) => Some(m.num_ssm_layers()),
+            LoadedModel::Multimodal(m) => m.llm().num_ssm_layers(),
+            LoadedModel::Llama(_)
+            | LoadedModel::LlamaStage(_)
+            | LoadedModel::LlamaTp(_)
+            | LoadedModel::Mamba1(_)
+            | LoadedModel::Mamba2(_)
             | LoadedModel::Mamba3(_)
-            | LoadedModel::Hybrid(_) => None,
+            | LoadedModel::Qwen35(_) => None,
         }
     }
 

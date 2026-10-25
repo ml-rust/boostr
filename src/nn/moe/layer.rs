@@ -175,9 +175,11 @@ impl<R: Runtime> MoeLayer<R> {
         };
         let z_loss = router_z_loss(client, &z_logits)?;
 
-        // Initialize output accumulator as zeros
+        // The accumulator, the routing mask and the expert outputs all take the
+        // dtype of `x`, so a BF16 or F16 layer adds like with like.
+        let dtype = x.tensor().dtype();
         let mut output = Var::new(
-            Tensor::<R>::zeros(&[num_tokens, hidden_size], DType::F32, x.tensor().device())?,
+            Tensor::<R>::zeros(&[num_tokens, hidden_size], dtype, x.tensor().device())?,
             x.requires_grad(),
         );
 
@@ -205,7 +207,7 @@ impl<R: Runtime> MoeLayer<R> {
                 let mask = client
                     .eq(slot_indices.tensor(), &expert_id_tensor)
                     .map_err(Error::Numr)?;
-                let mask_f32 = client.cast(&mask, DType::F32).map_err(Error::Numr)?;
+                let mask_weights = client.cast(&mask, dtype).map_err(Error::Numr)?;
 
                 // Run expert on ALL tokens, then mask out unrouted ones.
                 // An expert with no routed token adds only zeros, so the sum is
@@ -214,7 +216,7 @@ impl<R: Runtime> MoeLayer<R> {
 
                 // Weight: expert_out * slot_weight * mask
                 // mask: [num_tokens, 1], slot_weights: [num_tokens, 1]
-                let mask_var = Var::new(mask_f32, false);
+                let mask_var = Var::new(mask_weights, false);
                 let weighted = numr::autograd::var_mul(&expert_out, &slot_weights, client)
                     .map_err(Error::Numr)?;
                 let masked =

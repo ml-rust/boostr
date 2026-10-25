@@ -47,10 +47,22 @@ where
     /// Uses capability-based dispatch: any model with an attention config
     /// is loaded as a Llama (universal transformer). This means new HF
     /// model types work automatically without code changes as long as they
-    /// share the standard transformer structure.
+    /// share the standard transformer structure. An attention config with
+    /// `kv_latent_dim` (MLA) loads as the hybrid model, with every layer
+    /// attention when the config has no SSM layer.
+    ///
+    /// # Errors
+    ///
+    /// A model type [`unsupported_model_refusal`](super::unsupported_model_refusal)
+    /// refuses, checked before any weight is read. Otherwise the error of the
+    /// model's loader.
     pub fn load(config: &UniversalConfig, vb: &mut VarBuilder<R>) -> Result<Self> {
+        if let Some(reason) = super::unsupported_model_refusal(&config.model_type) {
+            return Err(Error::ModelError { reason });
+        }
         let folded = with_quant_formats(config, vb);
         let config: &UniversalConfig = &folded;
+        let is_mla = config.attention.as_ref().is_some_and(|a| a.is_mla());
         match config.model_type.as_str() {
             "mamba1" => {
                 let model = crate::model::mamba::Mamba1Model::from_varbuilder(vb, config)?;
@@ -76,6 +88,11 @@ where
             _ if config.vision.is_some() || config.audio.is_some() => {
                 let model = crate::model::multimodal::MultimodalModel::from_varbuilder(vb, config)?;
                 Ok(LoadedModel::Multimodal(Box::new(model)))
+            }
+            // MLA attention runs in the hybrid model, which holds the MLA block.
+            _ if is_mla => {
+                let model = crate::model::hybrid::HybridModel::from_varbuilder(vb, config)?;
+                Ok(LoadedModel::Hybrid(Box::new(model)))
             }
             // Everything else with attention config → Llama (the universal transformer)
             _ if config.attention.is_some() => {
@@ -107,7 +124,9 @@ where
         vb: &mut VarBuilder<R>,
         span: LayerSpan,
     ) -> Result<Self> {
-        if let Some(reason) = crate::model::llama::layer_range_refusal(config) {
+        if let Some(reason) = super::unsupported_model_refusal(&config.model_type)
+            .or_else(|| crate::model::llama::layer_range_refusal(config))
+        {
             return Err(Error::ModelError { reason });
         }
         let mut text = with_quant_formats(config, vb).into_owned();
@@ -126,6 +145,9 @@ where
         vb: &mut VarBuilder<R>,
         comm: std::sync::Arc<dyn numr::runtime::Communicator>,
     ) -> Result<Self> {
+        if let Some(reason) = super::unsupported_model_refusal(&config.model_type) {
+            return Err(Error::ModelError { reason });
+        }
         if config.attention.is_some() {
             let model = crate::model::llama::LlamaTp::from_varbuilder(vb, config, comm)?;
             Ok(LoadedModel::LlamaTp(Box::new(model)))
@@ -313,6 +335,70 @@ mod tests {
         assert!(err.contains(&refusal), "{err}");
         assert!(err.contains("qwen35 models only"), "{err}");
         assert!(err.contains("'llama'"), "{err}");
+    }
+
+    #[test]
+    fn deepseek_configs_are_refused_before_reading_weights() {
+        let (client, device) = cpu_setup();
+        let mut config = tiny_config();
+        let (_, mut map) = maps(&client, &device, &config);
+        let before = map.len();
+        for model_type in ["deepseek_v2", "deepseek_v3", "deepseek2"] {
+            config.model_type = model_type.into();
+            let mut vb = VarBuilder::new(&mut map, &device);
+            let err = LoadedModel::<CpuRuntime>::load(&config, &mut vb)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("no DeepSeek model implementation"), "{err}");
+            let mut vb = VarBuilder::new(&mut map, &device);
+            let span = crate::model::llama::LayerSpan::new(0..1, config.num_layers).unwrap();
+            let err = LoadedModel::<CpuRuntime>::load_layers(&config, &mut vb, span)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("no DeepSeek model implementation"), "{err}");
+        }
+        assert_eq!(map.len(), before, "no weight was read");
+    }
+
+    #[test]
+    fn an_mla_llama_config_loads_as_the_hybrid_model() {
+        use crate::model::hybrid::model::{mla_checkpoint, mla_config, mla_map};
+        let (_, device) = cpu_setup();
+        let config = mla_config(&[false, false], true);
+        assert_eq!(config.model_type, "llama");
+        let mut map = mla_map(&mla_checkpoint(&config, &device));
+        let mut vb = VarBuilder::new(&mut map, &device);
+        let model = LoadedModel::<CpuRuntime>::load(&config, &mut vb).unwrap();
+        assert!(matches!(model, LoadedModel::Hybrid(_)), "{model:?}");
+        assert!(model.needs_kv_cache() && !model.needs_ssm_state());
+        assert_eq!(
+            (model.num_kv_heads(), model.head_dim()),
+            (Some(1), Some(12))
+        );
+        assert_eq!(model.num_attention_layers(), Some(2));
+        assert_eq!(model.num_ssm_layers(), Some(0));
+        let reason = model.paged_attention_refusal().unwrap();
+        assert!(reason.contains("MLA"), "{reason}");
+
+        let mut kv = crate::inference::LayeredKvCache::<CpuRuntime>::new_positional(
+            2,
+            1,
+            1,
+            4,
+            16,
+            12,
+            numr::dtype::DType::F32,
+            &device,
+        )
+        .unwrap();
+        let ids = numr::tensor::Tensor::<CpuRuntime>::from_slice(&[1i64, 5, 7], &[1, 3], &device)
+            .unwrap();
+        let logits = model.forward_with_kv_cache(&ids, &mut kv, 0).unwrap();
+        assert_eq!(logits.shape(), &[1, 3, 24]);
+        let next =
+            numr::tensor::Tensor::<CpuRuntime>::from_slice(&[2i64], &[1, 1], &device).unwrap();
+        let logits = model.forward_with_kv_cache(&next, &mut kv, 3).unwrap();
+        assert_eq!(logits.shape(), &[1, 1, 24]);
     }
 
     #[test]

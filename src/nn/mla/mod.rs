@@ -8,13 +8,20 @@
 //! - KV path: compress → split (c_kv, k_pe) → norm c_kv → decompress → split (k_nope, v)
 //! - Decoupled RoPE: applied only to q_pe and k_pe portions
 //! - Attention: Q=[q_nope, q_pe], K=[k_nope, k_pe], V=v
+//!
+//! [`Mla`] is the training layer. [`AbsorbedMla`] is the same layer in
+//! absorbed form for KV-cached inference.
 
+mod absorbed;
+mod absorbed_forward;
 mod alias;
 mod config;
 mod forward;
+mod latent_attention;
 mod model;
 mod parameter_identity;
 
-pub use config::MlaConfig;
+pub use absorbed::AbsorbedMla;
+pub use config::{MLA_NORM_EPS, MlaConfig};
 pub use model::Mla;
 pub use parameter_identity::MlaWeights;

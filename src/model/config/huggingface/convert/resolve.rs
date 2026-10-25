@@ -268,8 +268,13 @@ impl HuggingFaceConfig {
         })
     }
 
-    /// Fail on DBRX settings boostr does not run.
+    /// Fail on a model type boostr has no model for
+    /// ([`unsupported_model_refusal`](crate::model::unsupported_model_refusal)),
+    /// and on DBRX config values boostr does not run.
     pub(super) fn check_unsupported(&self, model_type: &str) -> Result<()> {
+        if let Some(reason) = crate::model::unsupported_model_refusal(model_type) {
+            return Err(Error::ModelError { reason });
+        }
         if model_type == "dbrx"
             && let Some(p) = nested_f64(self.ffn_config.as_ref(), "moe_normalize_expert_weights")
             && (p - 1.0).abs() > f64::EPSILON
@@ -295,6 +300,20 @@ mod tests {
     fn parse(json: &str) -> crate::model::config::universal::UniversalConfig {
         let hf: HuggingFaceConfig = serde_json::from_str(json).unwrap();
         hf.to_universal().unwrap()
+    }
+
+    #[test]
+    fn deepseek_v2_and_v3_configs_are_refused() {
+        for json in [
+            r#"{"model_type": "deepseek_v2", "vocab_size": 8, "hidden_size": 8,
+                "num_hidden_layers": 1, "num_attention_heads": 2}"#,
+            r#"{"architectures": ["DeepseekV3ForCausalLM"], "vocab_size": 8,
+                "hidden_size": 8, "num_hidden_layers": 1, "num_attention_heads": 2}"#,
+        ] {
+            let hf: HuggingFaceConfig = serde_json::from_str(json).unwrap();
+            let err = hf.to_universal().unwrap_err().to_string();
+            assert!(err.contains("no DeepSeek model implementation"), "{err}");
+        }
     }
 
     #[test]

@@ -150,9 +150,11 @@ impl<R: Runtime> MoeRouter<R> {
         let counts = client
             .bincount(&flat_indices, None, num_experts)
             .map_err(Error::Numr)?;
-        let counts_f32 = client.cast(&counts, DType::F32).map_err(Error::Numr)?;
+        let counts_cast = client
+            .cast(&counts, probs.tensor().dtype())
+            .map_err(Error::Numr)?;
         let total = (num_tokens * k) as f64;
-        let n_e = client.div_scalar(&counts_f32, total)?;
+        let n_e = client.div_scalar(&counts_cast, total)?;
 
         // aux_loss = num_experts * sum(P_e * N_e).
         // N_e comes from discrete token counts and is correctly a constant leaf;

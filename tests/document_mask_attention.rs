@@ -506,6 +506,7 @@ fn mla_config() -> MlaConfig {
         rope_theta: 10000.0,
         use_norm: false,
         norm_eps: 1e-6,
+        rope_scaling: None,
     }
 }
 

@@ -57,6 +57,9 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
 
     fn from_config(config: &ModelConfig, device: &R::Device) -> Result<Self> {
         config.validate()?;
+        if let Some(reason) = crate::model::llama::mla_refusal(config) {
+            return Err(Error::ModelError { reason });
+        }
 
         let attn_cfg = config.attention.as_ref().ok_or_else(|| Error::ModelError {
             reason: "LLaMA requires attention config".into(),

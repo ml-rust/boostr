@@ -29,8 +29,12 @@ pub(super) struct Dims {
 impl Dims {
     /// # Errors
     ///
-    /// A config with no attention section.
+    /// A config with no attention section, or an MLA config
+    /// ([`mla_refusal`](crate::model::llama::mla_refusal)).
     pub(super) fn of(config: &ModelConfig) -> Result<Self> {
+        if let Some(reason) = crate::model::llama::mla_refusal(config) {
+            return Err(Error::ModelError { reason });
+        }
         let attn = config.attention.as_ref().ok_or_else(|| Error::ModelError {
             reason: "LLaMA requires attention config".into(),
         })?;

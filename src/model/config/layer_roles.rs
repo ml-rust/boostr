@@ -1,6 +1,7 @@
 //! Layer-role queries on [`UniversalConfig`]: which layers are SSM and
 //! which are attention.
 
+use super::hybrid::HybridConfig;
 use super::universal::UniversalConfig;
 
 impl UniversalConfig {
@@ -31,6 +32,18 @@ impl UniversalConfig {
     /// [`is_ssm_layer`](Self::is_ssm_layer) over `0..num_layers`.
     pub fn is_attention_layer(&self, layer_idx: usize) -> bool {
         !self.is_ssm_layer(layer_idx)
+    }
+
+    /// The SSM and attention layer indices of `0..num_layers`, by
+    /// [`is_ssm_layer`](Self::is_ssm_layer). A config without
+    /// `hybrid_layers` gets its split from the same rule.
+    pub fn layer_split(&self) -> HybridConfig {
+        let (ssm_layers, attention_layers) =
+            (0..self.num_layers).partition(|&layer| self.is_ssm_layer(layer));
+        HybridConfig {
+            ssm_layers,
+            attention_layers,
+        }
     }
 }
 
@@ -108,5 +121,18 @@ hybrid_layers:
         assert!(!config.is_ssm_layer(1));
         assert!(config.is_ssm_layer(2));
         assert!(!config.is_ssm_layer(3));
+        let split = config.layer_split();
+        assert_eq!(split.ssm_layers, vec![0, 2]);
+        assert_eq!(split.attention_layers, vec![1, 3]);
+    }
+
+    #[test]
+    fn a_config_without_hybrid_layers_splits_by_its_sections() {
+        let yaml = "model_type: llama\nvocab_size: 8\nhidden_size: 8\nnum_layers: 3\n\
+                    max_seq_len: 8\nattention:\n  num_heads: 2\n";
+        let config: UniversalConfig = serde_saphyr::from_str(yaml).unwrap();
+        let split = config.layer_split();
+        assert!(split.ssm_layers.is_empty());
+        assert_eq!(split.attention_layers, vec![0, 1, 2]);
     }
 }

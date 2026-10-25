@@ -99,6 +99,7 @@ where
     /// Get number of KV heads (for KV cache allocation).
     ///
     /// Returns `None` for Mamba2 — SSM layers do not use a KV cache.
+    /// An MLA model caches one latent head per token: `Some(1)`.
     /// For LlamaTp, returns LOCAL kv heads (total / world_size).
     pub fn num_kv_heads(&self) -> Option<usize> {
         match self {
@@ -110,7 +111,7 @@ where
                 .as_ref()
                 .map(|a| a.kv_heads() / m.world_size()),
             LoadedModel::Mamba1(_) | LoadedModel::Mamba2(_) | LoadedModel::Mamba3(_) => None,
-            LoadedModel::Hybrid(m) => m.config().attention.as_ref().map(|a| a.kv_heads()),
+            LoadedModel::Hybrid(m) => m.kv_cache_dims().map(|(heads, _)| heads),
             LoadedModel::Multimodal(m) => m.llm().num_kv_heads(),
             LoadedModel::Qwen35(m) => Some(m.attention_config().num_kv_heads),
         }
@@ -119,6 +120,8 @@ where
     /// Get head dimension (for KV cache allocation).
     ///
     /// Returns `None` for Mamba2 — SSM layers do not use a KV cache.
+    /// An MLA model's cache head is `kv_lora_rank + rope_head_dim` wide, for
+    /// K and V alike.
     pub fn head_dim(&self) -> Option<usize> {
         match self {
             LoadedModel::Llama(m) => {
@@ -143,13 +146,7 @@ where
                     .map(|a| a.head_dim(config.hidden_size))
             }
             LoadedModel::Mamba1(_) | LoadedModel::Mamba2(_) | LoadedModel::Mamba3(_) => None,
-            LoadedModel::Hybrid(m) => {
-                let config = m.config();
-                config
-                    .attention
-                    .as_ref()
-                    .map(|a| a.head_dim(config.hidden_size))
-            }
+            LoadedModel::Hybrid(m) => m.kv_cache_dims().map(|(_, width)| width),
             LoadedModel::Multimodal(m) => m.llm().head_dim(),
             LoadedModel::Qwen35(m) => Some(m.attention_config().head_dim),
         }

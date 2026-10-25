@@ -1,7 +1,7 @@
 //! Architecture detection entry points and helper functions.
 
 use super::detectors::{
-    detect_mamba2_params, detect_mamba3_params, detect_mla_params, detect_moe_params,
+    ShapeOf, detect_mamba2_params, detect_mamba3_params, detect_mla_params, detect_moe_params,
     detect_transformer_params,
 };
 use super::types::{DetectedConfig, LayerType, ModelFormat};
@@ -12,10 +12,29 @@ use std::collections::HashSet;
 /// Detect model architecture from tensor names and shapes using boostr's SafeTensors
 pub fn detect_architecture(safetensors: &SafeTensors) -> Result<DetectedConfig> {
     let tensor_names: Vec<&str> = safetensors.tensor_names().collect();
+    let shape_of = |name: &str| {
+        safetensors
+            .tensor_info(name)
+            .ok()
+            .map(|info| info.shape.clone())
+    };
+    detect_architecture_from_shapes(&tensor_names, &shape_of)
+}
+
+/// Detect model architecture from tensor names, with `shape_of` giving the
+/// shape of a named tensor. A sharded checkpoint passes its loader's lookup.
+///
+/// # Errors
+///
+/// No embedding tensor, or no numbered layer.
+pub fn detect_architecture_from_shapes(
+    tensor_names: &[&str],
+    shape_of: ShapeOf<'_>,
+) -> Result<DetectedConfig> {
     let mut config = DetectedConfig::default();
 
     // Detect model format (HuggingFace vs oxidizr)
-    let format = detect_format(&tensor_names);
+    let format = detect_format(tensor_names);
     config.format = format;
     let prefix = match format {
         ModelFormat::HuggingFace => "model.",
@@ -24,22 +43,24 @@ pub fn detect_architecture(safetensors: &SafeTensors) -> Result<DetectedConfig> 
 
     // Detect hidden_size and vocab_size from embedding layer
     let embed_key = format!("{}embed_tokens.weight", prefix);
-    if let Ok(info) = safetensors.tensor_info(&embed_key) {
-        if info.shape.len() == 2 {
-            config.vocab_size = info.shape[0];
-            config.hidden_size = info.shape[1];
+    match shape_of(&embed_key).as_deref() {
+        Some([vocab, hidden]) => {
+            config.vocab_size = *vocab;
+            config.hidden_size = *hidden;
         }
-    } else {
-        return Err(Error::ModelError {
-            reason: format!("Cannot find {} tensor", embed_key),
-        });
+        Some(_) => {}
+        None => {
+            return Err(Error::ModelError {
+                reason: format!("Cannot find {} tensor", embed_key),
+            });
+        }
     }
 
     // Check if embeddings are tied (no separate lm_head)
-    config.tie_word_embeddings = safetensors.tensor_info("lm_head.weight").is_err();
+    config.tie_word_embeddings = shape_of("lm_head.weight").is_none();
 
     // Find all layer indices
-    let layer_indices = detect_layer_indices(&tensor_names, prefix);
+    let layer_indices = detect_layer_indices(tensor_names, prefix);
     config.num_layers = layer_indices.len();
 
     if config.num_layers == 0 {
@@ -50,46 +71,41 @@ pub fn detect_architecture(safetensors: &SafeTensors) -> Result<DetectedConfig> 
 
     // Detect layer types and parameters
     for &layer_idx in &layer_indices {
-        let layer_type = detect_layer_type(&tensor_names, layer_idx, prefix);
+        let layer_type = detect_layer_type(tensor_names, layer_idx, prefix);
         config.layer_types.push(layer_type);
 
         match layer_type {
             LayerType::Mamba3 => {
                 if config.mamba2_num_heads.is_none() {
-                    detect_mamba2_params(safetensors, layer_idx, &mut config, prefix);
+                    detect_mamba2_params(shape_of, layer_idx, &mut config, prefix);
                 }
                 if config.mamba3_enabled.is_none() {
-                    detect_mamba3_params(
-                        safetensors,
-                        &tensor_names,
-                        layer_idx,
-                        &mut config,
-                        prefix,
-                    );
+                    detect_mamba3_params(shape_of, tensor_names, layer_idx, &mut config, prefix);
                 }
             }
             LayerType::Mamba2 => {
                 if config.mamba2_num_heads.is_none() {
-                    detect_mamba2_params(safetensors, layer_idx, &mut config, prefix);
+                    detect_mamba2_params(shape_of, layer_idx, &mut config, prefix);
                 }
             }
             LayerType::MlaWithMoe | LayerType::MlaWithMlp => {
                 if config.num_attention_heads.is_none() {
-                    detect_mla_params(safetensors, layer_idx, &mut config, prefix);
+                    detect_mla_params(shape_of, layer_idx, &mut config, prefix);
                 }
                 if layer_type == LayerType::MlaWithMoe && config.num_experts.is_none() {
-                    detect_moe_params(safetensors, &tensor_names, layer_idx, &mut config, prefix);
+                    detect_moe_params(shape_of, tensor_names, layer_idx, &mut config, prefix);
                 }
             }
             LayerType::StandardTransformer => {
                 if config.num_attention_heads.is_none() {
-                    detect_transformer_params(
-                        safetensors,
-                        &tensor_names,
-                        layer_idx,
-                        &mut config,
-                        prefix,
-                    );
+                    detect_transformer_params(shape_of, layer_idx, &mut config, prefix);
+                }
+                if config.num_experts.is_none()
+                    && tensor_names
+                        .iter()
+                        .any(|k| k.starts_with(&format!("{prefix}layers.{layer_idx}.moe.")))
+                {
+                    detect_moe_params(shape_of, tensor_names, layer_idx, &mut config, prefix);
                 }
             }
         }
@@ -172,9 +188,11 @@ pub(super) fn detect_layer_type(
     let has_mamba2 = tensor_names
         .iter()
         .any(|k| k.starts_with(&format!("{}mamba2.", prefix)));
+    // MLA: the DeepSeek names oxidizr writes. The KV down-projection is
+    // present with and without Q compression.
     let has_mla = tensor_names
         .iter()
-        .any(|k| k.starts_with(&format!("{}self_attn.w_dkv", prefix)));
+        .any(|k| k.starts_with(&format!("{}self_attn.kv_a_proj_with_mqa", prefix)));
     let has_moe = tensor_names
         .iter()
         .any(|k| k.starts_with(&format!("{}moe.", prefix)));
@@ -193,12 +211,12 @@ pub(super) fn detect_layer_type(
         LayerType::MlaWithMoe
     } else if has_mla && has_mlp {
         LayerType::MlaWithMlp
-    } else if has_standard_attn {
-        LayerType::StandardTransformer
     } else if has_mla {
         // MLA without explicit MoE or MLP indicators; default to MlaWithMlp
         // since most MLA models (e.g. DeepSeek) pair it with MLP, not MoE.
         LayerType::MlaWithMlp
+    } else if has_standard_attn {
+        LayerType::StandardTransformer
     } else {
         // Default to standard transformer
         LayerType::StandardTransformer
@@ -237,8 +255,8 @@ mod tests {
         let names = layer_names(
             0,
             &[
-                "self_attn.w_dkv.weight",
-                "moe.gate.weight",
+                "self_attn.kv_a_proj_with_mqa.weight",
+                "moe.router.gate.weight",
                 "moe.experts.0.up_proj.weight",
             ],
         );
@@ -253,7 +271,7 @@ mod tests {
         let names = layer_names(
             0,
             &[
-                "self_attn.w_dkv.weight",
+                "self_attn.kv_a_proj_with_mqa.weight",
                 "mlp.gate_proj.weight",
                 "mlp.up_proj.weight",
             ],
@@ -283,7 +301,7 @@ mod tests {
 
     #[test]
     fn test_detect_mla_alone_defaults_to_mlp() {
-        let names = layer_names(0, &["self_attn.w_dkv.weight"]);
+        let names = layer_names(0, &["self_attn.kv_a_proj_with_mqa.weight"]);
         assert_eq!(
             detect_layer_type(&refs(&names), 0, ""),
             LayerType::MlaWithMlp
@@ -350,8 +368,8 @@ mod tests {
         let names: Vec<String> = vec![
             "embed_tokens.weight".into(),
             "layers.0.mamba2.mixer.A_log".into(),
-            "layers.1.self_attn.w_dkv.weight".into(),
-            "layers.1.moe.gate.weight".into(),
+            "layers.1.self_attn.kv_a_proj_with_mqa.weight".into(),
+            "layers.1.moe.router.gate.weight".into(),
             "norm.weight".into(),
             "lm_head.weight".into(),
         ];
@@ -365,6 +383,43 @@ mod tests {
     fn test_detect_from_names_no_layers_errors() {
         let names: Vec<String> = vec!["embed_tokens.weight".into(), "norm.weight".into()];
         assert!(detect_architecture_from_names(&names).is_err());
+    }
+
+    #[test]
+    fn test_detect_mla_without_q_compression_is_mla() {
+        // A direct `q_proj` beside the KV down-projection is still MLA.
+        let names = layer_names(
+            0,
+            &[
+                "self_attn.q_proj.weight",
+                "self_attn.kv_a_proj_with_mqa.weight",
+                "self_attn.kv_b_proj.weight",
+            ],
+        );
+        assert_eq!(
+            detect_layer_type(&refs(&names), 0, ""),
+            LayerType::MlaWithMlp
+        );
+    }
+
+    #[test]
+    fn test_detect_from_names_oxidizr_mamba2_and_mla_layout() {
+        let names: Vec<String> = vec![
+            "model.embed_tokens.weight".into(),
+            "model.layers.0.norm.weight".into(),
+            "model.layers.0.mamba2.in_proj.weight".into(),
+            "model.layers.1.self_attn.q_a_proj.weight".into(),
+            "model.layers.1.self_attn.kv_a_proj_with_mqa.weight".into(),
+            "model.layers.1.moe.router.gate.weight".into(),
+            "model.norm.weight".into(),
+            "lm_head.weight".into(),
+        ];
+        let config = detect_architecture_from_names(&names).unwrap();
+        assert_eq!(config.format, ModelFormat::HuggingFace);
+        assert_eq!(
+            config.layer_types,
+            vec![LayerType::Mamba2, LayerType::MlaWithMoe]
+        );
     }
 
     #[test]

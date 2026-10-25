@@ -19,11 +19,11 @@ pub use super::loss::{
 };
 pub use super::lstm::{BiLstm, Lstm};
 pub use super::maybe_lora::MaybeLoraLinear;
-pub use super::mla::{Mla, MlaConfig, MlaWeights};
+pub use super::mla::{AbsorbedMla, MLA_NORM_EPS, Mla, MlaConfig, MlaWeights};
 pub use super::module::{Module, StateDict, TrainMode, child_params, extend_named};
 pub use super::moe::{
-    Expert, MoeLayer, MoeLayerConfig, MoeLoadBalanceLossMode, MoeOutput, MoeRouter,
-    MoeRouterConfig, RouterOutput,
+    Expert, MOE_ROUTER_TEMPERATURE, MoeLayer, MoeLayerConfig, MoeLoadBalanceLossMode, MoeOutput,
+    MoeRouter, MoeRouterConfig, RouterOutput, moe_shared_expert_scale,
 };
 pub use super::norm::*;
 pub use super::quant_embedding::{MaybeQuantEmbedding, QuantEmbedding};

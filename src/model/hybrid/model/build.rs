@@ -1,147 +1,132 @@
-//! The [`HybridModel`] type and its builder: walks `hybrid_layers` and
-//! constructs an attention or Mamba2 block for each layer index.
+//! The [`HybridModel`] type and its builder: derives the layer split from
+//! the config and builds an SSM, dense attention or MLA block per layer.
 
-use super::super::blocks::{AttentionBlock, SsmBlock};
+use super::super::blocks::{AttentionBlock, MlaBlock, SsmBlock};
+use super::layers::LayerPlan;
 use crate::error::{Error, Result};
 use crate::model::config::{HybridConfig, UniversalConfig};
-use crate::model::mamba::mamba2::{Mamba2, Mamba2Config};
-use crate::nn::{Embedding, Linear, RmsNorm, RoPE, VarBuilder};
+use crate::model::mamba::mamba2::Mamba2Config;
+use crate::nn::{Embedding, Linear, MlaConfig, RmsNorm, RoPE, VarBuilder};
+use crate::quant::traits::DequantOps;
 use numr::dtype::DType;
 use numr::ops::IndexingOps;
 use numr::runtime::Runtime;
 
-/// Hybrid model mixing attention (LLaMA-style) and SSM (Mamba2) blocks.
+/// Hybrid model mixing attention (LLaMA-style or MLA) and SSM (Mamba2) blocks.
+///
+/// Every attention layer is MLA when the attention config sets
+/// `kv_latent_dim`, else dense attention. Each attention layer's
+/// feed-forward block is a MoE when the config has a `moe` section, else an
+/// MLP. A config with no SSM layer builds too: an MLA model is this model
+/// with every layer attention.
 pub struct HybridModel<R: Runtime> {
     pub(super) config: UniversalConfig,
     pub(super) hybrid_config: HybridConfig,
-    pub(super) mamba_config: Mamba2Config,
+    pub(super) mamba_config: Option<Mamba2Config>,
     pub(super) embed_tokens: Embedding<R>,
     pub(super) blocks: Vec<HybridBlock<R>>,
     pub(super) norm: RmsNorm<R>,
     pub(super) lm_head: Linear<R>,
+    /// The RoPE tables of the dense attention layers, or the decoupled RoPE
+    /// tables of the MLA layers.
     pub(super) rope: RoPE<R>,
+    /// `(kv_heads, head_dim)` of one attention layer's KV cache. `None`
+    /// without attention layers.
+    pub(super) kv_dims: Option<(usize, usize)>,
 }
 
-/// A hybrid block is either an attention block or an SSM block.
+/// One layer of the hybrid model.
 pub(super) enum HybridBlock<R: Runtime> {
     Attention(Box<AttentionBlock<R>>),
+    Mla(Box<MlaBlock<R>>),
     Ssm(Box<SsmBlock<R>>),
 }
 
 impl<R: Runtime<DType = DType>> HybridModel<R>
 where
-    R::Client: IndexingOps<R>,
+    R::Client: IndexingOps<R> + DequantOps<R>,
 {
     /// Load from a VarBuilder and UniversalConfig.
+    ///
+    /// The layer split is [`UniversalConfig::layer_split`]. SSM layers read
+    /// the oxidizr layout (`norm`, `mamba2`) or the Hugging Face one
+    /// (`input_layernorm`, `mixer`).
+    ///
+    /// # Errors
+    ///
+    /// An invalid config, an SSM layer without an `ssm` section, an
+    /// attention layer without an `attention` section, an MLA config that
+    /// [`MlaConfig::from_universal`] refuses, or a missing tensor.
     pub fn from_varbuilder(vb: &mut VarBuilder<R>, config: &UniversalConfig) -> Result<Self> {
         config.validate()?;
-
-        let hybrid_config = config
-            .hybrid_layers
-            .as_ref()
-            .ok_or_else(|| Error::ModelError {
-                reason: "Hybrid model requires hybrid_layers config".into(),
-            })?;
-        hybrid_config.validate(config.num_layers)?;
-
-        let attn_config = config.attention.as_ref().ok_or_else(|| Error::ModelError {
-            reason: "Hybrid model requires attention config for attention layers".into(),
-        })?;
-
-        let mamba_config = Mamba2Config::from_universal(config)?;
-        mamba_config.validate()?;
-
-        let hidden = config.hidden_size;
-        let num_heads = attn_config.num_heads;
-        let num_kv_heads = attn_config.kv_heads();
-        let head_dim = attn_config.head_dim(hidden);
-        let use_alibi = attn_config.use_alibi;
-        // `0` is the disabled sentinel; `Some(0)` is not a zero-width window.
-        let sliding_window = attn_config.sliding_window();
-
-        // RoPE cache
-        let rope = RoPE::<R>::precompute_freqs(
-            config.max_seq_len,
-            head_dim,
-            attn_config.rope_theta,
-            attn_config.rope_scaling.as_ref(),
-            vb.device(),
-        )?;
+        let hybrid_config = config.layer_split();
+        let mamba_config = if hybrid_config.ssm_layers.is_empty() {
+            None
+        } else {
+            let mamba = Mamba2Config::from_universal(config)?;
+            mamba.validate()?;
+            Some(mamba)
+        };
+        let attn_config = config.attention.as_ref();
+        if attn_config.is_none() && !hybrid_config.attention_layers.is_empty() {
+            return Err(Error::ModelError {
+                reason: "Hybrid model requires attention config for attention layers".into(),
+            });
+        }
+        let mla_config = match attn_config {
+            Some(attn) if attn.is_mla() => Some(MlaConfig::from_universal(config)?),
+            _ => None,
+        };
+        let rope = match (attn_config, &mla_config) {
+            (_, Some(mla)) => RoPE::<R>::precompute_freqs(
+                config.max_seq_len,
+                mla.rope_head_dim,
+                mla.rope_theta,
+                mla.rope_scaling.as_ref(),
+                vb.device(),
+            )?,
+            (Some(attn), None) => RoPE::<R>::precompute_freqs(
+                config.max_seq_len,
+                attn.head_dim(config.hidden_size),
+                attn.rope_theta,
+                attn.rope_scaling.as_ref(),
+                vb.device(),
+            )?,
+            // No attention layer reads RoPE. A two-wide table keeps the
+            // accessor total.
+            (None, None) => {
+                RoPE::<R>::precompute_freqs(config.max_seq_len, 2, 10000.0, None, vb.device())?
+            }
+        };
+        let kv_dims = if hybrid_config.attention_layers.is_empty() {
+            None
+        } else {
+            match (attn_config, &mla_config) {
+                (_, Some(mla)) => Some((1, mla.latent_cache_dim())),
+                (Some(attn), None) => Some((attn.kv_heads(), attn.head_dim(config.hidden_size))),
+                (None, None) => None,
+            }
+        };
 
         let mut model_vb = vb.pp("model");
-
-        // Embedding
-        let embed_weight = model_vb.take_tensor("embed_tokens.weight")?;
-        let embed_tokens = Embedding::new(embed_weight, false);
-
-        // Build blocks
+        let embed_tokens = Embedding::new(model_vb.take_tensor("embed_tokens.weight")?, false);
+        let plan = LayerPlan {
+            config,
+            mamba: mamba_config.as_ref(),
+            mla: mla_config.as_ref(),
+            dtype: embed_tokens.weight().tensor().dtype(),
+        };
         let mut blocks = Vec::with_capacity(config.num_layers);
         for i in 0..config.num_layers {
             let mut layers_vb = model_vb.pp("layers");
-            let mut layer_vb = layers_vb.pp(&i.to_string());
-
-            if hybrid_config.is_ssm_layer(i) {
-                // SSM block
-                let norm = RmsNorm::new(
-                    layer_vb.take_tensor("input_layernorm.weight")?,
-                    config.rms_norm_eps as f32,
-                    false,
-                );
-                let mut mixer_vb = layer_vb.pp("mixer");
-                let mamba = Mamba2::from_varbuilder(&mamba_config, &mut mixer_vb, false)?;
-                blocks.push(HybridBlock::Ssm(Box::new(SsmBlock { norm, mamba })));
-            } else {
-                // Attention block
-                let input_layernorm = RmsNorm::new(
-                    layer_vb.take_tensor("input_layernorm.weight")?,
-                    config.rms_norm_eps as f32,
-                    false,
-                );
-
-                let mut attn_vb = layer_vb.pp("self_attn");
-                let q_proj = Linear::new(attn_vb.take_tensor("q_proj.weight")?, None, false);
-                let k_proj = Linear::new(attn_vb.take_tensor("k_proj.weight")?, None, false);
-                let v_proj = Linear::new(attn_vb.take_tensor("v_proj.weight")?, None, false);
-                let o_proj = Linear::new(attn_vb.take_tensor("o_proj.weight")?, None, false);
-
-                let post_attention_layernorm = RmsNorm::new(
-                    layer_vb.take_tensor("post_attention_layernorm.weight")?,
-                    config.rms_norm_eps as f32,
-                    false,
-                );
-
-                let mut mlp_vb = layer_vb.pp("mlp");
-                let gate_proj = Linear::new(mlp_vb.take_tensor("gate_proj.weight")?, None, false);
-                let up_proj = Linear::new(mlp_vb.take_tensor("up_proj.weight")?, None, false);
-                let down_proj = Linear::new(mlp_vb.take_tensor("down_proj.weight")?, None, false);
-
-                blocks.push(HybridBlock::Attention(Box::new(AttentionBlock {
-                    input_layernorm,
-                    q_proj,
-                    k_proj,
-                    v_proj,
-                    o_proj,
-                    post_attention_layernorm,
-                    gate_proj,
-                    up_proj,
-                    down_proj,
-                    num_heads,
-                    num_kv_heads,
-                    head_dim,
-                    use_alibi,
-                    sliding_window,
-                })));
-            }
+            blocks.push(plan.build(&mut layers_vb.pp(&i.to_string()), i)?);
         }
 
-        // Final norm
         let norm = RmsNorm::new(
             model_vb.take_tensor("norm.weight")?,
             config.rms_norm_eps as f32,
             false,
         );
-
-        // LM head
         let lm_head = if config.tie_word_embeddings {
             let embed_w = embed_tokens.weight().tensor().clone();
             Linear::new(embed_w, None, false)
@@ -151,16 +136,22 @@ where
 
         Ok(Self {
             config: config.clone(),
-            hybrid_config: hybrid_config.clone(),
+            hybrid_config,
             mamba_config,
             embed_tokens,
             blocks,
             norm,
             lm_head,
             rope,
+            kv_dims,
         })
     }
+}
 
+impl<R: Runtime<DType = DType>> HybridModel<R>
+where
+    R::Client: IndexingOps<R>,
+{
     /// Compute dtype, read from the final norm weight (owned, never
     /// quantized).
     pub fn dtype(&self) -> DType {
@@ -335,7 +326,7 @@ pub(crate) mod tests {
             .iter()
             .find_map(|b| match b {
                 HybridBlock::Attention(a) => Some(a),
-                HybridBlock::Ssm(_) => None,
+                HybridBlock::Mla(_) | HybridBlock::Ssm(_) => None,
             })
             .expect("the config places an attention layer at index 1");
         (attn.sliding_window, attn.use_alibi)

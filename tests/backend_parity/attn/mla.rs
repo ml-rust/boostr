@@ -213,6 +213,7 @@ fn test_mla_forward_no_q_lora() {
         rope_theta: 10000.0,
         use_norm: true,
         norm_eps: 1e-6,
+        rope_scaling: None,
     };
     let mla = Mla::<CpuRuntime>::from_config(&cfg, &cpu_device).unwrap();
     let x = Var::new(
@@ -239,6 +240,7 @@ fn test_mla_forward_with_q_lora() {
         rope_theta: 10000.0,
         use_norm: true,
         norm_eps: 1e-6,
+        rope_scaling: None,
     };
     let mla = Mla::<CpuRuntime>::from_config(&cfg, &cpu_device).unwrap();
     let x = Var::new(
@@ -265,6 +267,7 @@ fn test_mla_forward_different_head_dim_v() {
         rope_theta: 10000.0,
         use_norm: false,
         norm_eps: 1e-6,
+        rope_scaling: None,
     };
     let mla = Mla::<CpuRuntime>::from_config(&cfg, &cpu_device).unwrap();
     let x = Var::new(
@@ -291,6 +294,7 @@ fn test_mla_output_finite() {
         rope_theta: 10000.0,
         use_norm: true,
         norm_eps: 1e-6,
+        rope_scaling: None,
     };
     let mla = Mla::<CpuRuntime>::from_config(&cfg, &cpu_device).unwrap();
     let x = Var::new(

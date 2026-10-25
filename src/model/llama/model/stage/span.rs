@@ -156,6 +156,13 @@ fn layer_of(rest: &str) -> Option<usize> {
 /// read. A multimodal checkpoint loads its text model: a stage runs token
 /// ids and activations only, so its vision and audio towers stay unread.
 pub fn layer_range_refusal(config: &UniversalConfig) -> Option<String> {
+    if config.attention.as_ref().is_some_and(|a| a.is_mla()) {
+        return Some(
+            "an MLA model loads as the hybrid model, and a layer range holds Llama layers \
+             only. Load the whole model on one node"
+                .into(),
+        );
+    }
     match config.model_type.as_str() {
         "mamba1" | "mamba2" | "mamba3" | "hybrid" => Some(format!(
             "a {} model carries SSM state in its layers, and a layer range carries only a \

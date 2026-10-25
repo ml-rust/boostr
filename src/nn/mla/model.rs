@@ -118,7 +118,7 @@ impl<R: Runtime<DType = DType>> Mla<R> {
             config.max_seq_len,
             config.rope_head_dim,
             config.rope_theta,
-            None,
+            config.rope_scaling.as_ref(),
             device,
         )?;
 
@@ -205,7 +205,7 @@ impl<R: Runtime<DType = DType>> Mla<R> {
             config.max_seq_len,
             config.rope_head_dim,
             config.rope_theta,
-            None,
+            config.rope_scaling.as_ref(),
             vb.device(),
         )?;
 

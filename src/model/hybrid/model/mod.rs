@@ -2,13 +2,15 @@
 //!
 //! - `build`: the [`HybridModel`] type and [`HybridModel::from_varbuilder`]
 //! - `layers`: the block one layer builds from its role and the config
-//! - `forward`: the KV-cached forwards and the hidden-state forward
+//! - `forward`: the KV-cached forwards
+//! - `forward_hidden`: the hidden-state forward for embedding extraction
 //! - `forward_rows`: one decode step over rows with their own caches
 //! - `accessors`: the config, the layer split and the cache shapes
 
 mod accessors;
 mod build;
 mod forward;
+mod forward_hidden;
 mod forward_rows;
 mod layers;
 

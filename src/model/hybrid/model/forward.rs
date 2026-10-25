@@ -1,8 +1,7 @@
-//! [`HybridModel`] forward passes and accessors.
+//! [`HybridModel`] KV-cached forward passes.
 
 use super::build::{HybridBlock, HybridModel};
 use crate::error::{Error, Result};
-use crate::inference::kv_cache::layered::LayeredKvCacheConfig;
 use crate::inference::{KvCache, LayeredKvCache, LayeredSsmState};
 use crate::model::traits::ModelClient;
 use crate::quant::traits::DequantOps;
@@ -97,7 +96,7 @@ where
 
     /// Embed, every layer, final norm. `ssm_state` is `None` only for a
     /// model with no SSM layer.
-    fn run_layers<C>(
+    pub(super) fn run_layers<C>(
         &self,
         client: &C,
         input_ids: &Tensor<R>,
@@ -147,54 +146,6 @@ where
         }
         self.norm.forward(client, &hidden)
     }
-
-    /// Contextualized hidden states for embedding extraction.
-    ///
-    /// Runs embed + all attention/SSM blocks + final norm (no `lm_head`) with
-    /// fresh throwaway KV cache and SSM state. Returns shape `[B, S, hidden]`.
-    pub fn forward_hidden<C>(&self, client: &C, input_ids: &Tensor<R>) -> Result<Var<R>>
-    where
-        C: ModelClient<R> + ConvOps<R> + NormalizationOps<R> + UnaryOps<R> + ActivationOps<R>,
-        R::Client: TensorOps<R>
-            + ScalarOps<R>
-            + ActivationOps<R>
-            + ConvOps<R>
-            + ReduceOps<R>
-            + BinaryOps<R>
-            + UnaryOps<R>
-            + CompareOps<R>
-            + ConditionalOps<R>
-            + IndexingOps<R>
-            + ShapeOps<R>
-            + DequantOps<R>,
-    {
-        let shape = input_ids.shape();
-        let (batch, seq_len) = (shape[0], shape[1]);
-        let device = input_ids.device();
-        let dtype = self.embed_tokens.weight().tensor().dtype();
-        let (num_kv_heads, head_dim) = self.kv_cache_dims().unwrap_or((1, 1));
-        let kv_config = LayeredKvCacheConfig {
-            batch_size: batch,
-            num_kv_heads,
-            initial_capacity: seq_len,
-            max_seq_len: self.config.max_seq_len,
-            head_dim,
-            dtype,
-        };
-        let mut kv_cache =
-            LayeredKvCache::<R>::new(self.num_attention_layers(), &kv_config, device)?;
-        let mut ssm_state = match &self.mamba_config {
-            Some(mamba) => Some(LayeredSsmState::<R>::new(
-                self.num_ssm_layers(),
-                batch,
-                mamba,
-                dtype,
-                device,
-            )?),
-            None => None,
-        };
-        self.run_layers(client, input_ids, &mut kv_cache, ssm_state.as_mut(), 0)
-    }
 }
 
 /// The KV cache of the next attention layer, layer `layer` of the model.
@@ -217,6 +168,7 @@ where
 pub(crate) mod tests {
     use super::super::super::blocks::FeedForward;
     use super::*;
+    use crate::inference::kv_cache::layered::LayeredKvCacheConfig;
     use crate::model::config::UniversalConfig;
     use crate::nn::{Embedding, Linear, Mla, MlaConfig, RmsNorm, VarBuilder, VarMap};
     use crate::test_utils::{Lcg, cpu_setup, max_abs_diff};
@@ -329,13 +281,16 @@ pub(crate) mod tests {
         map
     }
 
-    fn model(config: &UniversalConfig, tensors: &[(String, T)]) -> HybridModel<CpuRuntime> {
+    pub(crate) fn model(
+        config: &UniversalConfig,
+        tensors: &[(String, T)],
+    ) -> HybridModel<CpuRuntime> {
         let (_, dev) = cpu_setup();
         let mut map = map(tensors);
         HybridModel::from_varbuilder(&mut VarBuilder::new(&mut map, &dev), config).unwrap()
     }
 
-    fn ids(n: usize) -> Vec<i64> {
+    pub(crate) fn ids(n: usize) -> Vec<i64> {
         (0..n as i64).map(|i| (i * 7 + 3) % 24).collect()
     }
 
@@ -485,16 +440,5 @@ pub(crate) mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("forward_hybrid"), "{err}");
-    }
-
-    #[test]
-    fn forward_hidden_runs_an_mla_model() {
-        let (client, dev) = cpu_setup();
-        let config = config(&[true, false], false);
-        let tensors = checkpoint(&config, &dev);
-        let m = model(&config, &tensors);
-        let input = T::from_slice(&ids(5), &[1, 5], &dev).unwrap();
-        let hidden = m.forward_hidden(&client, &input).unwrap();
-        assert_eq!(hidden.shape(), &[1, 5, 16]);
     }
 }

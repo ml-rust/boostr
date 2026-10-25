@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use super::config::{DEFAULT_HANDOFF_TIMEOUT, DisaggConfig};
 use super::decode_worker::DecodeWorker;
-use super::forward::{DecodeOpenFn, PrefillFn, PrefillOutput};
+use super::forward::{DecodeOpenFn, PrefillCancel, PrefillFn, PrefillOutput};
 use super::prefill_worker::PrefillWorker;
 use super::router::DisaggRouter;
 use crate::distributed::inference::transport::cpu_adapter;
@@ -44,7 +44,7 @@ fn next_of(token: u32) -> u32 {
 
 /// A prefill closure. `fail` makes every call return that error.
 pub(crate) fn mock_prefill(fail: Option<&'static str>) -> PrefillFn<CpuRuntime> {
-    Box::new(move |prompt: &[u32]| {
+    Box::new(move |prompt: &[u32], _cancel: &PrefillCancel| {
         if let Some(msg) = fail {
             bail!("{msg}");
         }

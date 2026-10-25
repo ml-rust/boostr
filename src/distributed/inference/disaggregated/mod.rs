@@ -21,7 +21,7 @@ mod wire;
 
 pub use config::{DisaggConfig, DisaggRole};
 pub use decode_worker::DecodeWorker;
-pub use forward::{DecodeOpenFn, DecodeStepFn, PrefillFn, PrefillOutput};
+pub use forward::{DecodeOpenFn, DecodeStepFn, PrefillCancel, PrefillFn, PrefillOutput};
 pub use prefill_worker::PrefillWorker;
 pub use protocol::*;
 pub use router::{DisaggRouter, Generation, TokenStream, WorkerError};

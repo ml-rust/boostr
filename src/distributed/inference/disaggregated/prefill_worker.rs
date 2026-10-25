@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use super::cancel::CancelBook;
 use super::config::DEFAULT_HANDOFF_TIMEOUT;
-use super::forward::PrefillFn;
+use super::forward::{PrefillCancel, PrefillFn};
 use super::handoff::AckListeners;
 use super::protocol::{Event, KvHandoff, PrefillRequest, Stage, TokenEvent, peek_request_id, tags};
 use super::sampler::RequestSampler;
@@ -40,6 +40,7 @@ pub(crate) fn prefill_request<R>(
     client: &R::Client,
     req: PrefillRequest,
     max_kv_bytes: usize,
+    cancel: &PrefillCancel,
 ) -> Result<PrefillResult>
 where
     R: Runtime<DType = DType>,
@@ -49,7 +50,7 @@ where
     if req.prompt.is_empty() {
         bail!("the prompt has no tokens");
     }
-    let out = prefill_fn(&req.prompt).map_err(|e| e.context("prefill forward failed"))?;
+    let out = prefill_fn(&req.prompt, cancel).map_err(|e| e.context("prefill forward failed"))?;
     let mut sampler = RequestSampler::start(req.params, &req.prompt);
     let first = sampler.sample(client, &out.logits)?;
     let handoff = if first.finish.is_some() {
@@ -214,10 +215,15 @@ where
         }
     }
 
+    /// Runs `req` and hands its result on.
+    ///
+    /// The prefill closure reads the request's cancel between its chunks. A
+    /// request cancelled before, during or after the prefill ends with no
+    /// event: the router already ended it.
     async fn serve(
         &self,
         req: PrefillRequest,
-        book: &CancelBook,
+        book: &Arc<CancelBook>,
         acks: &mut AckListeners,
     ) -> Result<()> {
         let id = req.request_id;
@@ -229,13 +235,18 @@ where
         let prefill_fn = Arc::clone(&self.prefill_fn);
         let client = self.sampler_client.clone();
         let limit = self.max_kv_transfer_bytes;
-        let result = run_blocking(move || prefill_request(&prefill_fn, &client, req, limit))
-            .await
-            .and_then(|r| r);
+        let cancel = {
+            let book = Arc::clone(book);
+            PrefillCancel::new(Arc::new(move || book.is_cancelled(id)))
+        };
+        let result =
+            run_blocking(move || prefill_request(&prefill_fn, &client, req, limit, &cancel))
+                .await
+                .and_then(|r| r);
         let cancelled = book.is_cancelled(id);
         book.finish(id);
         let out = match result {
-            Ok(_) if cancelled => return Ok(()),
+            _ if cancelled => return Ok(()),
             Ok(out) => out,
             Err(e) => return self.fail(id, e).await,
         };
@@ -272,9 +283,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::super::protocol::{FinishReason, GenerationParams};
-    use super::super::test_harness::mock_prefill;
+    use super::super::test_harness::{MockDecode, Parts, decode_worker, mock_prefill};
     use super::*;
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
     fn request(params: GenerationParams, prompt: Vec<u32>) -> PrefillRequest {
         PrefillRequest {
@@ -297,6 +309,7 @@ mod tests {
             &client(),
             request(GenerationParams::greedy(8), vec![3, 4, 5]),
             usize::MAX,
+            &PrefillCancel::never(),
         )
         .unwrap();
         assert_eq!(
@@ -323,8 +336,14 @@ mod tests {
         let f = mock_prefill(None);
         let mut eos = GenerationParams::greedy(8);
         eos.eos_tokens = vec![6];
-        let out = prefill_request::<CpuRuntime>(&f, &client(), request(eos, vec![5]), usize::MAX)
-            .unwrap();
+        let out = prefill_request::<CpuRuntime>(
+            &f,
+            &client(),
+            request(eos, vec![5]),
+            usize::MAX,
+            &PrefillCancel::never(),
+        )
+        .unwrap();
         assert_eq!(out.first.finish, Some(FinishReason::Eos));
         assert!(out.handoff.is_none());
         let out = prefill_request::<CpuRuntime>(
@@ -332,6 +351,7 @@ mod tests {
             &client(),
             request(GenerationParams::greedy(1), vec![5]),
             usize::MAX,
+            &PrefillCancel::never(),
         )
         .unwrap();
         assert_eq!(out.first.finish, Some(FinishReason::Length));
@@ -346,6 +366,7 @@ mod tests {
             &client(),
             request(GenerationParams::greedy(4), vec![1]),
             usize::MAX,
+            &PrefillCancel::never(),
         )
         .unwrap_err();
         assert!(
@@ -358,6 +379,7 @@ mod tests {
             &client(),
             request(GenerationParams::greedy(4), vec![1, 2]),
             4,
+            &PrefillCancel::never(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("transfer limit"), "{err}");
@@ -366,6 +388,7 @@ mod tests {
             &client(),
             request(GenerationParams::greedy(4), vec![]),
             usize::MAX,
+            &PrefillCancel::never(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("no tokens"), "{err}");
@@ -374,8 +397,78 @@ mod tests {
             &client(),
             request(GenerationParams::greedy(0), vec![1]),
             usize::MAX,
+            &PrefillCancel::never(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("max_new_tokens"), "{err}");
+    }
+
+    /// A prefill of one chunk per prompt token, slow enough for the cancel
+    /// to arrive mid-prompt. The chunks stop soon after the stream drops,
+    /// and the worker serves the next request.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_cancel_mid_prefill_stops_the_chunks() {
+        let parts = Parts::start(DEFAULT_HANDOFF_TIMEOUT).await;
+        let chunks = Arc::new(AtomicUsize::new(0));
+        let ran = Arc::clone(&chunks);
+        let whole = mock_prefill(None);
+        let chunked: PrefillFn<CpuRuntime> =
+            Box::new(move |prompt: &[u32], cancel: &PrefillCancel| {
+                for _ in prompt {
+                    if cancel.is_cancelled() {
+                        bail!("the prefill stopped at a chunk boundary: the request was cancelled");
+                    }
+                    ran.fetch_add(1, SeqCst);
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                whole(prompt, cancel)
+            });
+        let worker = PrefillWorker::new(parts.prefill, 1, 0, 1 << 20, client(), chunked);
+        let decode = decode_worker(parts.decode, &MockDecode::default());
+        let tasks = [
+            tokio::spawn(async move { worker.run_loop().await }),
+            tokio::spawn(async move { decode.run_loop().await }),
+        ];
+
+        let prompt: Vec<u32> = (0..60).map(|i| i % 16).collect();
+        let stream = parts
+            .router
+            .route_request_stream(&prompt, GenerationParams::greedy(4), None)
+            .await
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while chunks.load(SeqCst) == 0 {
+            assert!(std::time::Instant::now() < deadline, "no chunk ran");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        drop(stream);
+        let mut last = chunks.load(SeqCst);
+        loop {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let now = chunks.load(SeqCst);
+            if now == last {
+                break;
+            }
+            last = now;
+        }
+        assert!(
+            last < prompt.len() / 2,
+            "{last} of {} chunks ran",
+            prompt.len()
+        );
+
+        let g = parts
+            .router
+            .route_request(&[1], GenerationParams::greedy(3), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            g.tokens,
+            vec![2, 3, 4],
+            "the worker serves the next request"
+        );
+        for task in tasks {
+            task.abort();
+        }
     }
 }

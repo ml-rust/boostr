@@ -3,7 +3,7 @@
 use crate::error::{Error, Result};
 
 /// The config of [`apply_dry_penalty`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DryParams {
     /// Subtracted from a logit once per matched token. 0 disables the penalty.
     pub multiplier: f32,
@@ -11,6 +11,8 @@ pub struct DryParams {
     pub base: usize,
     /// Tokens of history the scan reads, counted back from the end. 0 reads all of it.
     pub allowed_length: usize,
+    /// Token ids no match extends across. Empty sets no breaker.
+    pub breakers: Vec<u32>,
 }
 
 impl DryParams {
@@ -46,6 +48,12 @@ impl DryParams {
 /// token after that match loses `multiplier * match_length` from its logit.
 /// A token that follows several matches loses each penalty in turn.
 ///
+/// A breaker is a boundary, as in llama.cpp's DRY sampler. The match length
+/// is at most the count of tokens after the last breaker in the scanned
+/// history. A suffix that holds a breaker changes nothing. A breaker as the
+/// token after a match still takes the penalty. Empty `breakers` gives the
+/// result without breakers, bit for bit.
+///
 /// A scanned history shorter than `base` changes nothing. An id at or past
 /// `logits.len()` gets no penalty. `base == 0` changes nothing: call
 /// [`DryParams::check`] first to reject it.
@@ -54,6 +62,7 @@ pub fn apply_dry_penalty(logits: &mut [f32], history: &[u32], params: &DryParams
         multiplier,
         base,
         allowed_length,
+        ref breakers,
     } = *params;
     if base == 0 {
         return;
@@ -69,6 +78,15 @@ pub fn apply_dry_penalty(logits: &mut [f32], history: &[u32], params: &DryParams
 
     let suffix_start = history.len().saturating_sub(base - 1);
     let suffix = &history[suffix_start..];
+    // A match covers only tokens after the last breaker. Without a breaker,
+    // the limit is the history length, which no match reaches.
+    let limit = match history.iter().rposition(|t| breakers.contains(t)) {
+        Some(at) => history.len() - 1 - at,
+        None => history.len(),
+    };
+    if limit < suffix.len() {
+        return;
+    }
     for start in 0..suffix_start {
         let end = start + suffix.len();
         if end >= history.len() {
@@ -79,7 +97,7 @@ pub fn apply_dry_penalty(logits: &mut [f32], history: &[u32], params: &DryParams
         }
         let mut match_len = suffix.len();
         let (mut s, mut e) = (start, suffix_start);
-        while s > 0 && e > 0 && history[s - 1] == history[e - 1] {
+        while match_len < limit && s > 0 && e > 0 && history[s - 1] == history[e - 1] {
             match_len += 1;
             s -= 1;
             e -= 1;
@@ -100,6 +118,14 @@ mod tests {
             multiplier,
             base,
             allowed_length,
+            breakers: Vec::new(),
+        }
+    }
+
+    fn with_breakers(p: DryParams, breakers: &[u32]) -> DryParams {
+        DryParams {
+            breakers: breakers.to_vec(),
+            ..p
         }
     }
 
@@ -152,6 +178,80 @@ mod tests {
     #[test]
     fn an_id_past_the_vocab_gets_no_penalty() {
         assert_eq!(penalized(&[2, 40, 2], &params(1.0, 2, 0)), vec![0.0; 8]);
+    }
+
+    #[test]
+    fn a_breaker_before_the_suffix_cuts_the_match() {
+        // [1, 2] repeats, so 3 takes 2.0 without breakers.
+        let history = [1, 2, 3, 6, 1, 2];
+        assert_eq!(penalized(&history, &params(1.0, 2, 0))[3], -2.0);
+        // Breaker 1 is the last but one token: only [2] counts.
+        assert_eq!(
+            penalized(&history, &with_breakers(params(1.0, 2, 0), &[1]))[3],
+            -1.0
+        );
+        // Breaker 6 sits before the repeat, so the match keeps its length.
+        assert_eq!(
+            penalized(&history, &with_breakers(params(1.0, 2, 0), &[6]))[3],
+            -2.0
+        );
+    }
+
+    #[test]
+    fn a_breaker_in_the_suffix_removes_the_penalty() {
+        let history = [1, 2, 3, 6, 1, 2];
+        assert_eq!(
+            penalized(&history, &with_breakers(params(1.0, 2, 0), &[2])),
+            vec![0.0; 8]
+        );
+        // With base 3 the suffix is [1, 2], and breaker 1 is inside it.
+        assert_eq!(
+            penalized(&history, &with_breakers(params(1.0, 3, 0), &[1])),
+            vec![0.0; 8]
+        );
+    }
+
+    #[test]
+    fn the_breaker_position_sets_the_match_limit() {
+        // [5, 1, 2] repeats in full, so 3 takes 3.0 without breakers.
+        let history = [5, 1, 2, 3, 7, 5, 1, 2];
+        let base = params(1.0, 2, 0);
+        assert_eq!(penalized(&history, &base)[3], -3.0);
+        for (breaker, want) in [(7, -3.0), (5, -2.0), (1, -1.0)] {
+            let got = penalized(&history, &with_breakers(base.clone(), &[breaker]))[3];
+            assert_eq!(got, want, "breaker {breaker}");
+        }
+    }
+
+    #[test]
+    fn a_breaker_after_the_follower_does_not_count() {
+        // Breaker 3 is the follower: it still takes the penalty.
+        let history = [1, 2, 3, 1, 2];
+        let p = with_breakers(params(1.0, 2, 0), &[3]);
+        assert_eq!(penalized(&history, &p)[3], -2.0);
+    }
+
+    #[test]
+    fn empty_breakers_match_the_unbroken_bits() {
+        let history = [
+            5, 9, 2, 5, 9, 2, 7, 1, 5, 9, 3, 3, 3, 8, 1, 5, 9, 2, 7, 1, 5, 9, 2,
+        ];
+        for (base, allowed) in [(1, 0), (2, 0), (3, 0), (2, 10), (4, 6)] {
+            let p = params(0.8, base, allowed);
+            let broken = with_breakers(p.clone(), &[]);
+            let got: Vec<u32> = penalized(&history, &broken)
+                .iter()
+                .map(|v| v.to_bits())
+                .collect();
+            let want: Vec<u32> = penalized(&history, &p)
+                .iter()
+                .map(|v| v.to_bits())
+                .collect();
+            assert_eq!(got, want, "base {base} allowed {allowed}");
+            // A breaker id the history never holds changes nothing either.
+            let absent = with_breakers(p.clone(), &[6]);
+            assert_eq!(penalized(&history, &absent), penalized(&history, &p));
+        }
     }
 
     #[test]

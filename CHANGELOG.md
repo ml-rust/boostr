@@ -34,6 +34,7 @@ Adds exact-resume optimizer state export and import, keyed by parameter name. Ad
 - **`inference::sampling`** — host-side logit shaping for one logits row:
   - `penalty_window` — the distinct ids and counts of the last `last_n` tokens, ascending by id. `0` takes the whole history, as `SampleRule::penalty_last_n` does. The result feeds `SamplingOps::apply_sampling_penalties`.
   - `DryParams`, `apply_dry_penalty` — the DRY n-gram penalty. `DryParams::check` rejects a negative or non-finite multiplier and a base of 0.
+  - `DryParams::breakers` — token ids that stop a match, as llama.cpp's DRY sequence breakers do. A match covers only tokens after the last breaker in the scanned history. A suffix that holds a breaker takes no penalty. A breaker as the token after a match still takes the penalty. Empty `breakers` gives the result without breakers, bit for bit. `DryParams` is no longer `Copy`.
   - `apply_typical_filter` — the typical-p filter. Atypical logits become `-inf`.
   - `DynaTemp` — temperature from the entropy of the row, in `[base - range, base + range]`, floored at `MIN_DYNAMIC_TEMPERATURE`.
   - `MirostatV2`, `MirostatV2State` — the Mirostat v2 sampler on ChaCha12, the `StdRng` algorithm. A seed gives the stream of `StdRng::seed_from_u64`. No seed takes one from `numr::random::next_call_seed`. `state` and `from_state` export and restore `mu` and the stream position. `sample` rejects an empty row, a NaN or `+inf` logit, a row of only `-inf` and a non-finite temperature.

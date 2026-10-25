@@ -14,7 +14,7 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
     /// Additive attention mask for one attention step.
     ///
     /// Always `Some`: the ALiBi branch returns the bias, and every other
-    /// configuration returns a causal mask (windowed when `sliding_window > 0`).
+    /// config returns a causal mask (windowed when `sliding_window > 0`).
     /// The `Option` is the caller's argument type, not a signal that masking is
     /// optional — an unmasked prefill lets every position attend to FUTURE
     /// tokens, which stays invisible to shape checks and still emits fluent
@@ -29,8 +29,8 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
     /// offset from `sk - sq` and needs no extra argument.
     // Seven independent scalars, none derivable from another: `position` is the
     // ALiBi branch's own key offset, and `dtype`/`device` describe the scores
-    // this mask is added to, not each other. Bundling them into a struct would
-    // add a type whose only job is to be destructured back at the one call site.
+    // this mask is added to, not each other. A struct bundling them adds a
+    // type whose only job is to be destructured back at the one call site.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn attention_mask<C>(
         &self,
@@ -61,8 +61,8 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
             // attends to FUTURE tokens, which makes the next-token objective
             // trivially cheatable and corrupts every prompt position at
             // inference. It stays invisible to shape checks and still emits
-            // fluent text — the same failure that survived in the LLaMA
-            // decoder until parity testing caught it.
+            // fluent text. The LLaMA decoder carried the same error until
+            // parity testing caught it.
             //
             // `window_size == 0` yields a pure causal mask, so this covers both
             // the windowed and unwindowed cases. On the decode path
@@ -86,7 +86,7 @@ mod tests {
 
     const NEG: f32 = f32::MIN;
 
-    /// Reference mask: `0.0` where query `i` may attend key `j`, `f32::MIN` else.
+    /// Reference mask: `0.0` where query `i` attends key `j`, `f32::MIN` else.
     ///
     /// Query row `i` sits at absolute position `sk - sq + i`; `window_size == 0`
     /// means unlimited, matching the kernel contract.
@@ -161,8 +161,8 @@ mod tests {
 
     #[test]
     fn windowed_mask_never_overflows_to_negative_infinity() {
-        // `triu` and `tril` regions must stay disjoint: an overlap would sum
-        // `f32::MIN + f32::MIN` and overflow to `-inf`.
+        // `triu` and `tril` regions must stay disjoint: an overlap sums
+        // `f32::MIN + f32::MIN` and overflows to `-inf`.
         for window_size in 1..=5 {
             for value in mask_values(window_size, 6, 6, 0) {
                 assert!(value.is_finite(), "window {window_size} produced {value}");
@@ -250,7 +250,7 @@ mod tests {
             .expect("decode is masked too");
         assert!(
             mask.tensor().to_vec::<f32>().iter().all(|v| *v == 0.0),
-            "every cached key precedes the query, so none may be masked"
+            "every cached key precedes the query, so none is masked"
         );
     }
 }

@@ -113,10 +113,10 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
         // through the output projection, and an optimizer keyed by `TensorId`
         // updates the one weight exactly once.
         //
-        // `Tensor::clone` mints a FRESH `TensorId`, so passing the embedding's
-        // tensor to `Linear::new` would produce a second independent leaf that
-        // duplicates the values but not the identity — the head would train
-        // separately from the embedding while appearing tied.
+        // `Tensor::clone` mints a FRESH `TensorId`. Passing the embedding's
+        // tensor to `Linear::new` produces a second independent leaf: it
+        // duplicates the values but not the identity. That head trains
+        // separately from the embedding while it looks tied.
         let lm_head = if config.tie_word_embeddings {
             MaybeQuantLinear::Standard(Linear::with_ids(
                 embed_tokens.weight().tensor().clone(),
@@ -221,8 +221,8 @@ mod tests {
         assert_eq!(model.embed_tokens.weight().id(), lm_head_id(&model));
     }
 
-    /// The discriminating half: without this, the test above would also pass on
-    /// an implementation that gave every weight the same id.
+    /// The discriminating half. Without it, the test above also passes on an
+    /// implementation that gives every weight the same id.
     #[test]
     fn untied_lm_head_has_its_own_tensor_id() {
         let (_, device) = cpu_setup();

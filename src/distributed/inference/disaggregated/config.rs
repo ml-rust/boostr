@@ -1,6 +1,6 @@
 //! Cluster layout of disaggregated inference.
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use nexar::Rank;
 
 /// Role of a disaggregated inference rank.
@@ -29,6 +29,66 @@ pub struct DisaggConfig {
 }
 
 impl DisaggConfig {
+    /// The standard layout: the router on rank 0, prefill workers on ranks
+    /// `1..=prefill_count`, decode workers on the ranks after them.
+    ///
+    /// Every process of a cluster derives the same layout from the two
+    /// counts, so each worker can request its rank with [`Self::rank_of`].
+    ///
+    /// # Errors
+    ///
+    /// A count of 0, or more ranks than a `u32` holds.
+    pub fn standard(
+        prefill_count: u32,
+        decode_count: u32,
+        max_kv_transfer_bytes: usize,
+    ) -> Result<Self> {
+        if prefill_count == 0 || decode_count == 0 {
+            bail!(
+                "a disaggregated cluster needs at least one prefill and one decode worker, \
+                 and the counts are {prefill_count} prefill and {decode_count} decode"
+            );
+        }
+        let world = prefill_count
+            .checked_add(decode_count)
+            .and_then(|n| n.checked_add(1))
+            .ok_or_else(|| anyhow!("{prefill_count} + {decode_count} workers overflow a rank"))?;
+        Ok(Self {
+            prefill_workers: (1..=prefill_count).collect(),
+            decode_workers: (prefill_count + 1..world).collect(),
+            router_rank: 0,
+            max_kv_transfer_bytes,
+        })
+    }
+
+    /// Ranks in the cluster: the router and every worker.
+    pub fn world_size(&self) -> u32 {
+        (1 + self.prefill_workers.len() + self.decode_workers.len()) as u32
+    }
+
+    /// The rank of the `index`-th worker of `role`, counted from 0.
+    ///
+    /// The router has one rank, index 0.
+    ///
+    /// # Errors
+    ///
+    /// An index at or past the role's worker count.
+    pub fn rank_of(&self, role: DisaggRole, index: u32) -> Result<Rank> {
+        let (name, ranks) = match role {
+            DisaggRole::Router => ("router", std::slice::from_ref(&self.router_rank)),
+            DisaggRole::Prefill => ("prefill", self.prefill_workers.as_slice()),
+            DisaggRole::Decode => ("decode", self.decode_workers.as_slice()),
+        };
+        ranks.get(index as usize).copied().ok_or_else(|| {
+            anyhow!(
+                "{name} index {index} is out of range: the cluster has {} {name} rank(s), \
+                 indices 0..{}",
+                ranks.len(),
+                ranks.len()
+            )
+        })
+    }
+
     /// Checks the layout against a cluster of `world_size` ranks.
     ///
     /// # Errors
@@ -100,5 +160,35 @@ mod tests {
             ..config()
         };
         assert!(none.check(4).unwrap_err().to_string().contains("decode"));
+    }
+
+    #[test]
+    fn standard_puts_the_router_first_then_prefill_then_decode() {
+        let c = DisaggConfig::standard(2, 3, 1 << 20).unwrap();
+        assert_eq!(c.router_rank, 0);
+        assert_eq!(c.prefill_workers, vec![1, 2]);
+        assert_eq!(c.decode_workers, vec![3, 4, 5]);
+        assert_eq!(c.world_size(), 6);
+        c.check(c.world_size()).unwrap();
+        assert!(DisaggConfig::standard(0, 1, 1).is_err());
+        assert!(DisaggConfig::standard(1, 0, 1).is_err());
+        assert!(DisaggConfig::standard(u32::MAX, 1, 1).is_err());
+    }
+
+    #[test]
+    fn rank_of_maps_each_role_and_index_and_refuses_one_past_the_count() {
+        let c = DisaggConfig::standard(2, 3, 1 << 20).unwrap();
+        assert_eq!(c.rank_of(DisaggRole::Router, 0).unwrap(), 0);
+        assert_eq!(c.rank_of(DisaggRole::Prefill, 0).unwrap(), 1);
+        assert_eq!(c.rank_of(DisaggRole::Prefill, 1).unwrap(), 2);
+        assert_eq!(c.rank_of(DisaggRole::Decode, 0).unwrap(), 3);
+        assert_eq!(c.rank_of(DisaggRole::Decode, 2).unwrap(), 5);
+        let err = c.rank_of(DisaggRole::Prefill, 2).unwrap_err().to_string();
+        assert!(
+            err.contains("prefill index 2") && err.contains("0..2"),
+            "{err}"
+        );
+        assert!(c.rank_of(DisaggRole::Decode, 3).is_err());
+        assert!(c.rank_of(DisaggRole::Router, 1).is_err());
     }
 }

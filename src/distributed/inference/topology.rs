@@ -117,27 +117,34 @@ impl SwarmManager {
             return HashMap::new();
         }
 
-        // Sort by total VRAM (largest first for balanced assignment)
+        // Largest VRAM first. Ties order by node id, so the result never
+        // depends on the map's iteration order.
         nodes.sort_by(|a, b| {
             let vram_a: u64 = a.1.vram_per_gpu.iter().sum();
             let vram_b: u64 = b.1.vram_per_gpu.iter().sum();
-            vram_b.cmp(&vram_a)
+            vram_b.cmp(&vram_a).then_with(|| a.0.cmp(b.0))
         });
 
-        // Simple proportional assignment based on VRAM
+        // Proportional to VRAM. With no VRAM reported, every node weighs the same.
         let total_vram: u64 = nodes
             .iter()
             .map(|(_, n)| n.vram_per_gpu.iter().sum::<u64>())
             .sum();
+        let weight = |node: &SwarmNode| -> f64 {
+            if total_vram == 0 {
+                1.0 / nodes.len() as f64
+            } else {
+                node.vram_per_gpu.iter().sum::<u64>() as f64 / total_vram as f64
+            }
+        };
         let mut assignments = HashMap::new();
         let mut current_layer = 0;
 
         for (i, (node_id, node)) in nodes.iter().enumerate() {
-            let node_vram: u64 = node.vram_per_gpu.iter().sum();
             let num_layers = if i == nodes.len() - 1 {
                 total_layers - current_layer
             } else {
-                ((node_vram as f64 / total_vram as f64) * total_layers as f64).round() as usize
+                (weight(node) * total_layers as f64).round() as usize
             };
 
             let end_layer = (current_layer + num_layers).min(total_layers);
@@ -209,5 +216,23 @@ mod tests {
         let total_assigned: usize = assignments.values().map(|(s, e)| e - s).sum();
         assert_eq!(total_assigned, 32);
         assert_eq!(assignments.len(), 2);
+    }
+
+    #[test]
+    fn test_layer_assignment_without_vram_splits_evenly() {
+        let mut mgr = SwarmManager::new(SwarmConfig::default());
+        for id in ["node-a", "node-b"] {
+            mgr.register_node(SwarmNode {
+                node_id: id.into(),
+                address: String::new(),
+                role: SwarmRole::Worker,
+                gpu_count: 1,
+                vram_per_gpu: vec![0],
+                assigned_layers: None,
+            });
+        }
+        let assignments = mgr.compute_layer_assignment(32);
+        assert_eq!(assignments.get("node-a"), Some(&(0, 16)));
+        assert_eq!(assignments.get("node-b"), Some(&(16, 32)));
     }
 }

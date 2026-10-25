@@ -60,8 +60,8 @@ bytemuck = { version = "1.25", features = ["derive"], optional = true }
 # Optional: Distributed inference (nexar transport)
 nexar = { version = "0.1", optional = true }
 anyhow = { version = "1", optional = true }
-# Router event channels, cancel listeners and blocking forward calls.
-tokio = { version = "1", optional = true, default-features = false, features = ["rt", "sync"] }
+# Router event channels, cancel and shutdown listeners, blocking forward calls.
+tokio = { version = "1", optional = true, default-features = false, features = ["macros", "rt", "sync", "time"] }
 tracing = "0.1"
 
 rayon = "1.12"

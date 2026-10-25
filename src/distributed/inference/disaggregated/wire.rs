@@ -117,6 +117,21 @@ pub(crate) fn spawn_cancel_listener(
     TaskGuard::new(handle)
 }
 
+/// A receiver that resolves once `router` sends [`tags::SHUTDOWN`] or disconnects.
+pub(crate) fn spawn_shutdown_listener(
+    client: Arc<NexarClient>,
+    router: Rank,
+) -> (tokio::sync::oneshot::Receiver<()>, TaskGuard) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        if let Err(e) = client.recv_bytes_tagged(router, tags::SHUTDOWN).await {
+            tracing::debug!(router, "shutdown listener ended: {e}");
+        }
+        let _ = tx.send(());
+    });
+    (rx, TaskGuard::new(handle))
+}
+
 /// Runs `f` on the blocking pool. A panic in `f` returns as an error.
 pub(crate) async fn run_blocking<T, F>(f: F) -> Result<T>
 where

@@ -1,78 +1,98 @@
-//! Activation transfer protocol over nexar.
+//! Swarm pipeline protocol over nexar.
 //!
-//! Transfers hidden-state tensors between pipeline stages using nexar's
-//! point-to-point send/recv with CPU staging via `CpuAdapter`.
+//! Every message is one frame on `send_bytes_tagged`, on its own tag. nexar
+//! sends each message on its own QUIC stream, so two messages to one peer
+//! can arrive in either order. A frame therefore carries everything its
+//! receiver needs, and each tag has at most one frame in flight per peer.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use nexar::{CpuAdapter, DeviceAdapter, NexarClient, Rank};
 use std::sync::Arc;
+use std::time::Duration;
 
-/// Tags for nexar messages in the swarm protocol.
-pub mod tags {
-    /// Control plane: layer assignment from leader to worker.
-    pub const LAYER_ASSIGNMENT: u32 = 1;
-    /// Control plane: worker readiness acknowledgment.
-    pub const WORKER_READY: u32 = 2;
-    /// Control plane: model path broadcast from leader to worker.
-    pub const MODEL_PATH: u32 = 3;
-    /// Data plane: hidden state activation tensor transfer.
-    pub const ACTIVATION: u32 = 10;
-    /// Data plane: logits tensor (final stage → leader).
-    pub const LOGITS: u32 = 11;
-    /// Control plane: new generation request (leader → first stage).
-    pub const GEN_REQUEST: u32 = 20;
-    /// Control plane: generation complete signal.
-    pub const GEN_COMPLETE: u32 = 21;
-    /// Control plane: shutdown signal.
-    pub const SHUTDOWN: u32 = 99;
-}
-
-/// Sends a byte buffer to a remote rank.
+/// Tags of the swarm protocol.
 ///
-/// Uses `CpuAdapter` staging: the data pointer is treated as host memory.
-pub async fn send_bytes(client: &NexarClient, data: &[u8], dest: Rank, tag: u32) -> Result<()> {
-    let ptr = data.as_ptr() as u64;
-    let size = data.len();
-    unsafe {
-        client
-            .send(ptr, size, dest, tag)
-            .await
-            .map_err(|e| anyhow!("nexar send failed: {}", e))
+/// nexar numbers its own collective tags upward from 1. These tags sit in a
+/// fixed high range that never meets them: ASCII `SWARM` in the top five bytes.
+pub mod tags {
+    const BASE: u64 = 0x5357_4152_4D00_0000;
+    /// Leader → worker: a [`LayerAssignment`](super::LayerAssignment) frame.
+    pub const LAYER_ASSIGNMENT: u64 = BASE | 1;
+    /// Worker → leader: a one-byte readiness frame.
+    pub const WORKER_READY: u64 = BASE | 2;
+    /// Leader → worker: the model path as UTF-8.
+    pub const MODEL_PATH: u64 = BASE | 3;
+    /// Previous stage → next stage: a [`GenRequestHeader`](super::GenRequestHeader)
+    /// frame with its payload.
+    pub const GEN_REQUEST: u64 = BASE | 20;
+    /// Last stage → leader: the logits as `f32` LE.
+    pub const LOGITS: u64 = BASE | 11;
+    /// Leader → every worker: a one-byte frame that stops the compute loop.
+    pub const SHUTDOWN: u64 = BASE | 99;
+}
+
+/// Sends one frame to `dest` on `tag`.
+pub async fn send_frame(client: &NexarClient, dest: Rank, tag: u64, frame: &[u8]) -> Result<()> {
+    client
+        .send_bytes_tagged(dest, tag, frame)
+        .await
+        .map_err(|e| {
+            anyhow!(
+                "sending a {}-byte frame to rank {dest} failed: {e}",
+                frame.len()
+            )
+        })
+}
+
+/// Receives the next frame from `src` on `tag`.
+pub async fn recv_frame(client: &NexarClient, src: Rank, tag: u64) -> Result<Vec<u8>> {
+    client
+        .recv_bytes_tagged(src, tag)
+        .await
+        .map(|buf| buf.to_vec())
+        .map_err(|e| anyhow!("receiving a frame from rank {src} failed: {e}"))
+}
+
+/// How often [`shutdown_shared`] checks whether the other handles dropped.
+const RELEASE_POLL: Duration = Duration::from_millis(10);
+
+/// Shuts down a client that other tasks can still hold.
+///
+/// Waits up to `release_within` for every other `Arc` handle to drop, then
+/// runs [`NexarClient::shutdown`]: data this rank sent reaches every peer
+/// that is still running. Call it on every rank before the process exits.
+///
+/// # Errors
+///
+/// Another handle still held after `release_within`: this handle drops, and
+/// the connections close without the shutdown exchange once the last
+/// holder drops. Or the error of [`NexarClient::shutdown`].
+pub async fn shutdown_shared(client: Arc<NexarClient>, release_within: Duration) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + release_within;
+    let rank = client.rank();
+    let mut client = client;
+    loop {
+        match Arc::try_unwrap(client) {
+            Ok(owned) => {
+                return owned
+                    .shutdown()
+                    .await
+                    .map_err(|e| anyhow!("nexar shutdown of rank {rank} failed: {e}"));
+            }
+            Err(shared) if tokio::time::Instant::now() >= deadline => {
+                let others = Arc::strong_count(&shared) - 1;
+                return Err(anyhow!(
+                    "rank {rank} skipped the nexar shutdown: {others} other handle(s) still held \
+                     the client after {release_within:?}. Drop every worker, router and task \
+                     that holds the client before the shutdown"
+                ));
+            }
+            Err(shared) => {
+                client = shared;
+                tokio::time::sleep(RELEASE_POLL).await;
+            }
+        }
     }
-}
-
-/// Receives bytes from a remote rank into a pre-allocated buffer.
-pub async fn recv_bytes(client: &NexarClient, buf: &mut [u8], src: Rank, tag: u32) -> Result<()> {
-    let ptr = buf.as_mut_ptr() as u64;
-    let size = buf.len();
-    unsafe {
-        client
-            .recv(ptr, size, src, tag)
-            .await
-            .map_err(|e| anyhow!("nexar recv failed: {}", e))
-    }
-}
-
-/// Sends an f32 tensor (as raw bytes) to a remote rank.
-pub async fn send_tensor_f32(
-    client: &NexarClient,
-    data: &[f32],
-    dest: Rank,
-    tag: u32,
-) -> Result<()> {
-    let bytes = bytemuck::cast_slice::<f32, u8>(data);
-    send_bytes(client, bytes, dest, tag).await
-}
-
-/// Receives an f32 tensor from a remote rank.
-pub async fn recv_tensor_f32(
-    client: &NexarClient,
-    buf: &mut [f32],
-    src: Rank,
-    tag: u32,
-) -> Result<()> {
-    let bytes = bytemuck::cast_slice_mut::<f32, u8>(buf);
-    recv_bytes(client, bytes, src, tag).await
 }
 
 /// Layer assignment message: serialized as [start_layer: u32, end_layer: u32, has_embedding: u8, has_lm_head: u8].
@@ -102,9 +122,27 @@ impl LayerAssignment {
             has_lm_head: buf[9] != 0,
         }
     }
+
+    /// The assignment in a [`tags::LAYER_ASSIGNMENT`] frame.
+    ///
+    /// # Errors
+    ///
+    /// A frame that is not 10 bytes.
+    pub fn from_frame(frame: &[u8]) -> Result<Self> {
+        let buf: &[u8; 10] = frame.try_into().map_err(|_| {
+            anyhow!(
+                "a layer assignment frame is 10 bytes, and this one is {}",
+                frame.len()
+            )
+        })?;
+        Ok(Self::from_bytes(buf))
+    }
 }
 
 /// Generation request header: [seq_len: u32, max_tokens: u32, position: u32].
+///
+/// `seq_len` counts the payload's elements: `i64` token ids for the first
+/// stage, `f32` activations for every later stage.
 #[derive(Debug, Clone, Copy)]
 pub struct GenRequestHeader {
     pub seq_len: u32,
@@ -127,6 +165,29 @@ impl GenRequestHeader {
             max_tokens: u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]),
             position: u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]),
         }
+    }
+
+    /// A [`tags::GEN_REQUEST`] frame: this header, then `payload`.
+    pub fn frame(&self, payload: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(12 + payload.len());
+        frame.extend_from_slice(&self.to_bytes());
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    /// The header and payload of a [`tags::GEN_REQUEST`] frame.
+    ///
+    /// # Errors
+    ///
+    /// A frame shorter than the 12-byte header.
+    pub fn split_frame(frame: &[u8]) -> Result<(Self, &[u8])> {
+        let Some((header, payload)) = frame.split_first_chunk::<12>() else {
+            bail!(
+                "a generation request frame of {} bytes has no 12-byte header",
+                frame.len()
+            );
+        };
+        Ok((Self::from_bytes(header), payload))
     }
 }
 
@@ -155,6 +216,40 @@ mod tests {
         assert!(decoded.has_lm_head);
     }
 
+    async fn pair() -> (Arc<NexarClient>, Arc<NexarClient>) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut clients = NexarClient::bootstrap_local(2, cpu_adapter())
+            .await
+            .unwrap();
+        clients.sort_by_key(|c| c.rank());
+        let c1 = Arc::new(clients.pop().unwrap());
+        (Arc::new(clients.pop().unwrap()), c1)
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_shared_waits_for_other_handles() {
+        let (c0, c1) = pair().await;
+        let held = Arc::clone(&c0);
+        let holder = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(held);
+        });
+        let peer = tokio::spawn(shutdown_shared(c1, Duration::from_secs(5)));
+        shutdown_shared(c0, Duration::from_secs(5)).await.unwrap();
+        peer.await.unwrap().unwrap();
+        holder.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_shared_names_a_handle_that_stays() {
+        let (c0, _c1) = pair().await;
+        let _held = Arc::clone(&c0);
+        let err = shutdown_shared(c0, Duration::from_millis(30))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("1 other handle"), "{err}");
+    }
+
     #[test]
     fn test_gen_request_header_roundtrip() {
         let orig = GenRequestHeader {
@@ -167,5 +262,30 @@ mod tests {
         assert_eq!(decoded.seq_len, 128);
         assert_eq!(decoded.max_tokens, 256);
         assert_eq!(decoded.position, 0);
+    }
+
+    #[test]
+    fn test_frames_carry_the_header_and_payload_and_refuse_short_input() {
+        let header = GenRequestHeader {
+            seq_len: 2,
+            max_tokens: 3,
+            position: 4,
+        };
+        let frame = header.frame(&[9, 8, 7]);
+        let (back, payload) = GenRequestHeader::split_frame(&frame).unwrap();
+        assert_eq!((back.seq_len, back.max_tokens, back.position), (2, 3, 4));
+        assert_eq!(payload, [9, 8, 7]);
+        assert!(GenRequestHeader::split_frame(&frame[..11]).is_err());
+
+        let a = LayerAssignment {
+            start_layer: 1,
+            end_layer: 2,
+            has_embedding: true,
+            has_lm_head: false,
+        };
+        let back = LayerAssignment::from_frame(&a.to_bytes()).unwrap();
+        assert_eq!((back.start_layer, back.end_layer), (1, 2));
+        let err = LayerAssignment::from_frame(&[0; 9]).unwrap_err();
+        assert!(err.to_string().contains("this one is 9"), "{err}");
     }
 }

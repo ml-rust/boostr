@@ -170,6 +170,13 @@ impl Cluster {
     }
 }
 
+impl Cluster {
+    /// The worker run loops. The cluster no longer aborts them on drop.
+    pub(crate) fn take_workers(&mut self) -> Vec<tokio::task::JoinHandle<Result<()>>> {
+        std::mem::take(&mut self._workers)
+    }
+}
+
 impl Drop for Cluster {
     fn drop(&mut self) {
         for w in &self._workers {

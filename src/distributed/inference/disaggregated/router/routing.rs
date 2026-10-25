@@ -22,8 +22,8 @@ use super::stream::{Generation, TokenStream};
 /// request's events by seq and ends a request with an error when its worker
 /// disconnects or nexar reports the worker dead.
 pub struct DisaggRouter {
-    shared: Arc<Shared>,
-    config: DisaggConfig,
+    pub(super) shared: Arc<Shared>,
+    pub(super) config: DisaggConfig,
     next_request_id: AtomicU64,
     decode_cursor: AtomicU64,
     /// Session key → decode rank. A routing hint only.

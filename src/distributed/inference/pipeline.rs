@@ -14,6 +14,11 @@
 //! └──────────────┘        └──────────────┘
 //! ```
 
+/// The node id of the stage on `rank` in a [`PipelineSchedule::by_rank`] schedule.
+pub fn rank_node_id(rank: u32) -> String {
+    format!("rank-{rank}")
+}
+
 /// A pipeline stage representing a contiguous range of model layers.
 #[derive(Debug, Clone)]
 pub struct PipelineStage {
@@ -57,6 +62,43 @@ impl PipelineSchedule {
         Self { stages }
     }
 
+    /// One stage per rank, in rank order: rank `r` runs stage `r`.
+    ///
+    /// Splits `total_layers` into contiguous ranges, as even as possible.
+    /// The lower ranks take the extra layers. Stage `r` names node
+    /// [`rank_node_id`]`(r)`. A stage's previous stage is rank `r - 1` and its
+    /// next stage is rank `r + 1`, so a worker derives both from its rank.
+    ///
+    /// # Errors
+    ///
+    /// `world_size` of 0, or more ranks than layers.
+    pub fn by_rank(world_size: u32, total_layers: usize) -> anyhow::Result<Self> {
+        let ranks = world_size as usize;
+        if ranks == 0 || ranks > total_layers {
+            anyhow::bail!(
+                "a pipeline of {total_layers} layers cannot run on {world_size} ranks: \
+                 use between 1 and {total_layers} ranks"
+            );
+        }
+        let (base, extra) = (total_layers / ranks, total_layers % ranks);
+        let mut start = 0;
+        let stages = (0..ranks)
+            .map(|r| {
+                let end = start + base + usize::from(r < extra);
+                let stage = PipelineStage {
+                    node_id: rank_node_id(r as u32),
+                    start_layer: start,
+                    end_layer: end,
+                    has_embedding: start == 0,
+                    has_lm_head: end == total_layers,
+                };
+                start = end;
+                stage
+            })
+            .collect();
+        Ok(Self { stages })
+    }
+
     /// Get pipeline stages in execution order.
     pub fn stages(&self) -> &[PipelineStage] {
         &self.stages
@@ -98,5 +140,30 @@ mod tests {
         assert!(!schedule.stages()[1].has_embedding);
         assert!(schedule.stages()[1].has_lm_head);
         assert_eq!(schedule.output_node(), Some("node-1"));
+    }
+
+    #[test]
+    fn test_by_rank_splits_in_rank_order() {
+        let schedule = PipelineSchedule::by_rank(3, 10).unwrap();
+        let ranges: Vec<_> = schedule
+            .stages()
+            .iter()
+            .map(|s| (s.node_id.as_str(), s.start_layer, s.end_layer))
+            .collect();
+        assert_eq!(
+            ranges,
+            [("rank-0", 0, 4), ("rank-1", 4, 7), ("rank-2", 7, 10)]
+        );
+        assert!(schedule.stages()[0].has_embedding);
+        assert!(schedule.stages()[2].has_lm_head);
+        assert!(!schedule.stages()[1].has_embedding && !schedule.stages()[1].has_lm_head);
+    }
+
+    #[test]
+    fn test_by_rank_refuses_more_ranks_than_layers() {
+        assert!(PipelineSchedule::by_rank(0, 4).is_err());
+        let err = PipelineSchedule::by_rank(5, 4).err().unwrap();
+        assert!(err.to_string().contains("between 1 and 4"), "{err}");
+        assert_eq!(PipelineSchedule::by_rank(1, 4).unwrap().num_stages(), 1);
     }
 }

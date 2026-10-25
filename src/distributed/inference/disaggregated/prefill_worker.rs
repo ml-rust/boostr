@@ -5,6 +5,7 @@ use nexar::{NexarClient, Rank};
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::cancel::CancelBook;
 use super::forward::PrefillFn;
@@ -12,8 +13,9 @@ use super::protocol::{Event, KvHandoff, PrefillRequest, Stage, TokenEvent, peek_
 use super::sampler::RequestSampler;
 use super::wire::{
     TaskGuard, run_blocking, send_error, send_event, send_frame, spawn_cancel_listener,
-    spawn_listener,
+    spawn_listener, spawn_shutdown_listener,
 };
+use crate::distributed::inference::transport::shutdown_shared;
 use crate::ops::traits::inference::SamplingOps;
 
 /// What prefill produced for one request.
@@ -117,7 +119,19 @@ where
         self.rank
     }
 
-    /// Serves prefill requests one at a time until the router disconnects.
+    /// Shuts down this worker's nexar client. Call it after the run loop
+    /// returns, before the process exits.
+    ///
+    /// # Errors
+    ///
+    /// The error of [`shutdown_shared`].
+    pub async fn shutdown(self, release_within: Duration) -> Result<()> {
+        shutdown_shared(self.client, release_within).await
+    }
+
+    /// Serves prefill requests one at a time until the router's
+    /// [`tags::SHUTDOWN`] notice or disconnect. Call
+    /// [`PrefillWorker::shutdown`] after it returns.
     ///
     /// # Errors
     ///
@@ -139,7 +153,19 @@ where
             tx,
             |buf: &[u8]| PrefillRequest::from_bytes(buf).map_err(|e| (peek_request_id(buf), e)),
         );
-        while let Some(frame) = rx.recv().await {
+        let (mut stop, _stop) = spawn_shutdown_listener(Arc::clone(&self.client), self.router_rank);
+        loop {
+            let frame = tokio::select! {
+                biased;
+                _ = &mut stop => {
+                    tracing::info!(rank = self.rank, "prefill worker received the shutdown notice");
+                    break;
+                }
+                frame = rx.recv() => match frame {
+                    Some(frame) => frame,
+                    None => break,
+                },
+            };
             match frame {
                 Ok(req) => self.serve(req, &book).await?,
                 Err((Some(id), e)) => self.fail(id, 0, e).await?,

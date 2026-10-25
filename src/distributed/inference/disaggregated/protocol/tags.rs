@@ -16,3 +16,6 @@ pub const KV_HANDOFF: u64 = BASE | 2;
 pub const CANCEL: u64 = BASE | 3;
 /// Prefill or decode worker → router: an `Event` frame.
 pub const EVENT: u64 = BASE | 4;
+/// Router → prefill or decode worker: stop the run loop. A one-byte frame
+/// outside the versioned frame format: the tag alone carries the message.
+pub const SHUTDOWN: u64 = BASE | 5;

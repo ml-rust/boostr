@@ -5,6 +5,7 @@ use nexar::{NexarClient, Rank};
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::cancel::CancelBook;
 use super::forward::{DecodeOpenFn, DecodeStepFn};
@@ -12,7 +13,9 @@ use super::protocol::{Event, KvHandoff, Stage, TokenEvent, peek_request_id, tags
 use super::sampler::RequestSampler;
 use super::wire::{
     TaskGuard, run_blocking, send_error, send_event, spawn_cancel_listener, spawn_listener,
+    spawn_shutdown_listener,
 };
+use crate::distributed::inference::transport::shutdown_shared;
 use crate::ops::traits::inference::SamplingOps;
 
 /// One request in decode: its step closure and its sampler.
@@ -108,7 +111,19 @@ where
         self.rank
     }
 
-    /// Serves handoffs until every prefill worker disconnects.
+    /// Shuts down this worker's nexar client. Call it after the run loop
+    /// returns, before the process exits.
+    ///
+    /// # Errors
+    ///
+    /// The error of [`shutdown_shared`].
+    pub async fn shutdown(self, release_within: Duration) -> Result<()> {
+        shutdown_shared(self.client, release_within).await
+    }
+
+    /// Serves handoffs until the router's [`tags::SHUTDOWN`] notice, the
+    /// router's disconnect, or every prefill worker's disconnect. Call
+    /// [`DecodeWorker::shutdown`] after it returns.
     ///
     /// # Errors
     ///
@@ -136,7 +151,19 @@ where
             })
             .collect();
         drop(tx);
-        while let Some(frame) = rx.recv().await {
+        let (mut stop, _stop) = spawn_shutdown_listener(Arc::clone(&self.client), self.router_rank);
+        loop {
+            let frame = tokio::select! {
+                biased;
+                _ = &mut stop => {
+                    tracing::info!(rank = self.rank, "decode worker received the shutdown notice");
+                    break;
+                }
+                frame = rx.recv() => match frame {
+                    Some(frame) => frame,
+                    None => break,
+                },
+            };
             match frame {
                 Ok(handoff) => self.serve(handoff, &book).await?,
                 // Prefill always hands off after its one token, so decode's first seq is 1.

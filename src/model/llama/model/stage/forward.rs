@@ -49,7 +49,10 @@ impl<R: Runtime<DType = DType>> LlamaStage<R> {
     ///
     /// An empty range, a range outside the span, a cache whose layer count
     /// differs from the range length, or a layer that fails.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "client, both residual streams, the cache, the layer range and the position"
+    )]
     pub fn forward_layers_range<C>(
         &self,
         client: &C,

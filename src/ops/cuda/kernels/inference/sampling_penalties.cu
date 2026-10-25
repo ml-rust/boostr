@@ -14,11 +14,14 @@
 //   - repeat_penalty: if logit > 0, divide by penalty; else multiply
 //   - frequency_penalty: logit -= freq_penalty * count
 //   - presence_penalty: logit -= pres_penalty
+//
+// An id outside [0, vocab_size) is skipped, as on the CPU and WGPU backends.
 extern "C" __global__ void apply_sampling_penalties_kernel(
     float* __restrict__ logits,              // [vocab_size] — modified in-place
     const int64_t* __restrict__ token_ids,   // [num_unique] — unique token IDs
     const int32_t* __restrict__ token_counts, // [num_unique] — count per token
     int num_unique,
+    int vocab_size,
     float repeat_penalty,
     float frequency_penalty,
     float presence_penalty
@@ -27,6 +30,7 @@ extern "C" __global__ void apply_sampling_penalties_kernel(
     if (idx >= num_unique) return;
 
     int64_t token_id = token_ids[idx];
+    if (token_id < 0 || token_id >= (int64_t)vocab_size) return;
     int32_t count = token_counts[idx];
     float logit = logits[token_id];
 

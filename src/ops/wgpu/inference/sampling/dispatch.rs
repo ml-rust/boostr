@@ -117,7 +117,11 @@ pub(super) fn submit_pass(
 }
 
 /// Run the fused kernel over the vocab row at `logits_offset`.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "client, the logits row and its offset and width, the token ids and counts, \
+              the sampling args and the scratch buffers"
+)]
 pub(super) fn dispatch_logits_to_token(
     client: &WgpuClient,
     logits: &Tensor<WgpuRuntime>,

@@ -176,7 +176,10 @@ fn packed_heads<R: Runtime>(
 /// `scale * sqrt(D)` first, on the gradient path.
 ///
 /// Returns the `[T, H, D]` output. The log-sum-exp stays inside the backward node.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "client, Q, K, V, the segments, scale, the causal flag and the window"
+)]
 pub fn var_varlen_attention<R, C>(
     client: &C,
     q: &Var<R>,

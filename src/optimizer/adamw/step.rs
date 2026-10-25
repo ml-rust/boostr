@@ -31,7 +31,6 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
     /// * `client` - Runtime client for tensor ops
     /// * `params` - Mutable map of parameter ID → tensor
     /// * `grads` - Gradient store from `backward()`
-    #[allow(clippy::type_complexity)]
     pub fn step<C>(
         &mut self,
         client: &C,
@@ -71,7 +70,6 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
     ///
     /// # Errors
     /// Returns an error when no step has begun since `new`, `reset` or `load_state_dict`.
-    #[allow(clippy::type_complexity)]
     pub fn step_partial<C>(
         &mut self,
         client: &C,

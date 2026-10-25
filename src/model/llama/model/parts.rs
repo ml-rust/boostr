@@ -143,7 +143,11 @@ pub(super) fn take_final_norm<R: Runtime<DType = DType>>(
 ///
 /// A cache whose layer count differs from `layers.len()`, or a layer that
 /// fails.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "client, the layers and their first index, RoPE, both residual streams, the \
+              cache and the position"
+)]
 pub(super) fn run_layers<R, C>(
     client: &C,
     layers: &[LlamaBlock<R>],

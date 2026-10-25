@@ -152,7 +152,10 @@ where
 /// RoPE needs no position reset per document. Rotated scores depend only on
 /// the offset `i - j`. A document at row offset `p` gets the scores it gets at
 /// offset `0`, up to float rounding.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "client, Q, K, V, the RoPE tables, the spec and the packed segments"
+)]
 pub fn attention_core_flash<R, C>(
     client: &C,
     q: &Var<R>,

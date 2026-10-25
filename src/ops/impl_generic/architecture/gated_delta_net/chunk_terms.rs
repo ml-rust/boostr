@@ -190,7 +190,10 @@ pub(super) struct Chunked<R: Runtime> {
 /// Padded tokens carry `beta = 0` and `g = 0`. Their rows of `A`, `U` and
 /// `W` vanish, so the state never sees them. `segment_ids` is an I32
 /// `[batch, seq]` tensor or `None` for one document per row.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "client, five forward inputs, segment ids, the dims and the chunk size"
+)]
 pub(super) fn chunk_inputs<R, C>(
     client: &C,
     q: &Tensor<R>,

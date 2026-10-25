@@ -60,6 +60,8 @@ bytemuck = { version = "1.25", features = ["derive"], optional = true }
 # Optional: Distributed inference (nexar transport)
 nexar = { version = "0.1", optional = true }
 anyhow = { version = "1", optional = true }
+# Router event channels, cancel listeners and blocking forward calls.
+tokio = { version = "1", optional = true, default-features = false, features = ["rt", "sync"] }
 tracing = "0.1"
 
 rayon = "1.12"
@@ -86,7 +88,7 @@ bytemuck = { version = "1.25", features = ["derive"] }
 # features unify only when building boostr's own tests.
 splintr = { version = "0.22", features = ["vocab-cl100k"] }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 rustls = "0.23"
 # Tests compare the mirostat stream with StdRng.
 rand = { version = "0.10", default-features = false, features = ["std_rng"] }
@@ -139,7 +141,7 @@ wgpu = ["numr/wgpu", "dep:wgpu", "dep:bytemuck"]
 # Pulls in `f16` because the disaggregated KV cache wire format carries bf16 — the
 # training dtype — and reconstructing a bf16 cache goes through numr's f16-gated
 # kernels. Without it a bf16 transfer would fail at run time inside a server.
-distributed = ["dep:nexar", "dep:anyhow", "dep:bytemuck", "f16"]
+distributed = ["dep:nexar", "dep:anyhow", "dep:bytemuck", "dep:tokio", "f16"]
 
 # Precision features
 f16 = ["numr/f16"]

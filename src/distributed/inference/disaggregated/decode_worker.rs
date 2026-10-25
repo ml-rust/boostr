@@ -1,51 +1,97 @@
-//! Decode worker: receives the KV cache from a prefill worker and runs the
-//! autoregressive token generation loop.
+//! Decode worker: resumes a request from its KV handoff and streams tokens.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use nexar::{NexarClient, Rank};
+use numr::dtype::DType;
+use numr::runtime::Runtime;
 use std::sync::Arc;
 
-use super::protocol::{DecodeRequest, DecodeStepFn, DecodedToken, tags};
-use crate::distributed::inference::transport;
+use super::cancel::CancelBook;
+use super::forward::{DecodeOpenFn, DecodeStepFn};
+use super::protocol::{Event, KvHandoff, Stage, TokenEvent, peek_request_id, tags};
+use super::sampler::RequestSampler;
+use super::wire::{
+    TaskGuard, run_blocking, send_error, send_event, spawn_cancel_listener, spawn_listener,
+};
+use crate::ops::traits::inference::SamplingOps;
 
-/// Decode worker: receives the KV cache from a prefill worker and runs the
-/// autoregressive token generation loop.
+/// One request in decode: its step closure and its sampler.
+pub(crate) struct ActiveDecode<R: Runtime> {
+    step: DecodeStepFn<R>,
+    sampler: RequestSampler,
+}
+
+impl<R> ActiveDecode<R>
+where
+    R: Runtime<DType = DType>,
+    R::Client: SamplingOps<R>,
+{
+    /// Opens `handoff` through `open`.
+    ///
+    /// # Errors
+    ///
+    /// The handoff has no resolved seed, or `open` fails.
+    pub(crate) fn open(open: &DecodeOpenFn<R>, handoff: KvHandoff) -> Result<Self> {
+        let sampler = RequestSampler::resume(handoff.params, handoff.context, handoff.generated)?;
+        let step = open(&handoff.kv_cache).map_err(|e| e.context("opening the KV cache failed"))?;
+        Ok(Self { step, sampler })
+    }
+
+    /// The index of the token the next [`Self::advance`] samples.
+    pub(crate) fn next_index(&self) -> u32 {
+        self.sampler.generated()
+    }
+
+    /// Feeds the last token and samples the next one.
+    pub(crate) fn advance(&mut self, client: &R::Client) -> Result<TokenEvent> {
+        let token = self
+            .sampler
+            .last_token()
+            .ok_or_else(|| anyhow!("the decode context is empty"))?;
+        let position = self.sampler.last_position();
+        let logits = (self.step)(token, position)
+            .map_err(|e| e.context(format!("decode step at position {position} failed")))?;
+        self.sampler.sample(client, &logits)
+    }
+}
+
+/// Decode worker: takes KV handoffs from any prefill worker, then runs one
+/// request at a time to its finish.
 ///
-/// # Decode step function contract
-///
-/// `decode_step_fn` receives:
-/// - `kv_cache_bytes`: the full serialised KV cache for the current request
-/// - `last_token_id`: the most recently generated token (or the last prompt
-///   token for the very first decode step)
-/// - `position`: current sequence position (prompt length + tokens generated so far)
-///
-/// It must return `(next_token_id, updated_kv_cache_bytes)`.  The updated KV
-/// cache is passed back on the next call so the function does not need to
-/// maintain internal state between calls (pure functional interface).
-pub struct DecodeWorker {
+/// Each step feeds the last sampled token, samples the next with the
+/// request's seeded sampler and streams it to the router. The stream ends on
+/// an EOS id, a stop id or `max_new_tokens`. A cancel from the router ends
+/// the request between steps and frees its state without another event.
+/// Every error becomes a [`Stage::Decode`] error event, and the loop goes on.
+pub struct DecodeWorker<R: Runtime> {
     client: Arc<NexarClient>,
     rank: Rank,
     router_rank: Rank,
-    /// Ranks of all configured prefill workers that may send KV caches.
     prefill_workers: Vec<Rank>,
     max_kv_transfer_bytes: usize,
-    /// `(next_token_id, updated_kv) = decode_step_fn(kv_cache, last_token_id, position)`
-    decode_step_fn: DecodeStepFn,
+    sampler_client: R::Client,
+    open_fn: Arc<DecodeOpenFn<R>>,
 }
 
-impl DecodeWorker {
-    /// Create a decode worker.
+impl<R> DecodeWorker<R>
+where
+    R: Runtime<DType = DType>,
+    R::Client: SamplingOps<R> + 'static,
+{
+    /// A decode worker.
     ///
-    /// `prefill_workers` lists all prefill worker ranks that may send KV caches
-    /// to this decode worker. The worker tries each rank in order when waiting
-    /// for an incoming KV cache transfer.
+    /// - `prefill_workers`: every rank that can send this worker a handoff.
+    /// - `sampler_client`: the runtime client each token samples on. It must
+    ///   run on the device the step closures return logits on.
+    /// - `open_fn`: opens one request from its serialized cache. See [`DecodeOpenFn`].
     pub fn new(
         client: Arc<NexarClient>,
         rank: Rank,
         router_rank: Rank,
         prefill_workers: Vec<Rank>,
         max_kv_transfer_bytes: usize,
-        decode_step_fn: DecodeStepFn,
+        sampler_client: R::Client,
+        open_fn: DecodeOpenFn<R>,
     ) -> Self {
         Self {
             client,
@@ -53,167 +99,213 @@ impl DecodeWorker {
             router_rank,
             prefill_workers,
             max_kv_transfer_bytes,
-            decode_step_fn,
+            sampler_client,
+            open_fn: Arc::new(open_fn),
         }
-    }
-
-    /// Run the decode worker's event loop.
-    ///
-    /// The loop:
-    /// 1. Receives a KV cache (length header then payload) from a prefill worker.
-    /// 2. Sends `KV_CACHE_ACK` to the prefill worker.
-    /// 3. Waits for a `DecodeRequest` from the router.
-    /// 4. Runs the autoregressive decode loop, streaming tokens back to the router.
-    /// 5. Sends `DECODE_DONE` when generation is complete.
-    pub async fn run_loop(&self) -> Result<()> {
-        tracing::info!(rank = self.rank, "Decode worker loop starting");
-
-        loop {
-            // Step 1a: receive KV cache length from whichever prefill worker is
-            // sending. We try each configured prefill worker rank in turn and
-            // accept from the first one that has data.
-            let mut kv_len_buf = [0u8; 8];
-            let mut kv_source_rank: Rank = 0;
-            let mut received = false;
-
-            for &prefill_rank in &self.prefill_workers {
-                match transport::recv_bytes(
-                    &self.client,
-                    &mut kv_len_buf,
-                    prefill_rank,
-                    tags::KV_CACHE,
-                )
-                .await
-                {
-                    Ok(()) => {
-                        kv_source_rank = prefill_rank;
-                        received = true;
-                        break;
-                    }
-                    Err(_) => continue,
-                }
-            }
-
-            if !received {
-                tracing::warn!(
-                    rank = self.rank,
-                    "No KV cache received from any prefill worker (shutdown?)"
-                );
-                break;
-            }
-
-            let kv_len = u64::from_le_bytes(kv_len_buf) as usize;
-
-            if kv_len > self.max_kv_transfer_bytes {
-                tracing::error!(
-                    rank = self.rank,
-                    kv_bytes = kv_len,
-                    limit = self.max_kv_transfer_bytes,
-                    "KV cache exceeds limit; skipping request"
-                );
-                continue;
-            }
-
-            // Step 1b: receive the actual KV cache payload.
-            let mut kv_cache = vec![0u8; kv_len];
-            transport::recv_bytes(&self.client, &mut kv_cache, kv_source_rank, tags::KV_CACHE)
-                .await?;
-
-            // Step 2: acknowledge receipt so the prefill worker can tell the
-            // router that it is done.
-            let ack = [0u8; 8];
-            transport::send_bytes(&self.client, &ack, kv_source_rank, tags::KV_CACHE_ACK).await?;
-
-            // Step 3: wait for the decode request from the router.
-            let mut decode_req_buf = [0u8; 16];
-            transport::recv_bytes(
-                &self.client,
-                &mut decode_req_buf,
-                self.router_rank,
-                tags::DECODE_REQUEST,
-            )
-            .await?;
-            let decode_req = DecodeRequest::from_bytes(&decode_req_buf);
-
-            tracing::debug!(
-                rank = self.rank,
-                request_id = decode_req.request_id,
-                max_new_tokens = decode_req.max_new_tokens,
-                "Starting decode loop"
-            );
-
-            // Step 4: autoregressive generation.
-            let mut last_token: i64 = 0;
-            let mut position: u32 = 0;
-            let mut tokens_generated: u32 = 0;
-
-            // Extract the starting position from the KV cache header (first 4
-            // bytes, convention agreed between prefill_fn and decode_step_fn).
-            if let Some(header) = kv_cache.get(0..4).and_then(|b| <[u8; 4]>::try_from(b).ok()) {
-                position = u32::from_le_bytes(header);
-            }
-
-            loop {
-                if tokens_generated >= decode_req.max_new_tokens {
-                    break;
-                }
-
-                let (next_token, updated_kv) =
-                    (self.decode_step_fn)(&kv_cache, last_token, position);
-
-                kv_cache = updated_kv;
-                last_token = next_token;
-                position += 1;
-                tokens_generated += 1;
-
-                // Stream the token back to the router.
-                let tok = DecodedToken {
-                    request_id: decode_req.request_id,
-                    token_id: next_token,
-                };
-                transport::send_bytes(
-                    &self.client,
-                    &tok.to_bytes(),
-                    self.router_rank,
-                    tags::DECODE_TOKEN,
-                )
-                .await?;
-
-                // EOS token convention: i64::MIN signals end of sequence.
-                if next_token == i64::MIN {
-                    tracing::debug!(
-                        rank = self.rank,
-                        request_id = decode_req.request_id,
-                        tokens_generated,
-                        "EOS reached"
-                    );
-                    break;
-                }
-            }
-
-            // Step 5: send DECODE_DONE so the router can close the response.
-            let done_payload = decode_req.request_id.to_le_bytes();
-            transport::send_bytes(
-                &self.client,
-                &done_payload,
-                self.router_rank,
-                tags::DECODE_DONE,
-            )
-            .await?;
-
-            tracing::debug!(
-                rank = self.rank,
-                request_id = decode_req.request_id,
-                tokens_generated,
-                "Decode complete"
-            );
-        }
-
-        tracing::info!(rank = self.rank, "Decode worker loop ended");
-        Ok(())
     }
 
     pub fn rank(&self) -> Rank {
         self.rank
+    }
+
+    /// Serves handoffs until every prefill worker disconnects.
+    ///
+    /// # Errors
+    ///
+    /// A failed send to the router.
+    pub async fn run_loop(&self) -> Result<()> {
+        tracing::info!(rank = self.rank, "decode worker loop starting");
+        let book = Arc::new(CancelBook::default());
+        let _cancels = spawn_cancel_listener(
+            Arc::clone(&self.client),
+            self.router_rank,
+            Arc::clone(&book),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let _listeners: Vec<TaskGuard> = self
+            .prefill_workers
+            .iter()
+            .map(|&src| {
+                spawn_listener(
+                    Arc::clone(&self.client),
+                    src,
+                    tags::KV_HANDOFF,
+                    tx.clone(),
+                    |buf: &[u8]| KvHandoff::from_bytes(buf).map_err(|e| (peek_request_id(buf), e)),
+                )
+            })
+            .collect();
+        drop(tx);
+        while let Some(frame) = rx.recv().await {
+            match frame {
+                Ok(handoff) => self.serve(handoff, &book).await?,
+                // Prefill always hands off after its one token, so decode's first seq is 1.
+                Err((Some(id), e)) => self.fail(id, 1, e).await?,
+                Err((None, e)) => {
+                    tracing::warn!(rank = self.rank, "dropping a malformed KV handoff: {e:#}")
+                }
+            }
+        }
+        tracing::info!(rank = self.rank, "decode worker loop ended");
+        Ok(())
+    }
+
+    async fn serve(&self, handoff: KvHandoff, book: &CancelBook) -> Result<()> {
+        let id = handoff.request_id;
+        let result = self.decode(handoff, book).await;
+        book.finish(id);
+        result
+    }
+
+    async fn decode(&self, handoff: KvHandoff, book: &CancelBook) -> Result<()> {
+        let id = handoff.request_id;
+        let first_seq = handoff.generated;
+        if book.is_cancelled(id) {
+            return Ok(());
+        }
+        if handoff.kv_cache.len() > self.max_kv_transfer_bytes {
+            let e = anyhow!(
+                "the KV cache is {} bytes, above this decode worker's {}-byte limit",
+                handoff.kv_cache.len(),
+                self.max_kv_transfer_bytes
+            );
+            return self.fail(id, first_seq, e).await;
+        }
+        let open_fn = Arc::clone(&self.open_fn);
+        let opened = run_blocking(move || ActiveDecode::open(&open_fn, handoff)).await;
+        let mut active = match opened.and_then(|r| r) {
+            Ok(a) => a,
+            Err(e) => return self.fail(id, first_seq, e).await,
+        };
+        loop {
+            if book.is_cancelled(id) {
+                tracing::debug!(rank = self.rank, request_id = id, "decode cancelled");
+                return Ok(());
+            }
+            let seq = active.next_index();
+            let client = self.sampler_client.clone();
+            let stepped = run_blocking(move || {
+                let r = active.advance(&client);
+                (active, r)
+            })
+            .await;
+            let (back, result) = match stepped {
+                Ok(pair) => pair,
+                Err(e) => return self.fail(id, seq, e).await,
+            };
+            active = back;
+            match result {
+                Ok(token) => {
+                    send_event(&self.client, self.router_rank, &Event::token(id, token)).await?;
+                    if token.finish.is_some() {
+                        return Ok(());
+                    }
+                }
+                Err(e) => return self.fail(id, seq, e).await,
+            }
+        }
+    }
+
+    async fn fail(&self, id: u64, seq: u32, e: anyhow::Error) -> Result<()> {
+        send_error(
+            &self.client,
+            self.router_rank,
+            self.rank,
+            Stage::Decode,
+            id,
+            seq,
+            e,
+        )
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::protocol::{FinishReason, GenerationParams};
+    use super::super::test_harness::{MockDecode, mock_kv};
+    use super::*;
+    use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
+
+    fn handoff(params: GenerationParams) -> KvHandoff {
+        let mut params = params;
+        params.rule.seed = Some(1);
+        KvHandoff {
+            request_id: 4,
+            params,
+            generated: 1,
+            context: vec![3, 4, 5, 6],
+            kv_cache: mock_kv(&[3, 4, 5]),
+        }
+    }
+
+    fn run(active: &mut ActiveDecode<CpuRuntime>) -> (Vec<u32>, Option<FinishReason>) {
+        let client = CpuClient::new(CpuDevice::new());
+        let mut tokens = Vec::new();
+        loop {
+            let ev = active.advance(&client).unwrap();
+            assert_eq!(ev.index as usize, tokens.len() + 1);
+            tokens.push(ev.token);
+            if ev.finish.is_some() {
+                return (tokens, ev.finish);
+            }
+        }
+    }
+
+    #[test]
+    fn decode_stops_at_eos_with_its_reason() {
+        let mut p = GenerationParams::greedy(50);
+        p.eos_tokens = vec![9];
+        let open = MockDecode::default().open_fn();
+        let mut a = ActiveDecode::open(&open, handoff(p)).unwrap();
+        assert_eq!(a.next_index(), 1);
+        assert_eq!(run(&mut a), (vec![7, 8, 9], Some(FinishReason::Eos)));
+    }
+
+    #[test]
+    fn decode_stops_at_a_stop_id_and_at_length() {
+        let mut p = GenerationParams::greedy(50);
+        p.stop_tokens = vec![8];
+        let open = MockDecode::default().open_fn();
+        let mut a = ActiveDecode::open(&open, handoff(p)).unwrap();
+        assert_eq!(run(&mut a), (vec![7, 8], Some(FinishReason::Stop)));
+        let mut a = ActiveDecode::open(&open, handoff(GenerationParams::greedy(4))).unwrap();
+        assert_eq!(run(&mut a), (vec![7, 8, 9], Some(FinishReason::Length)));
+    }
+
+    #[test]
+    fn seeded_sampled_decode_is_deterministic() {
+        let mut p = GenerationParams::greedy(12);
+        p.rule.filter.temperature = 1.0;
+        let open = MockDecode {
+            flat: true,
+            ..MockDecode::default()
+        }
+        .open_fn();
+        let a = run(&mut ActiveDecode::open(&open, handoff(p.clone())).unwrap());
+        let b = run(&mut ActiveDecode::open(&open, handoff(p)).unwrap());
+        assert_eq!(a, b);
+        assert_eq!(a.0.len(), 11);
+    }
+
+    #[test]
+    fn step_and_open_errors_surface() {
+        let open = MockDecode {
+            fail_at_step: Some(2),
+            ..MockDecode::default()
+        }
+        .open_fn();
+        let mut a = ActiveDecode::open(&open, handoff(GenerationParams::greedy(9))).unwrap();
+        let client = CpuClient::new(CpuDevice::new());
+        a.advance(&client).unwrap();
+        let err = a.advance(&client).unwrap_err();
+        assert!(format!("{err:#}").contains("mock step failure"), "{err:#}");
+        let mut bad = handoff(GenerationParams::greedy(9));
+        bad.kv_cache = vec![1, 2, 3];
+        let err = ActiveDecode::open(&open, bad).err().expect("bad cache");
+        assert!(
+            format!("{err:#}").contains("opening the KV cache"),
+            "{err:#}"
+        );
     }
 }

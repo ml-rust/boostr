@@ -10,7 +10,7 @@ pub use super::config::{
     load_config_auto, load_huggingface_config,
 };
 pub use super::encoder::{EmbeddingPipeline, Encoder, EncoderClient, EncoderConfig, Pooling};
-pub use super::hybrid::HybridModel;
+pub use super::hybrid::{HybridModel, HybridRow};
 pub use super::llama::model::blocks::ExpertWeights;
 pub use super::llama::{Llama, LlamaTp};
 pub use super::mamba::{

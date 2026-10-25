@@ -63,11 +63,37 @@ impl<R: Runtime<DType = DType>> SsmBlock<R> {
             + BinaryOps<R>
             + IndexingOps<R>,
     {
+        self.forward_with_mixer(client, x, |normed| {
+            let out = self
+                .mamba
+                .forward_inference(client, normed.tensor(), state)?;
+            Ok(Var::new(out, false))
+        })
+    }
+
+    /// The block around `mixer`: pre-norm, `mixer`, residual.
+    ///
+    /// `mixer` maps the normed `[B, S, hidden]` input to the Mamba2 output
+    /// of the same shape. A batched decode step passes a mixer that runs
+    /// each row over its own state.
+    pub(in crate::model::hybrid) fn forward_with_mixer<C>(
+        &self,
+        client: &C,
+        x: &Var<R>,
+        mixer: impl FnOnce(&Var<R>) -> Result<Var<R>>,
+    ) -> Result<Var<R>>
+    where
+        C: ModelClient<R> + ConvOps<R> + NormalizationOps<R> + UnaryOps<R> + ActivationOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ActivationOps<R>
+            + ConvOps<R>
+            + ReduceOps<R>
+            + BinaryOps<R>
+            + IndexingOps<R>,
+    {
         let normed = self.norm.forward(client, x)?;
-        let out_tensor = self
-            .mamba
-            .forward_inference(client, normed.tensor(), state)?;
-        let out = Var::new(out_tensor, false);
+        let out = mixer(&normed)?;
         numr::autograd::var_add(x, &out, client).map_err(Error::Numr)
     }
 }

@@ -48,10 +48,40 @@ impl<R: Runtime<DType = DType>> MlaBlock<R> {
             + ConditionalOps<R>
             + DequantOps<R>,
     {
+        self.forward_with_mixer(client, x, |normed| {
+            self.attn
+                .forward_inference(client, normed, kv_cache, position)
+        })
+    }
+
+    /// The block around `mixer`: pre-norm, `mixer`, residual, pre-norm,
+    /// feed-forward, residual.
+    ///
+    /// `mixer` maps the normed `[B, S, hidden]` input to the attention
+    /// output of the same shape. A batched decode step passes a mixer that
+    /// attends each row over its own cache.
+    pub(in crate::model::hybrid) fn forward_with_mixer<C>(
+        &self,
+        client: &C,
+        x: &Var<R>,
+        mixer: impl FnOnce(&Var<R>) -> Result<Var<R>>,
+    ) -> Result<Var<R>>
+    where
+        C: ModelClient<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>
+            + DequantOps<R>,
+    {
         let normed = self.input_layernorm.forward(client, x)?;
-        let attn = self
-            .attn
-            .forward_inference(client, &normed, kv_cache, position)?;
+        let attn = mixer(&normed)?;
         let h = var_add(x, &attn, client).map_err(Error::Numr)?;
         let normed = self.post_attention_layernorm.forward(client, &h)?;
         let ffn = self.ffn.forward(client, &normed)?;

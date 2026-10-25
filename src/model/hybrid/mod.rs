@@ -8,4 +8,4 @@ pub use blocks::{
     Qwen35AttentionProjection, Qwen35AttentionWeights, Qwen35AttentionWeightsWithIds,
     SSM_PRENORM_EPS,
 };
-pub use model::HybridModel;
+pub use model::{HybridModel, HybridRow};

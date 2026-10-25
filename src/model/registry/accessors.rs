@@ -68,6 +68,22 @@ where
         }
     }
 
+    /// Whether [`forward_hybrid_rows`](Self::forward_hybrid_rows) runs this
+    /// model: `true` for a `hybrid` model, MLA models included.
+    pub fn supports_hybrid_rows(&self) -> bool {
+        match self {
+            LoadedModel::Hybrid(_) => true,
+            LoadedModel::Multimodal(m) => m.llm().supports_hybrid_rows(),
+            LoadedModel::Llama(_)
+            | LoadedModel::LlamaStage(_)
+            | LoadedModel::LlamaTp(_)
+            | LoadedModel::Mamba1(_)
+            | LoadedModel::Mamba2(_)
+            | LoadedModel::Mamba3(_)
+            | LoadedModel::Qwen35(_) => false,
+        }
+    }
+
     /// Get model type name
     pub fn model_type(&self) -> &str {
         match self {

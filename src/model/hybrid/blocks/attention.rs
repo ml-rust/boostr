@@ -67,9 +67,40 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
             + ConditionalOps<R>
             + DequantOps<R>,
     {
+        self.forward_with_mixer(client, x, |normed| {
+            self.attention_forward(client, normed, rope, kv_cache, position)
+        })
+    }
+
+    /// The block around `mixer`: pre-norm, `mixer`, residual, pre-norm,
+    /// feed-forward, residual.
+    ///
+    /// `mixer` maps the normed `[B, S, hidden]` input to the attention
+    /// output of the same shape. A batched decode step passes a mixer that
+    /// attends each row over its own cache.
+    pub(in crate::model::hybrid) fn forward_with_mixer<C>(
+        &self,
+        client: &C,
+        x: &Var<R>,
+        mixer: impl FnOnce(&Var<R>) -> Result<Var<R>>,
+    ) -> Result<Var<R>>
+    where
+        C: ModelClient<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>
+            + DequantOps<R>,
+    {
         // Pre-norm attention + residual
         let normed = self.input_layernorm.forward(client, x)?;
-        let attn_out = self.attention_forward(client, &normed, rope, kv_cache, position)?;
+        let attn_out = mixer(&normed)?;
         let h = var_add(x, &attn_out, client).map_err(Error::Numr)?;
 
         // Pre-norm MLP + residual
@@ -78,7 +109,9 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
         var_add(&h, &mlp_out, client).map_err(Error::Numr)
     }
 
-    fn attention_forward<C>(
+    /// KV-cached attention of the normed input `x` at absolute `position`,
+    /// the cache's length, through the output projection.
+    pub(in crate::model::hybrid) fn attention_forward<C>(
         &self,
         client: &C,
         x: &Var<R>,

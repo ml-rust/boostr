@@ -1,9 +1,11 @@
 //! Dispatchers for the forwards that carry recurrent state:
 //! [`LoadedModel::forward_with_ssm_state`], [`LoadedModel::forward_hybrid`],
+//! [`LoadedModel::forward_hybrid_rows`],
 //! [`LoadedModel::forward_qwen35`] and [`LoadedModel::forward_qwen35_embeds`].
 
 use crate::error::{Error, Result};
 use crate::inference::{LayeredGdnState, LayeredKvCache, LayeredSsmState};
+use crate::model::hybrid::HybridRow;
 use crate::model::registry::LoadedModel;
 use crate::model::traits::ModelClient;
 use numr::dtype::DType;
@@ -95,6 +97,43 @@ where
             LoadedModel::Multimodal(m) => m
                 .llm()
                 .forward_hybrid(input_ids, kv_cache, ssm_state, position),
+        }
+    }
+
+    /// One decode step over `rows`, each with its own KV cache, SSM state
+    /// and position. See [`HybridModel::forward_rows`](crate::model::HybridModel::forward_rows).
+    ///
+    /// # Errors
+    ///
+    /// A model for which [`supports_hybrid_rows`](Self::supports_hybrid_rows)
+    /// is `false`, or any error `forward_rows` returns.
+    pub fn forward_hybrid_rows(
+        &self,
+        input_ids: &Tensor<R>,
+        rows: &mut [HybridRow<'_, R>],
+    ) -> Result<Tensor<R>>
+    where
+        R::Client: ModelClient<R>
+            + NormalizationOps<R>
+            + UnaryOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + ShapeOps<R>
+            + TensorOps<R>
+            + ScalarOps<R>,
+    {
+        let device = input_ids.device();
+        let client = R::default_client(device);
+        match self {
+            LoadedModel::Hybrid(m) => m.forward_rows(&client, input_ids, rows),
+            LoadedModel::Multimodal(m) => m.llm().forward_hybrid_rows(input_ids, rows),
+            _ => Err(Error::ModelError {
+                reason: format!(
+                    "model type '{}' has no row-batched hybrid decode; forward_hybrid_rows runs \
+                     hybrid and MLA models",
+                    self.model_type()
+                ),
+            }),
         }
     }
 

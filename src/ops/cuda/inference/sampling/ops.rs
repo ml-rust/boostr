@@ -1,12 +1,13 @@
 //! `SamplingOps` for `CudaClient`: the penalties and sample-token kernel
 //! launches, and the allocating wrappers over the `_into` variants.
 
+use super::args::check_penalty_args;
 use super::logits_to_token;
 use crate::error::{Error, Result};
 use crate::ops::cuda::inference::sampling_probs::{kernel_dtype_code, kernel_top_k, kernel_vocab};
 use crate::ops::cuda::kernels::{self, SAMPLING_MODULE, SAMPLING_PENALTIES_MODULE};
 use crate::ops::impl_generic::inference::sampling::{
-    SamplingLogitsShape, validate_contiguous_arg, validate_sampling_logits, validate_scratch_vocab,
+    SamplingLogitsShape, validate_sampling_logits, validate_scratch_vocab,
 };
 use crate::ops::traits::inference::sample_seed::SampleSeed;
 use crate::ops::traits::inference::sampling::SamplingOps;
@@ -14,6 +15,7 @@ use crate::ops::traits::inference::sampling_probs::FilterRule;
 use crate::ops::traits::inference::sampling_scratch::SamplingScratch;
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
+use numr::dtype::DType;
 use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
@@ -33,12 +35,28 @@ impl SamplingOps<CudaRuntime> for CudaClient {
             logits,
             SamplingLogitsShape::Vocab,
         )?;
-        validate_contiguous_arg("apply_sampling_penalties", "token_ids", token_ids)?;
-        validate_contiguous_arg("apply_sampling_penalties", "token_counts", token_counts)?;
-        let num_unique = token_ids.shape()[0];
+        if logits.dtype() != DType::F32 {
+            return Err(Error::InvalidArgument {
+                arg: "logits",
+                reason: format!(
+                    "apply_sampling_penalties: the CUDA kernel updates F32 logits, got {:?} — \
+                     cast the logits to F32 first",
+                    logits.dtype()
+                ),
+            });
+        }
+        let num_unique = token_ids.shape().first().copied().unwrap_or(0);
+        let num_unique_i32 = check_penalty_args(
+            "apply_sampling_penalties",
+            token_ids,
+            token_counts,
+            num_unique,
+        )?;
         if num_unique == 0 {
             return Ok(());
         }
+        let vocab_size = logits.shape()[0];
+        let vocab_size_i32 = kernel_vocab("apply_sampling_penalties", vocab_size)?;
 
         let device = logits.device();
         let device_index = device.id();
@@ -48,6 +66,7 @@ impl SamplingOps<CudaRuntime> for CudaClient {
         let func = kernels::get_kernel_function(&module, "apply_sampling_penalties_kernel")?;
 
         let block_size = 256u32;
+        // `num_unique` fits an i32, so the cast is exact.
         let grid_size = (num_unique as u32).div_ceil(block_size);
 
         let cfg = LaunchConfig {
@@ -59,14 +78,23 @@ impl SamplingOps<CudaRuntime> for CudaClient {
         let logits_ptr = logits.ptr();
         let ids_ptr = token_ids.ptr();
         let counts_ptr = token_counts.ptr();
-        let num_unique_i32 = num_unique as i32;
 
+        // SAFETY: the eight args match `apply_sampling_penalties_kernel` in order and
+        // type: a device pointer to the contiguous `[vocab_size]` F32 logits, which the
+        // kernel updates in place; device pointers to the contiguous I64 `token_ids` and
+        // I32 `token_counts`, each holding at least `num_unique` entries
+        // (`check_penalty_args`); `num_unique` and `vocab_size` as `int`; three `float`
+        // penalties. The grid covers `num_unique` threads, each thread reads entry `idx`
+        // only, and the kernel skips an id outside `0..vocab_size`, so every access stays
+        // in bounds. The tensors are borrowed for this call and outlive the launch:
+        // numr frees and reuses device memory in order on this stream.
         unsafe {
             let mut builder = self.stream().launch_builder(&func);
             builder.arg(&logits_ptr);
             builder.arg(&ids_ptr);
             builder.arg(&counts_ptr);
             builder.arg(&num_unique_i32);
+            builder.arg(&vocab_size_i32);
             builder.arg(&repeat_penalty);
             builder.arg(&frequency_penalty);
             builder.arg(&presence_penalty);
@@ -144,6 +172,16 @@ impl SamplingOps<CudaRuntime> for CudaClient {
         let rand_ptr = scratch.random.ptr();
         let output_ptr = scratch.output.ptr();
 
+        // SAFETY: the ten args match `sample_token_kernel` in order and type: a device
+        // pointer to the contiguous `[vocab_size]` logits in the dtype `dtype_code` names
+        // (`validate_sampling_logits`, `kernel_dtype_code`); `scratch.probs`, a contiguous
+        // `[vocab_size]` F32 buffer; `vocab_size` as `int`; `temperature` as `float`;
+        // `top_k` as `int`; `top_p` and `min_p` as `float`; `scratch.random`, a contiguous
+        // `[1]` F32 buffer; `scratch.output`, a contiguous `[1]` I64 buffer; `dtype_code` as
+        // `int`. `validate_scratch_vocab` checks the three scratch buffers, and
+        // `vocab_size` is above 0. One block reads `vocab_size` logits and writes one id,
+        // with `block_size` floats of shared memory for its reductions. The buffers
+        // outlive the launch: numr frees and reuses device memory in order on this stream.
         unsafe {
             let mut builder = self.stream().launch_builder(&func);
             builder.arg(&logits_ptr);

@@ -1,11 +1,12 @@
 //! Fused logits-to-token kernel launch: penalties, then argmax or the
 //! canonical filter and the id-order draw, in one block.
 
+use super::args::check_penalty_args;
 use crate::error::{Error, Result};
 use crate::ops::cuda::inference::sampling_probs::{kernel_dtype_code, kernel_top_k, kernel_vocab};
 use crate::ops::cuda::kernels::{self, LOGITS_TO_TOKEN_MODULE};
 use crate::ops::impl_generic::inference::sampling::{
-    SamplingLogitsShape, validate_contiguous_arg, validate_sampling_logits, validate_scratch_vocab,
+    SamplingLogitsShape, validate_sampling_logits, validate_scratch_vocab,
 };
 use crate::ops::traits::inference::sample_seed::SampleSeed;
 use crate::ops::traits::inference::sampling_probs::FilterRule;
@@ -40,8 +41,8 @@ pub(super) fn logits_to_token_into(
         logits,
         SamplingLogitsShape::BatchSeqVocab,
     )?;
-    validate_contiguous_arg("logits_to_token", "token_ids", token_ids)?;
-    validate_contiguous_arg("logits_to_token", "token_counts", token_counts)?;
+    let num_unique_i32 =
+        check_penalty_args("logits_to_token", token_ids, token_counts, num_unique)?;
     let shape = logits.shape();
     let seq_len = shape[1];
     let vocab_size = shape[2];
@@ -87,9 +88,32 @@ pub(super) fn logits_to_token_into(
     let counts_ptr = token_counts.ptr();
     let output_ptr = scratch.output.ptr();
     let rand_ptr = scratch.random.ptr();
-    let seq_len_i32 = seq_len as i32;
-    let num_unique_i32 = num_unique as i32;
+    // The logits hold `seq_len * vocab_size` values, and `vocab_size` fits an i32.
+    let seq_len_i32 = i32::try_from(seq_len)
+        .ok()
+        .filter(|s| s.checked_mul(vocab_size_i32).is_some())
+        .ok_or_else(|| Error::InvalidArgument {
+            arg: "logits",
+            reason: format!(
+                "logits_to_token: {seq_len} positions of {vocab_size} logits pass the kernel's \
+                 i32 offset limit — pass only the last position"
+            ),
+        })?;
 
+    // SAFETY: the seventeen args match `logits_to_token_kernel` in order and type: a
+    // device pointer to the contiguous `[1, seq_len, vocab_size]` logits in the dtype
+    // `dtype_code` names; `scratch.probs`, a contiguous `[vocab_size]` F32 buffer; the
+    // contiguous I64 `token_ids` and I32 `token_counts`, each holding at least
+    // `num_unique` entries (`check_penalty_args`); `scratch.output`, a contiguous `[1]`
+    // I64 buffer; `seq_len`, `vocab_size` and `num_unique` as `int`; four `float`s;
+    // `top_k` as `int`; two `float`s; `scratch.random`, a contiguous `[1]` F32 buffer;
+    // `dtype_code` as `int`. `validate_scratch_vocab` checks the three scratch buffers.
+    // `seq_len` and `vocab_size` are above 0 (`validate_sampling_logits`) and their
+    // product fits an `int`, so the last row starts at `(seq_len - 1) * vocab_size`
+    // inside the buffer. The kernel compares ids, never indexes by one. Shared memory
+    // holds `block_size` floats and `block_size` ints, the size the kernel reads. The
+    // buffers outlive the launch: numr frees and reuses device memory in order on this
+    // stream.
     unsafe {
         let mut builder = client.stream().launch_builder(&func);
         builder.arg(&logits_ptr);

@@ -2,6 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::ops::traits::inference::sampling_scratch::SamplingScratch;
+use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -57,6 +58,20 @@ pub fn validate_sampling_logits<R: Runtime>(
             ),
         });
     }
+    // Every backend reads the last position of a non-empty vocab row.
+    let empty = match shape {
+        SamplingLogitsShape::Vocab => logits_shape[0] == 0,
+        SamplingLogitsShape::BatchSeqVocab => logits_shape[1] == 0 || logits_shape[2] == 0,
+    };
+    if empty {
+        return Err(Error::InvalidArgument {
+            arg: "logits",
+            reason: format!(
+                "{op}: logits shape {logits_shape:?} has no position or no vocab entry — pass \
+                 logits of at least one position and one token"
+            ),
+        });
+    }
     validate_contiguous_arg(op, "logits", logits)
 }
 
@@ -92,31 +107,42 @@ pub fn validate_contiguous_arg<R: Runtime>(
     Ok(())
 }
 
-/// Checks that `scratch.probs` is sized for `vocab_size`.
+/// Checks that every scratch buffer has the shape and dtype of
+/// [`SamplingScratch::new`] for `vocab_size`.
 ///
-/// The `_into` sampling methods write into `scratch.probs` and
-/// `scratch.output` instead of allocating; a scratch built for a different
-/// vocab size would read or write past its buffer.
+/// The `_into` sampling methods write into `scratch.probs`,
+/// `scratch.output` and `scratch.random` instead of allocating. The fields
+/// are public. A scratch built by hand or for another vocab size reads or
+/// writes past its buffer without this check.
 ///
 /// # Errors
 ///
-/// Returns `Error::InvalidArgument` naming `op`, `vocab_size`, and the
-/// scratch's actual shape, if they disagree.
-pub fn validate_scratch_vocab<R: Runtime>(
+/// Returns `Error::InvalidArgument` naming `op` and the field, if
+/// `probs` is not a contiguous `[vocab_size]` F32 tensor, or `output` not a
+/// contiguous `[1]` I64 tensor, or `random` not a contiguous `[1]` F32 tensor.
+pub fn validate_scratch_vocab<R: Runtime<DType = DType>>(
     op: &'static str,
     scratch: &SamplingScratch<R>,
     vocab_size: usize,
 ) -> Result<()> {
-    let got = scratch.probs.shape();
-    if got != [vocab_size] {
-        return Err(Error::InvalidArgument {
-            arg: "scratch",
-            reason: format!(
-                "{op}: scratch.probs is {got:?} but this call's logits carry vocab_size \
-                 {vocab_size} — allocate the scratch with SamplingScratch::new(vocab_size, \
-                 device) sized for this call's logits"
-            ),
-        });
+    let fields = [
+        ("probs", &scratch.probs, vocab_size, DType::F32),
+        ("output", &scratch.output, 1, DType::I64),
+        ("random", &scratch.random, 1, DType::F32),
+    ];
+    for (name, t, len, dtype) in fields {
+        if t.shape() != [len] || t.dtype() != dtype || !t.is_contiguous() {
+            return Err(Error::InvalidArgument {
+                arg: "scratch",
+                reason: format!(
+                    "{op}: scratch.{name} must be a contiguous [{len}] {dtype:?} tensor, got \
+                     {:?} of shape {:?} — allocate the scratch with \
+                     SamplingScratch::new(vocab_size, device) sized for this call's logits",
+                    t.dtype(),
+                    t.shape()
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -132,6 +158,22 @@ mod tests {
         let (_client, device) = cpu_setup();
         let logits = Tensor::<CpuRuntime>::from_slice(&[0.0f32, 1.0], &[2], &device).expect("t");
         validate_sampling_logits("op", &logits, SamplingLogitsShape::Vocab).expect("valid");
+    }
+
+    #[test]
+    fn rejects_logits_with_no_position_or_no_vocab() {
+        let (_client, device) = cpu_setup();
+        let empty = Tensor::<CpuRuntime>::zeros(&[0], DType::F32, &device).expect("t");
+        assert!(validate_sampling_logits("op", &empty, SamplingLogitsShape::Vocab).is_err());
+        for shape in [[1, 0, 4], [1, 2, 0]] {
+            let t = Tensor::<CpuRuntime>::zeros(&shape, DType::F32, &device).expect("t");
+            let err = validate_sampling_logits("op", &t, SamplingLogitsShape::BatchSeqVocab)
+                .expect_err("an empty position or vocab must be rejected");
+            assert!(
+                format!("{err}").contains("no position or no vocab"),
+                "{err}"
+            );
+        }
     }
 
     #[test]
@@ -169,5 +211,18 @@ mod tests {
         let err = validate_scratch_vocab("op", &scratch, 8)
             .expect_err("a mismatched scratch must be rejected");
         assert!(format!("{err}").contains("op"));
+    }
+
+    #[test]
+    fn rejects_a_hand_built_scratch_with_a_wrong_output_or_draw_buffer() {
+        let (_client, device) = cpu_setup();
+        let mut scratch = SamplingScratch::<CpuRuntime>::new(4, &device).expect("scratch");
+        scratch.output = Tensor::<CpuRuntime>::zeros(&[1], DType::I32, &device).expect("output");
+        let err = validate_scratch_vocab("op", &scratch, 4).expect_err("I32 output");
+        assert!(format!("{err}").contains("scratch.output"), "{err}");
+        let mut scratch = SamplingScratch::<CpuRuntime>::new(4, &device).expect("scratch");
+        scratch.random = Tensor::<CpuRuntime>::zeros(&[0], DType::F32, &device).expect("random");
+        let err = validate_scratch_vocab("op", &scratch, 4).expect_err("empty draw buffer");
+        assert!(format!("{err}").contains("scratch.random"), "{err}");
     }
 }

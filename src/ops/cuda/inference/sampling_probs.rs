@@ -126,6 +126,14 @@ impl SamplingProbsOps<CudaRuntime> for CudaClient {
         let in_ptr = input.ptr();
         let out_ptr = out.ptr();
         let top_k = kernel_top_k(rule, vocab);
+        // SAFETY: the seven args match `sampling_probs_{f32,f16,bf16}` in order and type:
+        // a device pointer to `rows * vocab` contiguous logits of `input.dtype()`, which
+        // picks `kernel_name`; a device pointer to `rows * vocab` F32 values in `out`;
+        // `vocab: i32`; `temperature: f32`; `top_k: i32`; `top_p: f32`; `min_p: f32`.
+        // One block per row reads only its row, and `block * 4` bytes of shared memory
+        // hold the one float per thread the kernel uses. `input` and `out` own their
+        // buffers and outlive the launch: `out` is returned, and the stream orders any
+        // later free of `input` after the kernel.
         unsafe {
             let mut builder = self.stream().launch_builder(&func);
             builder.arg(&in_ptr);

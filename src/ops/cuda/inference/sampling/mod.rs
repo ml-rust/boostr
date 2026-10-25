@@ -5,6 +5,7 @@
 //! Random value generated on-device via numr's RandomOps::rand_into, into the
 //! caller-owned scratch buffer — no CPU RNG, no per-call allocation.
 
+mod args;
 mod logits_to_token;
 mod ops;
 #[cfg(test)]

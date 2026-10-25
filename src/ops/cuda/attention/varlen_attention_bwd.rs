@@ -15,6 +15,7 @@ use super::flash::impl_ops::set_smem_attribute;
 use super::varlen_attention_block_config::{
     block_config_with_override, bwd_smem_size, validate_head_dim,
 };
+use super::varlen_attention_check::{VarlenDims, check_bwd_args};
 use super::varlen_attention_fwd::window_size_arg;
 use crate::ops::cuda::kernels::{
     self, VARLEN_ATTENTION_BWD_HALF_MODULE, VARLEN_ATTENTION_BWD_MODULE,
@@ -148,6 +149,20 @@ fn varlen_attention_bwd_impl_inner(
     Tensor<CudaRuntime>,
 )> {
     validate_head_dim(head_dim, "varlen attention bwd")?;
+    let dims = VarlenDims {
+        batch_size,
+        num_heads,
+        num_kv_heads,
+        max_seqlen_q,
+        max_seqlen_k,
+        head_dim,
+    };
+    let totals = check_bwd_args(dout, q, k, v, output, lse, cu_seqlens_q, cu_seqlens_k, dims)?;
+    // The kernels read dense rows: strided inputs go in as contiguous copies.
+    let (q, k, v) = (q.contiguous()?, k.contiguous()?, v.contiguous()?);
+    let (dout, output, lse) = (dout.contiguous()?, output.contiguous()?, lse.contiguous()?);
+    let cu_seqlens_q = cu_seqlens_q.contiguous()?;
+    let cu_seqlens_k = cu_seqlens_k.contiguous()?;
 
     let dtype = q.dtype();
     let dtype_suffix = match dtype {
@@ -184,8 +199,7 @@ fn varlen_attention_bwd_impl_inner(
     let module = kernels::get_or_load_module(client.context(), device_index, bwd_module)?;
     let func = kernels::get_kernel_function(&module, &kernel_name)?;
 
-    let total_tokens_q = q.shape()[0];
-    let total_tokens_k = k.shape()[0];
+    let (total_tokens_q, total_tokens_k) = (totals.q, totals.k);
 
     // dq uses the Q head layout (num_heads) and the input dtype. One block
     // owns each Q row, so the kernel stores it once with no atomics.
@@ -211,8 +225,19 @@ fn varlen_attention_bwd_impl_inner(
     let smem_size = bwd_smem_size(block_m, block_n, head_dim, dtype_size);
     set_smem_attribute(&func, smem_size)?;
 
+    let blocks = num_q_blocks
+        .checked_mul(num_heads)
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| Error::InvalidArgument {
+            arg: "max_seqlen_q",
+            reason: format!(
+                "varlen attention bwd: {num_q_blocks} query blocks of {num_heads} heads pass \
+                 the grid limit of {} blocks. Split the batch",
+                u32::MAX
+            ),
+        })?;
     let cfg = LaunchConfig {
-        grid_dim: ((num_q_blocks * num_heads) as u32, 1, 1),
+        grid_dim: (blocks, 1, 1),
         block_dim: (block_m as u32, 1, 1),
         shared_mem_bytes: smem_size as u32,
     };
@@ -238,6 +263,19 @@ fn varlen_attention_bwd_impl_inner(
     // Same value the forward passes, so both mask the same keys.
     let window_i32 = window_size_arg(window_size);
 
+    // SAFETY: the nineteen args match `varlen_flash_attention_bwd_{HD}_{fp32,fp16,bf16}{tile}`
+    // in order and type: device pointers to Q, K, V, O in `dtype` (which picks the
+    // kernel), L in F32, dO in `dtype`, the two I32 offset tensors, dQ in `dtype`, dK and
+    // dV in F32, then `batch_size`, `num_heads`, `num_kv_heads`, `max_seqlen_q`,
+    // `max_seqlen_k` as `int`, `scale` as `float`, `causal` and `window_size` as `int`.
+    // `check_bwd_args` holds every input to its contract shape and dtype and every count
+    // to `i32`, and the copies above make them contiguous: Q, O and dO hold
+    // `Tq * num_heads * head_dim` values, K and V `Tk * num_kv_heads * head_dim`, L
+    // `Tq * num_heads`, each offset tensor `batch_size + 1`. dQ, dK and dV are fresh
+    // zeroed buffers of the Q and KV shapes. The trait wiring checks the host offsets
+    // against `Tq` and `Tk`. The device offsets must hold the same values, which is the
+    // caller's contract. Every buffer outlives the launch: numr frees and reuses device
+    // memory in order on this stream, so a later free waits for the kernel.
     unsafe {
         let mut builder = client.stream().launch_builder(&func);
         builder.arg(&q_ptr);

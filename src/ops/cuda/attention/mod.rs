@@ -16,4 +16,5 @@ pub mod paged_decode;
 pub mod varlen_attention;
 pub mod varlen_attention_block_config;
 pub mod varlen_attention_bwd;
+mod varlen_attention_check;
 pub mod varlen_attention_fwd;

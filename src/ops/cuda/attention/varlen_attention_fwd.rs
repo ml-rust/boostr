@@ -14,6 +14,7 @@ use super::flash::impl_ops::set_smem_attribute;
 use super::varlen_attention_block_config::{
     block_config_with_override, fwd_smem_size, validate_head_dim,
 };
+use super::varlen_attention_check::{VarlenDims, check_fwd_args};
 use crate::ops::cuda::kernels::{self, VARLEN_ATTENTION_FWD_HALF_MODULE, VARLEN_ATTENTION_MODULE};
 
 /// Production entry point: normal capability-gated tile selection (no override).
@@ -117,6 +118,19 @@ fn varlen_attention_fwd_impl_inner(
     force_large: Option<bool>,
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
     validate_head_dim(head_dim, "varlen attention")?;
+    let dims = VarlenDims {
+        batch_size,
+        num_heads,
+        num_kv_heads,
+        max_seqlen_q,
+        max_seqlen_k,
+        head_dim,
+    };
+    let totals = check_fwd_args(q, k, v, cu_seqlens_q, cu_seqlens_k, dims)?;
+    // The kernels read dense rows: strided inputs go in as contiguous copies.
+    let (q, k, v) = (q.contiguous()?, k.contiguous()?, v.contiguous()?);
+    let cu_seqlens_q = cu_seqlens_q.contiguous()?;
+    let cu_seqlens_k = cu_seqlens_k.contiguous()?;
 
     let dtype = q.dtype();
     let dtype_suffix = match dtype {
@@ -154,8 +168,7 @@ fn varlen_attention_fwd_impl_inner(
     let module = kernels::get_or_load_module(client.context(), device_index, module_name)?;
     let func = kernels::get_kernel_function(&module, &kernel_name)?;
 
-    // Total tokens from Q shape: [total_tokens_q, num_heads, head_dim]
-    let total_tokens_q = q.shape()[0];
+    let total_tokens_q = totals.q;
 
     let output =
         Tensor::<CudaRuntime>::empty(&[total_tokens_q, num_heads, head_dim], dtype, device)?;
@@ -171,8 +184,19 @@ fn varlen_attention_fwd_impl_inner(
     let smem_size = fwd_smem_size(block_m, block_n, head_dim, dtype_size);
     set_smem_attribute(&func, smem_size)?;
 
+    let blocks = num_q_blocks
+        .checked_mul(num_heads)
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| Error::InvalidArgument {
+            arg: "max_seqlen_q",
+            reason: format!(
+                "varlen attention: {num_q_blocks} query blocks of {num_heads} heads pass the \
+                 grid limit of {} blocks. Split the batch",
+                u32::MAX
+            ),
+        })?;
     let cfg = LaunchConfig {
-        grid_dim: ((num_q_blocks * num_heads) as u32, 1, 1),
+        grid_dim: (blocks, 1, 1),
         block_dim: (block_m as u32, 1, 1),
         shared_mem_bytes: smem_size as u32,
     };
@@ -193,6 +217,19 @@ fn varlen_attention_fwd_impl_inner(
     let causal_i32 = if causal { 1i32 } else { 0i32 };
     let window_i32 = window_size_arg(window_size);
 
+    // SAFETY: the fifteen args match `varlen_flash_attention_fwd_{HD}_{fp32,fp16,bf16}{tile}`
+    // in order and type: device pointers to Q, K, V in `dtype` (which picks the kernel),
+    // the two I32 offset tensors, O in `dtype` and L in F32, then `batch_size`,
+    // `num_heads`, `num_kv_heads`, `max_seqlen_q`, `max_seqlen_k` as `int`, `scale` as
+    // `float`, `causal` and `window_size` as `int`. `check_fwd_args` holds every buffer
+    // to its contract shape and dtype and every count to `i32`, and the copies above
+    // make them contiguous, so Q holds `Tq * num_heads * head_dim`, K and V hold
+    // `Tk * num_kv_heads * head_dim`, and each offset tensor `batch_size + 1` values.
+    // `output` and `lse` are fresh `[Tq, num_heads, head_dim]` and `[Tq, num_heads]`
+    // buffers. The offsets themselves are the caller's contract: ascending from 0 to
+    // `Tq` and `Tk`, as the `VarLenAttentionOps` docs state. Every buffer is owned
+    // here or by the caller and outlives the launch: numr frees and reuses device
+    // memory in order on this stream, so a later free waits for the kernel.
     unsafe {
         let mut builder = client.stream().launch_builder(&func);
         builder.arg(&q_ptr);

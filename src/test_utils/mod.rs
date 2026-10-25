@@ -4,6 +4,8 @@ mod loss;
 mod packed;
 mod segments;
 mod setup;
+#[cfg(feature = "distributed")]
+mod tiny_llama;
 
 pub(crate) use compare::{bits, max_abs_diff, max_abs_diff_f64, tensor_max_abs_diff, to_f64};
 pub(crate) use lcg::Lcg;
@@ -18,3 +20,5 @@ pub(crate) use setup::cpu_setup;
 pub(crate) use setup::neucodec_checkpoint;
 #[cfg(feature = "cuda")]
 pub(crate) use setup::{CudaTest, cuda_setup};
+#[cfg(feature = "distributed")]
+pub(crate) use tiny_llama::{TINY_HIDDEN, TINY_MAX_SEQ_LEN, TINY_VOCAB, random_llama};

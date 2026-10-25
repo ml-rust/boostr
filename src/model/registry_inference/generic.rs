@@ -189,6 +189,8 @@ where
     /// Run a range of transformer layers with KV cache.
     ///
     /// Used for pipeline parallelism. Only supported for Llama-family models.
+    /// `kv_cache` holds exactly `end_layer - start_layer` layers, and its slot
+    /// `0` holds layer `start_layer`. See `Llama::forward_layers_range`.
     #[allow(clippy::too_many_arguments)]
     pub fn forward_layers_range(
         &self,

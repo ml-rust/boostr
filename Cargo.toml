@@ -258,6 +258,10 @@ required-features = ["vits"]
 name = "vits_synthesis_cuda"
 required-features = ["vits"]
 
+[[test]]
+name = "swarm_pipeline"
+required-features = ["distributed"]
+
 [[example]]
 name = "gguf_diff"
 required-features = ["voxcpm"]

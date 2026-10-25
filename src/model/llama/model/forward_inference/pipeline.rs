@@ -82,7 +82,9 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
     /// * `client` - Runtime client
     /// * `hidden` - Input hidden state `[B, S, hidden_size]`
     /// * `prev_mlp_out` - Deferred MLP residual from the previous layer (or `None` for first layer)
-    /// * `kv_cache` - Full layered KV cache (only slots `start_layer..end_layer` are accessed)
+    /// * `kv_cache` - The range's cache: exactly `end_layer - start_layer` layers.
+    ///   Cache slot `0` holds layer `start_layer`. A full-model cache fits the
+    ///   range `0..num_layers`.
     /// * `start_layer` - First layer index to run (inclusive)
     /// * `end_layer` - Last layer index to run (exclusive)
     /// * `position` - RoPE position offset
@@ -90,6 +92,11 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
     /// # Returns
     /// `(hidden, prev_mlp_out)` — the updated hidden state and deferred MLP output for the
     /// next stage (or for `forward_head`).
+    ///
+    /// # Errors
+    ///
+    /// A range outside `0..num_layers`, an empty range, or a cache whose
+    /// layer count differs from the range length.
     #[allow(clippy::too_many_arguments)]
     pub fn forward_layers_range<C>(
         &self,
@@ -115,15 +122,30 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
             + ConditionalOps<R>
             + DequantOps<R>,
     {
-        let end_layer = end_layer.min(self.layers.len());
+        let num_layers = self.layers.len();
+        if start_layer >= end_layer || end_layer > num_layers {
+            return Err(Error::ModelError {
+                reason: format!(
+                    "layer range {start_layer}..{end_layer} is not a non-empty range \
+                     inside 0..{num_layers}"
+                ),
+            });
+        }
+        if kv_cache.num_layers() != end_layer - start_layer {
+            return Err(Error::ModelError {
+                reason: format!(
+                    "layer range {start_layer}..{end_layer} needs a KV cache of {} layers, \
+                     and this one holds {}",
+                    end_layer - start_layer,
+                    kv_cache.num_layers()
+                ),
+            });
+        }
         let mut hidden = hidden;
         let mut prev_mlp_out = prev_mlp_out;
-        for i in start_layer..end_layer {
-            let layer = self.layers.get(i).ok_or_else(|| Error::ModelError {
-                reason: format!("Layer index {i} out of bounds"),
-            })?;
-            let cache = kv_cache.layer_mut(i).ok_or_else(|| Error::ModelError {
-                reason: format!("KV cache missing for layer {i}"),
+        for (slot, layer) in self.layers[start_layer..end_layer].iter().enumerate() {
+            let cache = kv_cache.layer_mut(slot).ok_or_else(|| Error::ModelError {
+                reason: format!("KV cache missing for layer {}", start_layer + slot),
             })?;
             let (h, mlp_out) = layer.forward_with_kv_cache(
                 client,

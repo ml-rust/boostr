@@ -1,45 +1,16 @@
 //! Frame transport helpers the router and both workers share.
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use nexar::{NexarClient, Rank};
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 
+use super::super::transport::tasks::spawn_notice_listener;
 use super::cancel::CancelBook;
 use super::protocol::{Cancel, Event, Stage, tags};
 
-/// Aborts its task on drop.
-pub(crate) struct TaskGuard(tokio::task::AbortHandle);
-
-impl TaskGuard {
-    pub(crate) fn new<T>(handle: tokio::task::JoinHandle<T>) -> Self {
-        Self(handle.abort_handle())
-    }
-}
-
-impl Drop for TaskGuard {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-/// Sends one frame to `dest` on `tag`.
-pub(crate) async fn send_frame(
-    client: &NexarClient,
-    dest: Rank,
-    tag: u64,
-    frame: &[u8],
-) -> Result<()> {
-    client
-        .send_bytes_tagged(dest, tag, frame)
-        .await
-        .map_err(|e| {
-            anyhow!(
-                "sending a {}-byte frame to rank {dest} failed: {e}",
-                frame.len()
-            )
-        })
-}
+pub(crate) use super::super::transport::send_frame;
+pub(crate) use super::super::transport::tasks::{TaskGuard, run_blocking};
 
 /// Tells each of `ranks` to stop request `request_id`, on a task of the
 /// current tokio runtime. Outside a runtime it logs and sends nothing.
@@ -141,25 +112,7 @@ pub(crate) fn spawn_shutdown_listener(
     client: Arc<NexarClient>,
     router: Rank,
 ) -> (tokio::sync::oneshot::Receiver<()>, TaskGuard) {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let handle = tokio::spawn(async move {
-        if let Err(e) = client.recv_bytes_tagged(router, tags::SHUTDOWN).await {
-            tracing::debug!(router, "shutdown listener ended: {e}");
-        }
-        let _ = tx.send(());
-    });
-    (rx, TaskGuard::new(handle))
-}
-
-/// Runs `f` on the blocking pool. A panic in `f` returns as an error.
-pub(crate) async fn run_blocking<T, F>(f: F) -> Result<T>
-where
-    T: Send + 'static,
-    F: FnOnce() -> T + Send + 'static,
-{
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| anyhow!("forward task did not complete: {e}"))
+    spawn_notice_listener(client, router, tags::SHUTDOWN)
 }
 
 #[cfg(test)]

@@ -1,45 +1,21 @@
-//! Worker node: receives layer assignments and executes forward passes.
+//! Worker node: receives its layer assignment and serves its pipeline stage.
 //!
-//! The worker connects to the leader's seed node, receives its layer
-//! assignment, loads the assigned model layers, and enters a compute
-//! loop that receives activations, runs its layers, and forwards
-//! results to the next pipeline stage.
+//! The worker joins the leader's cluster, receives its layer assignment,
+//! loads its stage, and runs a compute loop. The loop takes request frames
+//! from the previous stage, runs them through its [`Stage`], and sends the
+//! result to the next stage, or the logits to the leader on the last stage.
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use nexar::{NexarClient, Rank};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::oneshot;
 
-use super::transport::{self, GenRequestHeader, LayerAssignment, tags};
-
-/// Forward function: `(activation_bytes, size_hint) -> output_bytes`
-pub type ForwardFn = Box<dyn Fn(&[u8], usize) -> Vec<u8> + Send + Sync>;
-
-/// Aborts its task on drop.
-struct AbortOnDrop(tokio::task::AbortHandle);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-/// A receiver that resolves once `leader` sends [`tags::SHUTDOWN`] or disconnects.
-fn spawn_shutdown_listener(
-    client: &Arc<NexarClient>,
-    leader: Rank,
-) -> (oneshot::Receiver<()>, AbortOnDrop) {
-    let (tx, rx) = oneshot::channel();
-    let client = Arc::clone(client);
-    let task = tokio::spawn(async move {
-        if let Err(e) = client.recv_bytes_tagged(leader, tags::SHUTDOWN).await {
-            tracing::debug!(leader, "shutdown listener ended: {e}");
-        }
-        let _ = tx.send(());
-    });
-    (rx, AbortOnDrop(task.abort_handle()))
-}
+use super::stage::{Stage, StageOutput};
+use super::transport::tasks::{run_blocking, spawn_notice_listener};
+use super::transport::{
+    self, GenRequestHeader, LayerAssignment, LogitsFrame, StageError, StageOp, StagePayload, tags,
+};
 
 /// Worker state after connecting to the swarm and receiving assignment.
 pub struct SwarmWorker {
@@ -55,21 +31,17 @@ pub struct SwarmWorker {
     next_rank: Option<Rank>,
     /// Leader rank (for control messages)
     leader_rank: Rank,
-    /// Forward function: takes the payload bytes and their element count,
-    /// returns output bytes.
-    ///
-    /// Provided by the creator who has access to the model and runtime.
-    forward_fn: ForwardFn,
+    /// The stage this worker serves. `None` only while a forward runs.
+    stage: Option<Box<dyn Stage>>,
 }
 
 impl SwarmWorker {
-    /// Create a new worker after receiving its assignment.
+    /// A worker that serves `stage` for `assignment`.
     ///
-    /// `forward_fn` is called on each request with the payload bytes and
-    /// their element count: `f32` LE activations on a stage with a
-    /// `prev_rank`, `i64` LE token ids on the first stage. The function must
-    /// return the serialised output activation bytes, or the logits on the
-    /// last stage.
+    /// Requests come from `prev_rank`, or from the leader when there is no
+    /// previous stage. The stage with the embedding takes token ids, every
+    /// other stage takes activations. Output goes to `next_rank`, or to the
+    /// leader as logits when there is no next stage.
     pub fn new(
         client: Arc<NexarClient>,
         rank: Rank,
@@ -77,7 +49,7 @@ impl SwarmWorker {
         prev_rank: Option<Rank>,
         next_rank: Option<Rank>,
         leader_rank: Rank,
-        forward_fn: ForwardFn,
+        stage: Box<dyn Stage>,
     ) -> Self {
         Self {
             client,
@@ -86,7 +58,7 @@ impl SwarmWorker {
             prev_rank,
             next_rank,
             leader_rank,
-            forward_fn,
+            stage: Some(stage),
         }
     }
 
@@ -116,22 +88,26 @@ impl SwarmWorker {
 
     /// Run the worker's compute loop.
     ///
-    /// Each request is one [`tags::GEN_REQUEST`] frame from the previous
-    /// stage, or from the leader when this worker has no previous stage.
-    /// Requests arrive in send order, and the loop serves them in that order. Its
-    /// payload is `i64` LE token ids on the first stage and `f32` LE
-    /// activations on every later stage. The loop runs the forward closure,
-    /// then sends the output in a request frame to the next stage, or as a
-    /// [`tags::LOGITS`] frame to the leader on the last stage.
+    /// Each frame is one [`tags::GEN_REQUEST`] frame from the previous stage,
+    /// or from the leader when this worker has no previous stage. The loop
+    /// serves frames in arrival order:
+    /// - prefill or decode: runs the stage, then sends the activation to the
+    ///   next stage, or a [`LogitsFrame`] to the leader on the last stage
+    /// - release: frees the request, then forwards the release to the next stage
+    ///
+    /// A request the stage fails gets a [`StageError`] frame to the leader.
+    /// The worker frees that request and keeps serving. A panic in the stage
+    /// counts as an error of that request.
     ///
     /// The loop ends on the leader's [`tags::SHUTDOWN`] notice, after the
-    /// request in progress, or when the previous stage disconnects. Call
-    /// [`SwarmWorker::shutdown`] after it returns.
+    /// frame in progress, or when the previous stage disconnects. It then
+    /// frees every request. Call [`SwarmWorker::shutdown`] after it returns.
     ///
     /// # Errors
     ///
-    /// A request whose payload does not match its header, or a failed send.
-    pub async fn run_compute_loop(&self) -> Result<()> {
+    /// A frame of another protocol version or with a malformed header, or a
+    /// failed send to the next stage or the leader.
+    pub async fn run_compute_loop(&mut self) -> Result<()> {
         tracing::info!(
             rank = self.rank,
             layers = format!(
@@ -140,88 +116,141 @@ impl SwarmWorker {
             ),
             "Worker compute loop starting"
         );
-        let (mut stop, _notice) = spawn_shutdown_listener(&self.client, self.leader_rank);
-        let control_src = self.prev_rank.unwrap_or(self.leader_rank);
-        // The first stage reads token ids, every later stage reads activations.
-        let elem = if self.prev_rank.is_some() {
-            std::mem::size_of::<f32>()
-        } else {
-            std::mem::size_of::<i64>()
-        };
-
-        loop {
+        let (mut stop, _notice) =
+            spawn_notice_listener(Arc::clone(&self.client), self.leader_rank, tags::SHUTDOWN);
+        let src = self.prev_rank.unwrap_or(self.leader_rank);
+        let result = loop {
             let received = tokio::select! {
                 biased;
                 _ = &mut stop => {
                     tracing::info!(rank = self.rank, "Worker received the shutdown notice");
-                    break;
+                    break Ok(());
                 }
-                r = transport::recv_frame(&self.client, control_src, tags::GEN_REQUEST) => r,
+                r = transport::recv_frame(&self.client, src, tags::GEN_REQUEST) => r,
             };
             let frame = match received {
                 Ok(frame) => frame,
                 Err(e) => {
                     tracing::warn!(
                         rank = self.rank,
-                        "Worker stops: no request from rank {control_src}: {e}"
+                        "Worker stops: no request from rank {src}: {e}"
                     );
-                    break;
+                    break Ok(());
                 }
             };
-            let (header, payload) = GenRequestHeader::split_frame(&frame)?;
-            let count = header.seq_len as usize;
-            if payload.len() != count * elem {
-                bail!(
-                    "rank {} got a request of {} elements and a {}-byte payload, not {} bytes",
-                    self.rank,
-                    count,
-                    payload.len(),
-                    count * elem
-                );
+            if let Err(e) = self.serve(&frame).await {
+                break Err(e);
             }
-            tracing::debug!(
-                rank = self.rank,
-                seq_len = header.seq_len,
-                max_tokens = header.max_tokens,
-                "Received generation request"
-            );
-
-            let output = (self.forward_fn)(payload, count);
-            match self.next_rank {
-                Some(next) => self.send_next(next, header, &output).await?,
-                None => {
-                    transport::send_frame(&self.client, self.leader_rank, tags::LOGITS, &output)
-                        .await?
-                }
-            }
-            tracing::debug!(rank = self.rank, "Forward pass complete for request");
+        };
+        if let Some(stage) = self.stage.as_mut() {
+            stage.release_all();
         }
-
         tracing::info!(rank = self.rank, "Worker compute loop ended");
-        Ok(())
+        result
     }
 
-    /// Send the next stage one request frame that holds `activation`.
-    ///
-    /// The forwarded header's `seq_len` is the `f32` count of `activation`.
-    async fn send_next(
-        &self,
-        next: Rank,
+    /// Serves one request frame. An error ends the loop.
+    async fn serve(&mut self, frame: &[u8]) -> Result<()> {
+        let (header, payload) = GenRequestHeader::split_frame(frame).map_err(|e| {
+            e.context(format!(
+                "rank {} got a request frame it cannot read",
+                self.rank
+            ))
+        })?;
+        if header.op == StageOp::Release {
+            self.stage_mut()?.release(header.request_id);
+            if let Some(next) = self.next_rank {
+                let release = header.frame(&[]);
+                transport::send_frame(&self.client, next, tags::GEN_REQUEST, &release).await?;
+            }
+            return Ok(());
+        }
+        let output =
+            match StagePayload::decode(payload, header.seq_len, self.assignment.has_embedding) {
+                Ok(payload) => self.forward(header, payload).await?,
+                Err(e) => Err(e),
+            };
+        match (output, self.next_rank) {
+            (Ok(StageOutput::Activation(a)), Some(next)) => {
+                match StagePayload::Activation(a).encode() {
+                    Ok(bytes) => {
+                        let out = header.frame(&bytes);
+                        transport::send_frame(&self.client, next, tags::GEN_REQUEST, &out).await
+                    }
+                    Err(e) => self.fail(&header, e).await,
+                }
+            }
+            (Ok(StageOutput::Logits(logits)), None) => {
+                let out = LogitsFrame {
+                    request_id: header.request_id,
+                    logits,
+                }
+                .to_frame();
+                transport::send_frame(&self.client, self.leader_rank, tags::LOGITS, &out).await
+            }
+            (Ok(StageOutput::Activation(_)), None) => {
+                let e = anyhow!("the last stage returned an activation, not logits");
+                self.fail(&header, e).await
+            }
+            (Ok(StageOutput::Logits(_)), Some(next)) => {
+                let e = anyhow!("the stage returned logits, and the stage on rank {next} follows");
+                self.fail(&header, e).await
+            }
+            (Err(e), _) => self.fail(&header, e).await,
+        }
+    }
+
+    /// Runs the stage on the blocking pool. The outer error is fatal: the
+    /// stage did not come back. The inner error fails this request only.
+    async fn forward(
+        &mut self,
         header: GenRequestHeader,
-        activation: &[u8],
-    ) -> Result<()> {
-        let header = GenRequestHeader {
-            seq_len: u32::try_from(activation.len() / std::mem::size_of::<f32>())
-                .map_err(|_| anyhow!("an activation of {} bytes is too large", activation.len()))?,
-            ..header
+        payload: StagePayload,
+    ) -> Result<Result<StageOutput>> {
+        let mut stage = self.stage.take().ok_or_else(|| stage_lost(self.rank))?;
+        let (stage, result) = run_blocking(move || {
+            let run =
+                std::panic::catch_unwind(AssertUnwindSafe(|| stage.forward(&header, payload)));
+            let result = run.unwrap_or_else(|panic| {
+                let what = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "a non-string panic".into());
+                Err(anyhow!("the stage panicked: {what}"))
+            });
+            (stage, result)
+        })
+        .await?;
+        self.stage = Some(stage);
+        Ok(result)
+    }
+
+    /// Frees the request of `header` and sends the leader its [`StageError`].
+    async fn fail(&mut self, header: &GenRequestHeader, e: anyhow::Error) -> Result<()> {
+        tracing::warn!(
+            rank = self.rank,
+            request_id = header.request_id,
+            "stage failed: {e:#}"
+        );
+        self.stage_mut()?.release(header.request_id);
+        let err = StageError {
+            request_id: header.request_id,
+            rank: self.rank,
+            message: format!("{e:#}"),
         };
         transport::send_frame(
             &self.client,
-            next,
-            tags::GEN_REQUEST,
-            &header.frame(activation),
+            self.leader_rank,
+            tags::STAGE_ERROR,
+            &err.to_frame(),
         )
         .await
+    }
+
+    fn stage_mut(&mut self) -> Result<&mut Box<dyn Stage>> {
+        let rank = self.rank;
+        self.stage.as_mut().ok_or_else(|| stage_lost(rank))
     }
 
     /// Shut down this worker's nexar client. Call it after
@@ -241,4 +270,9 @@ impl SwarmWorker {
     pub fn assignment(&self) -> &LayerAssignment {
         &self.assignment
     }
+}
+
+/// The error once the stage did not come back from the blocking pool.
+fn stage_lost(rank: Rank) -> anyhow::Error {
+    anyhow!("rank {rank} lost its stage during a forward")
 }

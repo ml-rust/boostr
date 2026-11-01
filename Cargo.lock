@@ -198,17 +198,19 @@ dependencies = [
 
 [[package]]
 name = "boostr"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "blake3",
  "bytemuck",
+ "chacha20",
  "cudarc",
  "half",
  "image",
  "memmap2",
  "nexar",
  "numr",
+ "rand 0.10.3",
  "rayon",
  "regexr",
  "rustls",
@@ -1219,9 +1221,9 @@ dependencies = [
 
 [[package]]
 name = "nexar"
-version = "0.1.2"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dac038912d8e0f36309f3368c0980377730edd4ad5d082627227277cdd870c3a"
+checksum = "53627a1f76e05d05513598b28e102a3a93ef0ff927560c7c2dbec02dd1c130c4"
 dependencies = [
  "bytes",
  "crossbeam-queue",
@@ -1301,9 +1303,9 @@ dependencies = [
 
 [[package]]
 name = "numr"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae7051738770b875a102b10275d9c96b7866cd2a741298707fba15a957ab27ca"
+checksum = "539990e81dc7946f5bcf60f13d273f180c46bce497f8f487869adc93fb1819fb"
 dependencies = [
  "bytemuck",
  "cudarc",

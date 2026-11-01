@@ -9,7 +9,7 @@
 use serde_json::{Map, Value};
 
 use super::generic;
-use super::limits::check_members;
+use super::limits::{BLOCK, blocks, check_members};
 use super::refs::child;
 use super::walk::{Lang, Walker, count, invalid};
 use crate::inference::grammar::ast::Expr;
@@ -146,7 +146,8 @@ fn uniform(w: &mut Walker<'_>, item: Expr, lo: u32, hi: Option<u32>) -> Expr {
 /// The tuple `elems` with each later item optional once `min` items are present,
 /// then the `rest` items up to `hi` in all.
 ///
-/// The optional links nest to the right, so each element appears once.
+/// The first item and the items before `min` form a flat sequence.
+/// `optional_tail` holds the items after them.
 fn tuple(
     w: &mut Walker<'_>,
     mut elems: Vec<Expr>,
@@ -155,7 +156,7 @@ fn tuple(
     hi: Option<u32>,
 ) -> Expr {
     let n = index(elems.len());
-    let mut tail = match rest {
+    let tail = match rest {
         Some(item) => {
             let comma = w.comma();
             Expr::repeat(
@@ -166,19 +167,65 @@ fn tuple(
         }
         None => Expr::Empty,
     };
-    while elems.len() > 1 {
-        let i = index(elems.len().saturating_sub(1));
-        let Some(elem) = elems.pop() else { break };
-        let comma = w.comma();
-        let link = Expr::seq(vec![comma, elem, tail]);
-        tail = if i < min {
-            link
-        } else {
-            Expr::repeat(link, 0, Some(1))
-        };
+    let required = usize::try_from(min)
+        .unwrap_or(usize::MAX)
+        .max(1)
+        .min(elems.len());
+    let optional = elems.split_off(required);
+    let mut items = Vec::with_capacity(required.saturating_mul(2).saturating_add(1));
+    for (i, elem) in elems.into_iter().enumerate() {
+        if i > 0 {
+            items.push(w.comma());
+        }
+        items.push(elem);
     }
-    let first = elems.pop().unwrap_or(Expr::Empty);
-    Expr::seq(vec![first, tail])
+    items.push(optional_tail(w, optional, tail));
+    Expr::seq(items)
+}
+
+/// The optional items `elems`, each as `ws , ws elem`, then `cont` after the last.
+///
+/// An item can appear only after the one before it. Up to `BLOCK` items nest
+/// to the right as `( , e0 ( , e1 ... cont )? )?`, so each element appears once.
+/// Each item nests the tree two levels deeper. So past `BLOCK` items, block
+/// `k` becomes `X(k) = full(k) X(k + 1) | prefix(k)`. `full(k)` is the whole
+/// block, flat. `prefix(k)` is any shorter run of it, the empty run included.
+/// The last block nests over `cont` as above.
+fn optional_tail(w: &mut Walker<'_>, elems: Vec<Expr>, cont: Expr) -> Expr {
+    let units: Vec<Expr> = elems
+        .into_iter()
+        .map(|elem| {
+            let comma = w.comma();
+            Expr::seq(vec![comma, elem])
+        })
+        .collect();
+    if units.len() <= BLOCK {
+        return nest(units, cont);
+    }
+    let mut chunks = blocks(units);
+    let mut tail = match chunks.pop() {
+        Some(last) => nest(last, cont),
+        None => cont,
+    };
+    for block in chunks.into_iter().rev() {
+        // `full` and `prefix` both hold every unit but the last, so share them.
+        let mut block: Vec<Expr> = block.into_iter().map(|unit| w.share(unit)).collect();
+        let mut full = block.clone();
+        block.pop();
+        let prefix = nest(block, Expr::Empty);
+        full.push(tail);
+        tail = Expr::alt(vec![Expr::seq(full), prefix]);
+    }
+    tail
+}
+
+/// `( u0 ( u1 ... ( un cont )? ... )? )?`: each unit only after the one before it.
+fn nest(units: Vec<Expr>, cont: Expr) -> Expr {
+    let mut tail = cont;
+    for unit in units.into_iter().rev() {
+        tail = Expr::repeat(Expr::seq(vec![unit, tail]), 0, Some(1));
+    }
+    tail
 }
 
 /// `i` as a `u32` item count. A count above `u32::MAX` saturates.
@@ -312,11 +359,63 @@ mod tests {
         );
     }
 
+    /// The array text of `n` nulls, then `tail` items.
+    fn nulls(n: usize, tail: &[&str]) -> String {
+        let mut items = vec!["null"; n];
+        items.extend_from_slice(tail);
+        format!("[{}]", items.join(","))
+    }
+
+    #[test]
+    fn long_tuples_split_into_blocks_and_keep_their_language() {
+        let compact = crate::inference::grammar::json_schema::SchemaOptions {
+            max_whitespace: 0,
+            ..opts()
+        };
+        let items = vec![serde_json::json!({"type": "null"}); 2 * BLOCK + 6];
+        let n = items.len();
+        let closed = serde_json::json!({"prefixItems": items, "items": false});
+        let d = dfa(&closed.to_string(), &compact);
+        for k in 0..=n {
+            assert!(d.accepts(nulls(k, &[]).as_bytes()), "{k} items");
+        }
+        let longer = nulls(n + 1, &[]);
+        check(
+            &d,
+            &[],
+            &[longer.as_str(), "[null,]", "[,null]", "[null null]"],
+        );
+        let mut open = closed.clone();
+        open["items"] = serde_json::json!({"type": "integer"});
+        open["minItems"] = serde_json::json!(BLOCK + 3);
+        let d = dfa(&open.to_string(), &compact);
+        let accept = [
+            nulls(BLOCK + 3, &[]),
+            nulls(BLOCK + 4, &[]),
+            nulls(n, &[]),
+            nulls(n, &["1", "2"]),
+        ];
+        let reject = [
+            nulls(BLOCK + 2, &[]),
+            nulls(n - 1, &["1"]),
+            "[]".to_string(),
+        ];
+        for text in &accept {
+            assert!(d.accepts(text.as_bytes()), "must accept {text}");
+        }
+        for text in &reject {
+            assert!(!d.accepts(text.as_bytes()), "must reject {text}");
+        }
+    }
+
     #[test]
     fn tuple_length_is_limited() {
+        use crate::inference::grammar::ExpandLimits;
         use crate::inference::grammar::json_schema::fixture::{limit_message, lowered};
         let items = |n: usize| vec![serde_json::json!({"type": "integer"}); n];
-        lowered(&serde_json::json!({"prefixItems": items(1_000)}));
+        let grammar = lowered(&serde_json::json!({"prefixItems": items(1_000)}));
+        let expanded = grammar.expand(&ExpandLimits::default());
+        assert!(expanded.is_ok(), "{:?}", expanded.err());
         let msg = limit_message(&serde_json::json!({"prefixItems": items(1_001)}));
         assert!(msg.contains("`prefixItems` at `#/prefixItems`"), "{msg}");
         let msg = limit_message(&serde_json::json!({"items": items(1_001)}));

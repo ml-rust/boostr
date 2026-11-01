@@ -37,8 +37,8 @@ pub struct ExpandLimits {
     /// Maximum expansion depth: nested expressions plus rule references.
     ///
     /// Expansion keeps its walk on the heap at any depth. The expanded tree
-    /// can nest this deep, and its derived `Clone`, `Drop` and `Debug` recurse
-    /// per level. So a value far above the default can exhaust the stack.
+    /// can nest this deep. `Expr` clones, compares, formats and drops on the
+    /// heap, and NFA construction does too. So this limit bounds work, not stack.
     pub max_expand_depth: u32,
 }
 

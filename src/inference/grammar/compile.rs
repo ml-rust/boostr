@@ -401,10 +401,8 @@ mod tests {
             d.as_ref()
                 .is_ok_and(|d| d.accepts(b"") && d.accepts(b"a") && !d.accepts(b"aa"))
         );
-        // Take the tree apart in a loop: the derived drop recurses per level.
-        while let Expr::Repeat { expr: inner, .. } = expr {
-            expr = *inner;
-        }
+        // `Expr` drops on a heap stack, so the deep tree drops in one call.
+        drop(expr);
     }
 
     #[test]

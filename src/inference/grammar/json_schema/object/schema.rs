@@ -1,37 +1,24 @@
-//! Object grammars: declared properties in order, then optional extra keys.
+//! The object schema walk: properties, `required` and `additionalProperties`.
 //!
-//! Properties appear in declared order. A required property must appear, and
-//! an optional one can be absent. The body grows left to right: `prefix(j)`
-//! holds every comma-correct non-empty run over the first `j` properties.
-//!
-//! `prefix(j + 1) = prefix(j) link(j) | pair(j)`, where `link(j)` is
-//! `ws , ws pair(j)` and is optional for an optional property. The bare
-//! `pair(j)` alternative exists only while no property before `j` is required.
-//! Each pair appears at most twice, so the grammar stays linear in the
-//! property count. Extra keys from `additionalProperties` follow the
-//! declared properties. An extra key can repeat a declared name.
+//! Properties appear in declared order, as `run` builds them. Extra keys from
+//! `additionalProperties` follow the declared properties. An extra key can
+//! repeat a declared name.
 
 use std::collections::HashSet;
 
 use serde_json::{Map, Value};
 
-use super::generic::{self, member};
-use super::limits::check_members;
-use super::refs::child;
-use super::string;
-use super::walk::{Lang, Walker, invalid};
+use super::super::generic::{self, member};
+use super::super::limits::check_members;
+use super::super::refs::child;
+use super::super::string;
+use super::super::walk::{Lang, Walker, invalid};
+use super::run::{Prop, run};
 use crate::inference::grammar::ast::Expr;
 use crate::inference::grammar::error::{GrammarError, GrammarErrorKind, excerpt};
 
-/// One property in emission order.
-struct Prop<'s> {
-    key: &'s str,
-    value: Expr,
-    required: bool,
-}
-
 /// The object schema `map` at `path`.
-pub(super) fn schema<'s>(
+pub(in super::super) fn schema<'s>(
     w: &mut Walker<'s>,
     map: &'s Map<String, Value>,
     path: &str,
@@ -136,40 +123,9 @@ fn body(
     extras: Option<Expr>,
     path: &str,
 ) -> Result<Expr, GrammarError> {
-    // `can_be_empty`: no property so far is required, so the run can still be empty.
-    let mut prefix: Option<Expr> = None;
-    let mut can_be_empty = true;
-    for prop in props {
-        let key = string::literal(prop.key, path)?;
-        let value = if can_be_empty {
-            w.share(prop.value)
-        } else {
-            prop.value
-        };
-        let pair = member(w, key, value);
-        let next = match prefix.take() {
-            None => pair,
-            Some(before) => {
-                let bare = can_be_empty.then(|| pair.clone());
-                let comma = w.comma();
-                let link = Expr::seq(vec![comma, pair]);
-                let link = if prop.required {
-                    link
-                } else {
-                    Expr::repeat(link, 0, Some(1))
-                };
-                let joined = Expr::seq(vec![before, link]);
-                match bare {
-                    Some(bare) => Expr::alt(vec![joined, bare]),
-                    None => joined,
-                }
-            }
-        };
-        prefix = Some(next);
-        if prop.required {
-            can_be_empty = false;
-        }
-    }
+    // `can_be_empty`: no property is required, so the declared run can be empty.
+    let can_be_empty = props.iter().all(|prop| !prop.required);
+    let prefix = run(w, props, path)?;
     let ws = w.ws();
     let inner = match (prefix, extras) {
         (None, None) => None,
@@ -216,68 +172,6 @@ mod tests {
     use crate::inference::grammar::json_schema::SchemaOptions;
     use crate::inference::grammar::json_schema::fixture::{check, dfa, error, opts};
     use serde_json::json;
-
-    /// `a`, `c`, `d`, `e` optional and `b` required, in that order.
-    const FLAT: &str = r#"{
-        "type": "object",
-        "properties": {
-            "a": {"type": "integer"},
-            "b": {"type": "string"},
-            "c": {"type": "boolean"},
-            "d": {"type": "null"},
-            "e": {"type": "number"}
-        },
-        "required": ["b"]
-    }"#;
-
-    const MEMBERS: [(&str, &str); 5] = [
-        ("a", "1"),
-        ("b", "\"x\""),
-        ("c", "true"),
-        ("d", "null"),
-        ("e", "2.5"),
-    ];
-
-    /// The object text of `keys` in the given order.
-    fn text(keys: &[&str]) -> String {
-        let parts: Vec<String> = keys
-            .iter()
-            .filter_map(|key| MEMBERS.iter().find(|(k, _)| k == key))
-            .map(|(k, v)| format!("\"{k}\":{v}"))
-            .collect();
-        format!("{{{}}}", parts.join(","))
-    }
-
-    #[test]
-    fn every_subset_of_optional_properties_matches_in_order_only() {
-        let d = dfa(FLAT, &opts());
-        let optional = ["a", "c", "d", "e"];
-        for mask in 0..16u32 {
-            let chosen: Vec<&str> = MEMBERS
-                .iter()
-                .map(|(k, _)| *k)
-                .filter(|k| {
-                    *k == "b"
-                        || optional
-                            .iter()
-                            .position(|o| o == k)
-                            .is_some_and(|i| mask & (1 << i) != 0)
-                })
-                .collect();
-            let ordered = text(&chosen);
-            assert!(d.accepts(ordered.as_bytes()), "must accept {ordered}");
-            if chosen.len() > 1 {
-                let reversed: Vec<&str> = chosen.iter().rev().copied().collect();
-                let wrong = text(&reversed);
-                assert!(!d.accepts(wrong.as_bytes()), "must reject {wrong}");
-            }
-            let without: Vec<&str> = chosen.iter().copied().filter(|k| *k != "b").collect();
-            let missing = text(&without);
-            assert!(!d.accepts(missing.as_bytes()), "must reject {missing}");
-            let extra = ordered.replacen('{', "{\"z\":1,", 1).replace(",}", "}");
-            assert!(!d.accepts(extra.as_bytes()), "must reject {extra}");
-        }
-    }
 
     #[test]
     fn extra_keys_need_additional_properties() {
@@ -334,43 +228,6 @@ mod tests {
                 r#"{"a":null,"x":1,"y":2}"#,
             ],
             &[r#"{"x":1,"a":null}"#, r#"{"a":null,,"x":1}"#],
-        );
-    }
-
-    #[test]
-    fn commas_stay_correct_when_the_first_property_is_optional() {
-        let d = dfa(
-            r#"{"properties": {"a": {"type": "integer"}, "b": {"type": "integer"}}, "required": ["b"]}"#,
-            &opts(),
-        );
-        check(
-            &d,
-            &[r#"{"b":1}"#, r#"{"a":1,"b":2}"#],
-            &[
-                r#"{,"b":1}"#,
-                r#"{"a":1}"#,
-                r#"{"a":1,,"b":2}"#,
-                r#"{"a":1"b":2}"#,
-                "{}",
-            ],
-        );
-    }
-
-    #[test]
-    fn an_object_with_no_required_property_accepts_empty() {
-        let d = dfa(
-            r#"{"properties": {"a": {"type": "integer"}, "b": {"type": "integer"}}}"#,
-            &opts(),
-        );
-        check(
-            &d,
-            &["{}", "{ }", r#"{"a":1}"#, r#"{"b":2}"#, r#"{"a":1,"b":2}"#],
-            &[r#"{"b":2,"a":1}"#, "{,}", r#"{"a":1,}"#],
-        );
-        check(
-            &dfa(r#"{"type": "object"}"#, &opts()),
-            &["{}"],
-            &[r#"{"a":1}"#],
         );
     }
 
@@ -491,15 +348,5 @@ mod tests {
             "additionalProperties": true
         }));
         assert!(msg.contains("`required` at `#/required`"), "{msg}");
-    }
-
-    #[test]
-    fn a_deep_optional_object_builds_clones_and_drops_without_overflow() {
-        use crate::inference::grammar::json_schema::fixture::lowered;
-        let grammar = lowered(&json!({"type": "object", "properties": props(1_000)}));
-        let copy = grammar.clone();
-        assert_eq!(copy, grammar);
-        drop(copy);
-        drop(grammar);
     }
 }

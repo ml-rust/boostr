@@ -10,17 +10,28 @@ use crate::inference::grammar::error::{GrammarError, excerpt};
 
 use super::expander::{Expanded, Expander};
 
+/// A repeat whose body is expanding.
+#[derive(Clone, Copy)]
+pub(super) struct OpenRepeat {
+    min: u32,
+    max: Option<u32>,
+    factor: u64,
+    /// Product of the enclosing repeats.
+    outer: u64,
+    /// `outer` times `factor`.
+    product: u64,
+}
+
 impl Expander<'_> {
-    /// Expand `body{min,max}` in rule `owner` and check its repeat product.
+    /// Open `{min,max}` in rule `owner` before its body expands.
     ///
-    /// The check runs once before the body, on the product alone, and once after it.
-    pub(super) fn repeat(
+    /// Check the bounds and the product alone, then set the product for the body.
+    pub(super) fn open_repeat(
         &mut self,
-        body: &Expr,
         min: u32,
         max: Option<u32>,
         owner: usize,
-    ) -> Result<Expanded, GrammarError> {
+    ) -> Result<OpenRepeat, GrammarError> {
         self.check_repeat(min, max, owner)?;
         let factor = u64::from(max.unwrap_or(min).max(1));
         let outer = self.product;
@@ -28,7 +39,31 @@ impl Expander<'_> {
         // The body weighs at least 1, so the product alone can exceed the limit.
         self.check_product(product, product, (min, max), owner)?;
         self.product = product;
-        let (body, size) = self.expr(body, owner)?;
+        Ok(OpenRepeat {
+            min,
+            max,
+            factor,
+            outer,
+            product,
+        })
+    }
+
+    /// Close `open` over its expanded body in rule `owner`.
+    ///
+    /// Restore the enclosing product, then check the product times the body size.
+    pub(super) fn close_repeat(
+        &mut self,
+        open: OpenRepeat,
+        (body, size): Expanded,
+        owner: usize,
+    ) -> Result<Expanded, GrammarError> {
+        let OpenRepeat {
+            min,
+            max,
+            factor,
+            outer,
+            product,
+        } = open;
         self.product = outer;
         self.check_product(product, product.saturating_mul(size), (min, max), owner)?;
         let unrolled = factor.saturating_mul(size).saturating_add(1);

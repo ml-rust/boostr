@@ -217,15 +217,19 @@ impl Expr {
     /// Weighted node count of this expression tree, this node included.
     ///
     /// Each node adds its `weight`, so a large literal or class counts by size.
+    /// The walk runs on an explicit stack, so tree depth never grows the call stack.
     pub fn node_count(&self) -> usize {
-        let children = match self {
-            Expr::Empty | Expr::Literal(_) | Expr::Class { .. } | Expr::Any | Expr::Ref(_) => 0,
-            Expr::Seq(items) | Expr::Alt(items) => items
-                .iter()
-                .fold(0usize, |sum, item| sum.saturating_add(item.node_count())),
-            Expr::Repeat { expr, .. } => expr.node_count(),
-        };
-        children.saturating_add(self.weight())
+        let mut sum = 0usize;
+        let mut stack = vec![self];
+        while let Some(node) = stack.pop() {
+            sum = sum.saturating_add(node.weight());
+            match node {
+                Expr::Seq(items) | Expr::Alt(items) => stack.extend(items),
+                Expr::Repeat { expr, .. } => stack.push(expr),
+                Expr::Empty | Expr::Literal(_) | Expr::Class { .. } | Expr::Any | Expr::Ref(_) => {}
+            }
+        }
+        sum
     }
 }
 

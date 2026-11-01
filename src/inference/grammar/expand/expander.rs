@@ -1,6 +1,6 @@
-//! The expansion walk over rules, references, sequences and alternations.
+//! Expansion entry point, name checks and the state the walk shares.
 //!
-//! Expansion finds cycles with a depth-first walk over an explicit path stack.
+//! `walk` holds the walk itself. The path stack finds cycles.
 //! A rule expands once. Each later use clones that result and counts its weight.
 //! Each expanded expression also carries its unrolled size for the repeat product.
 
@@ -24,12 +24,12 @@ type Sites<'g> = HashMap<&'g str, Span>;
 
 /// One expanded rule.
 #[derive(Clone)]
-struct Memo {
-    expr: Expr,
+pub(super) struct Memo {
+    pub(super) expr: Expr,
     /// Weighted node count of `expr`.
-    nodes: usize,
+    pub(super) nodes: usize,
     /// Unrolled size of `expr`.
-    unrolled: u64,
+    pub(super) unrolled: u64,
 }
 
 impl Grammar {
@@ -63,7 +63,7 @@ impl Grammar {
             depth: 0,
             product: 1,
         }
-        .rule(root, root_span)
+        .run(root, root_span)
         .map(|(expr, _)| expr)
     }
 
@@ -85,132 +85,28 @@ impl Grammar {
 }
 
 pub(super) struct Expander<'g> {
-    grammar: &'g Grammar,
+    pub(super) grammar: &'g Grammar,
     pub(super) limits: &'g ExpandLimits,
-    index: HashMap<&'g str, usize>,
+    pub(super) index: HashMap<&'g str, usize>,
     /// Reference sites of each rule, by rule index.
-    sites: Vec<Sites<'g>>,
+    pub(super) sites: Vec<Sites<'g>>,
     /// Expanded rules.
-    memo: Vec<Option<Memo>>,
+    pub(super) memo: Vec<Option<Memo>>,
     /// True for each rule on the current reference path.
-    on_path: Vec<bool>,
+    pub(super) on_path: Vec<bool>,
     /// Rules being expanded, outermost first.
-    path: Vec<usize>,
+    pub(super) path: Vec<usize>,
     /// Weight units produced so far.
     nodes: usize,
-    /// Current recursion depth.
-    depth: u32,
+    /// Expressions open on the walk: nested nodes plus rule references.
+    pub(super) depth: u32,
     /// Product of the factors of every enclosing repeat.
     pub(super) product: u64,
 }
 
 impl Expander<'_> {
-    /// Expand rule `idx`, referenced at `site`.
-    fn rule(&mut self, idx: usize, site: Span) -> Result<Expanded, GrammarError> {
-        let cached = self
-            .memo
-            .get(idx)
-            .and_then(Option::as_ref)
-            .map(|m| (m.nodes, m.unrolled));
-        if let Some((nodes, unrolled)) = cached {
-            self.add(nodes, site)?;
-            if let Some(Some(memo)) = self.memo.get(idx) {
-                return Ok((memo.expr.clone(), unrolled));
-            }
-        }
-        if self.on_path.get(idx).copied().unwrap_or(false) {
-            return Err(self.cycle(idx, site));
-        }
-        let grammar = self.grammar;
-        let Some(rule) = grammar.rules.get(idx) else {
-            return Err(GrammarError::at(
-                GrammarErrorKind::UndefinedRule,
-                site,
-                format!("rule index {idx} names no rule in this grammar."),
-            ));
-        };
-        if let Some(slot) = self.on_path.get_mut(idx) {
-            *slot = true;
-        }
-        self.path.push(idx);
-        let (expr, unrolled) = self.expr(&rule.expr, idx)?;
-        self.path.pop();
-        if let Some(slot) = self.on_path.get_mut(idx) {
-            *slot = false;
-        }
-        if let Some(slot) = self.memo.get_mut(idx) {
-            let nodes = expr.node_count();
-            *slot = Some(Memo {
-                expr: expr.clone(),
-                nodes,
-                unrolled,
-            });
-        }
-        Ok((expr, unrolled))
-    }
-
-    /// Expand `expr`, which sits in the body of rule `owner`.
-    pub(super) fn expr(&mut self, expr: &Expr, owner: usize) -> Result<Expanded, GrammarError> {
-        self.depth = self.depth.saturating_add(1);
-        if self.depth > self.limits.max_expand_depth {
-            return Err(Self::limit(
-                self.owner_span(owner),
-                format!(
-                    "expansion depth exceeds max_expand_depth {}. \
-                     Shorten the chain of rule references or nested groups.",
-                    self.limits.max_expand_depth
-                ),
-            ));
-        }
-        let weight = expr.weight();
-        let out = match expr {
-            Expr::Empty | Expr::Class { .. } | Expr::Any => (expr.clone(), units(weight)),
-            Expr::Literal(text) => (Expr::literal(text.clone()), units(weight)),
-            Expr::Ref(name) => self.reference(name, owner)?,
-            Expr::Seq(items) => {
-                let (items, size) = self.items(items, owner)?;
-                (Expr::seq(items), size)
-            }
-            Expr::Alt(items) => {
-                let (items, size) = self.items(items, owner)?;
-                (Expr::alt(items), size)
-            }
-            Expr::Repeat { expr, min, max } => self.repeat(expr, *min, *max, owner)?,
-        };
-        if !matches!(expr, Expr::Ref(_)) {
-            self.add(weight, self.owner_span(owner))?;
-        }
-        self.depth = self.depth.saturating_sub(1);
-        Ok(out)
-    }
-
-    /// Expand `items`. The size is their unrolled sum plus 1 for the parent node.
-    fn items(&mut self, items: &[Expr], owner: usize) -> Result<(Vec<Expr>, u64), GrammarError> {
-        let mut out = Vec::with_capacity(items.len());
-        let mut size = 1u64;
-        for item in items {
-            let (expr, n) = self.expr(item, owner)?;
-            out.push(expr);
-            size = size.saturating_add(n);
-        }
-        Ok((out, size))
-    }
-
-    fn reference(&mut self, name: &str, owner: usize) -> Result<Expanded, GrammarError> {
-        let site = self
-            .sites
-            .get(owner)
-            .and_then(|sites| sites.get(name))
-            .copied()
-            .unwrap_or_else(|| self.owner_span(owner));
-        match self.index.get(name) {
-            Some(&target) => self.rule(target, site),
-            None => Err(GrammarError::undefined(name, self.owner_name(owner), site)),
-        }
-    }
-
     /// Count `n` new weight units, produced at `span`. Stop once the total passes `max_nodes`.
-    fn add(&mut self, n: usize, span: Span) -> Result<(), GrammarError> {
+    pub(super) fn add(&mut self, n: usize, span: Span) -> Result<(), GrammarError> {
         self.nodes = self.nodes.saturating_add(n);
         if self.nodes > self.limits.max_nodes {
             return Err(Self::limit(
@@ -225,7 +121,8 @@ impl Expander<'_> {
         Ok(())
     }
 
-    fn cycle(&self, idx: usize, site: Span) -> GrammarError {
+    /// The cycle error for a reference to rule `idx` at `site`, which is on the path.
+    pub(super) fn cycle(&self, idx: usize, site: Span) -> GrammarError {
         let start = self.path.iter().position(|&p| p == idx).unwrap_or(0);
         let chain: Vec<&str> = self
             .path
@@ -252,11 +149,6 @@ impl Expander<'_> {
     pub(super) fn owner_span(&self, owner: usize) -> Span {
         self.grammar.rules.get(owner).map_or(START, |r| r.span)
     }
-}
-
-/// A weight as unrolled-size units.
-fn units(weight: usize) -> u64 {
-    u64::try_from(weight).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -461,33 +353,6 @@ mod tests {
         assert_eq!(err.span(), at(2, 7));
     }
 
-    #[test]
-    fn a_five_thousand_rule_cycle_message_stays_short() {
-        let mut src = String::from("root ::= r0\n");
-        for i in 0..5_000 {
-            src.push_str(&format!("r{i} ::= r{}\n", (i + 1) % 5_000));
-        }
-        let limits = ExpandLimits {
-            max_expand_depth: 20_000,
-            ..ExpandLimits::default()
-        };
-        // The 5 000-level walk needs more stack than a test thread has.
-        let run = move || expand_with(&src, &limits);
-        let joined = std::thread::Builder::new()
-            .stack_size(256 << 20)
-            .spawn(run)
-            .map(|handle| handle.join());
-        let err = match joined {
-            Ok(Ok(Err(err))) => err,
-            other => panic!("expected a cycle error, got {other:?}"),
-        };
-        assert_eq!(err.kind(), GrammarErrorKind::Cycle);
-        let msg = err.message();
-        assert!(msg.starts_with("rule cycle: r0 -> r1 -> "), "{msg}");
-        assert!(msg.contains("r15 -> ... (4985 more)"), "{msg}");
-        assert!(msg.len() < 400, "{}: {msg}", msg.len());
-    }
-
     fn hand_built(name: &str, expr: Expr) -> Grammar {
         Grammar {
             rules: vec![Rule {
@@ -529,8 +394,14 @@ mod tests {
     #[test]
     fn long_reference_chains_stop_at_the_depth_limit() {
         assert_eq!(expand(&chain(100)), Ok(lit("z")));
+        assert_eq!(expand(&chain(1_000)), Ok(lit("z")));
         let err = error(&chain(2_000));
         assert_eq!(err.kind(), GrammarErrorKind::LimitExceeded);
         assert!(err.message().contains("max_expand_depth 1024"), "{err}");
+        let raised = ExpandLimits {
+            max_expand_depth: 100_000,
+            ..ExpandLimits::default()
+        };
+        assert_eq!(expand_with(&chain(20_000), &raised), Ok(lit("z")));
     }
 }

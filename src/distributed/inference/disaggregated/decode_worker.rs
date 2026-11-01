@@ -136,7 +136,8 @@ where
         shutdown_shared(self.client, release_within).await
     }
 
-    /// Serves handoffs until the router's [`tags::SHUTDOWN`] notice, the
+    /// Serves handoffs until the router's
+    /// [`tags::SHUTDOWN`](super::protocol::tags::SHUTDOWN) notice, the
     /// router's disconnect, or every prefill worker's disconnect. Call
     /// [`DecodeWorker::shutdown`] after it returns.
     ///

@@ -35,7 +35,10 @@ pub struct ExpandLimits {
     /// A value far above the default can exhaust the stack.
     pub max_group_depth: u32,
     /// Maximum expansion depth: nested expressions plus rule references.
-    /// A value far above the default can exhaust the stack.
+    ///
+    /// Expansion keeps its walk on the heap at any depth. The expanded tree
+    /// can nest this deep, and its derived `Clone`, `Drop` and `Debug` recurse
+    /// per level. So a value far above the default can exhaust the stack.
     pub max_expand_depth: u32,
 }
 

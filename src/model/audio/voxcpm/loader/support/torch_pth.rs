@@ -1,5 +1,6 @@
-//! [`TorchPthSource`]: reads a `torch.save`d state dict as a [`WeightSource`],
-//! folding `torch.nn.utils.weight_norm` reparameterization on the way out.
+//! [`WeightNormPthSource`]: a `torch.save`d state dict read as a
+//! [`WeightSource`], folding `torch.nn.utils.weight_norm` reparameterization
+//! on the way out.
 //!
 //! # Why the reader takes the `.pth` directly
 //!
@@ -17,13 +18,14 @@
 //! the intermediate artifact, and the stale-conversion bug it invites — the
 //! runtime reads the checkpoint the model actually ships.
 //!
-//! The arithmetic itself is [`crate::nn::fuse_weight_norm`], shared with the
-//! Kokoro loaders (and available to the cstr GGUF path, which stores the same
-//! pairs unfolded).
+//! The root prefix and plain reads come from the model-agnostic
+//! [`TorchPthSource`]. This wrapper adds only the fold. The arithmetic itself
+//! is [`crate::nn::fuse_weight_norm`], shared with the Kokoro loaders (and
+//! available to the cstr GGUF path, which stores the same pairs unfolded).
 
 use super::WeightSource;
 use crate::error::{Error, Result};
-use crate::format::torch_pt::TorchStateDict;
+use crate::format::torch_pt::{TorchPthSource, TorchStateDict};
 use crate::nn::fuse_weight_norm;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ReduceOps, TensorOps, UnaryOps};
@@ -39,6 +41,9 @@ const V_SUFFIX: &str = ".weight_v";
 /// The nesting `torch.save({"metadata": …, "state_dict": {…}})` adds. The
 /// flattened keys carry it as a leading segment; the reference script drops
 /// it with `blob["state_dict"] if "state_dict" in blob else blob`.
+///
+/// VoxCPM2 detects only this root. [`TorchPthSource::open`] also tries
+/// `params_ema.` and `params.`, which the reference script never strips.
 const STATE_DICT_ROOT: &str = "state_dict.";
 
 /// A `.pt` / `.pth` state dict presented as a [`WeightSource`], with
@@ -46,15 +51,15 @@ const STATE_DICT_ROOT: &str = "state_dict.";
 ///
 /// Reads are lazy: only the pickle metadata is parsed up front, and each
 /// requested tensor is materialized on demand by [`TorchStateDict`].
-pub struct TorchPthSource {
-    state: TorchStateDict,
-    /// Prefix every lookup is spelled under — [`STATE_DICT_ROOT`] when the
-    /// checkpoint nests its tensors under `state_dict`, else empty.
-    root: String,
+pub struct WeightNormPthSource {
+    inner: TorchPthSource,
 }
 
-impl TorchPthSource {
+impl WeightNormPthSource {
     /// Open `path` and check every `weight_norm` pair is complete.
+    ///
+    /// The root is [`STATE_DICT_ROOT`] when some key starts with it, else
+    /// empty.
     ///
     /// The completeness check runs here, over the whole key set, rather than
     /// lazily per read: the reference script raises `KeyError` for a `_g`
@@ -63,9 +68,9 @@ impl TorchPthSource {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let state = TorchStateDict::open(path)?;
         let root = if state.keys().any(|k| k.starts_with(STATE_DICT_ROOT)) {
-            STATE_DICT_ROOT.to_string()
+            STATE_DICT_ROOT
         } else {
-            String::new()
+            ""
         };
 
         let orphans: Vec<String> = state
@@ -84,33 +89,36 @@ impl TorchPthSource {
             });
         }
 
-        Ok(Self { state, root })
+        Ok(Self {
+            inner: TorchPthSource::from_state_dict(state, root),
+        })
     }
 }
 
-impl<R: Runtime<DType = DType>> WeightSource<R> for TorchPthSource
+impl<R: Runtime<DType = DType>> WeightSource<R> for WeightNormPthSource
 where
     R::Client: ReduceOps<R> + UnaryOps<R> + BinaryOps<R> + TensorOps<R>,
 {
     fn load_named(&mut self, name: &str, device: &R::Device) -> Result<Tensor<R>> {
-        let key = format!("{}{name}", self.root);
-        if self.state.has(&key) {
-            return self.state.load_tensor::<R>(&key, device);
+        let key = self.inner.stored_key(name);
+        let state = self.inner.state_dict();
+        if state.has(&key) {
+            return state.load_tensor::<R>(&key, device);
         }
 
         // Not stored directly: the only other way this name exists is as a
         // folded `weight_norm` pair.
         let Some(stem) = key.strip_suffix(".weight") else {
-            return self.state.load_tensor::<R>(&key, device);
+            return state.load_tensor::<R>(&key, device);
         };
         let g_key = format!("{stem}{G_SUFFIX}");
-        if !self.state.has(&g_key) {
+        if !state.has(&g_key) {
             // Let the state dict phrase the not-found error, listing what it
             // does hold.
-            return self.state.load_tensor::<R>(&key, device);
+            return state.load_tensor::<R>(&key, device);
         }
         let v_key = format!("{stem}{V_SUFFIX}");
-        if !self.state.has(&v_key) {
+        if !state.has(&v_key) {
             return Err(Error::ModelError {
                 reason: format!("{g_key} has no matching {v_key}"),
             });
@@ -124,8 +132,8 @@ where
         // it embeds this same checkpoint in a GGUF/TCF, so a `.pth` and an
         // embedded VAE load bit-identical weights on every device.
         let host = CpuDevice::new();
-        let g = self.state.load_tensor::<CpuRuntime>(&g_key, &host)?;
-        let v = self.state.load_tensor::<CpuRuntime>(&v_key, &host)?;
+        let g = state.load_tensor::<CpuRuntime>(&g_key, &host)?;
+        let v = state.load_tensor::<CpuRuntime>(&v_key, &host)?;
         // Axis 0 unconditionally: `weight_norm`'s default `dim=0` is what
         // wrote these pairs, for the transposed convolutions too — there the
         // normalized axis is the INPUT-channel axis, and reinterpreting it as
@@ -139,13 +147,13 @@ where
     /// holds as a complete `weight_g`/`weight_v` pair — the same two ways
     /// `load_named` can succeed.
     fn has_named(&self, name: &str) -> bool {
-        let key = format!("{}{name}", self.root);
-        if self.state.has(&key) {
+        let key = self.inner.stored_key(name);
+        let state = self.inner.state_dict();
+        if state.has(&key) {
             return true;
         }
         key.strip_suffix(".weight").is_some_and(|stem| {
-            self.state.has(&format!("{stem}{G_SUFFIX}"))
-                && self.state.has(&format!("{stem}{V_SUFFIX}"))
+            state.has(&format!("{stem}{G_SUFFIX}")) && state.has(&format!("{stem}{V_SUFFIX}"))
         })
     }
 }
@@ -183,6 +191,6 @@ mod tests {
 
     #[test]
     fn rejects_missing_file() {
-        assert!(TorchPthSource::open("/nonexistent/audiovae.pth").is_err());
+        assert!(WeightNormPthSource::open("/nonexistent/audiovae.pth").is_err());
     }
 }

@@ -5,7 +5,7 @@
 //! convolutions are still `weight_norm`-reparameterized. Earlier revisions of
 //! this port required that file be converted to `audiovae.safetensors` by an
 //! external Python script first; the `.pth` is now read directly (see
-//! [`TorchPthSource`]), and the converted file keeps working unchanged for
+//! [`WeightNormPthSource`]), and the converted file keeps working unchanged for
 //! anyone who already has one.
 //!
 //! Which container a path holds is decided by its BYTES, not its extension: a
@@ -13,7 +13,7 @@
 
 use crate::error::{Error, Result};
 use crate::format::safetensors_loader::SafeTensorsLoader;
-use crate::model::audio::voxcpm::loader::support::{TorchPthSource, WeightSource};
+use crate::model::audio::voxcpm::loader::support::{WeightNormPthSource, WeightSource};
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ReduceOps, TensorOps, UnaryOps};
 use numr::runtime::Runtime;
@@ -34,7 +34,7 @@ pub enum VaeCheckpoint {
     /// An already weight-norm-folded `audiovae.safetensors`.
     SafeTensors(SafeTensorsLoader),
     /// The published `audiovae.pth`, folded as it is read.
-    TorchPth(TorchPthSource),
+    TorchPth(WeightNormPthSource),
 }
 
 impl VaeCheckpoint {
@@ -49,13 +49,13 @@ impl VaeCheckpoint {
         if path.is_dir() {
             let pth = path.join(AUDIOVAE_PTH);
             if pth.is_file() && !dir_has_safetensors(path)? {
-                return Ok(Self::TorchPth(TorchPthSource::open(pth)?));
+                return Ok(Self::TorchPth(WeightNormPthSource::open(pth)?));
             }
             return Ok(Self::SafeTensors(SafeTensorsLoader::open(path)?));
         }
 
         if is_zip(path)? {
-            Ok(Self::TorchPth(TorchPthSource::open(path)?))
+            Ok(Self::TorchPth(WeightNormPthSource::open(path)?))
         } else {
             Ok(Self::SafeTensors(SafeTensorsLoader::open(path)?))
         }

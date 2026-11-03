@@ -5,8 +5,7 @@
 //! specific `torch` globals `torch.save` emits, and everything else becomes an
 //! opaque placeholder or a parse error.
 
-use super::pickle::PValue;
-use super::types::{PtContents, PtScalar, PtTensorMeta};
+use super::types::{PValue, PtContents, PtScalar, PtTensorMeta};
 use crate::error::{Error, Result};
 use numr::dtype::DType;
 use std::collections::HashMap;
@@ -22,15 +21,31 @@ pub(super) fn apply_reduce(func: PValue, args: Vec<PValue>) -> Result<PValue> {
     };
     match (module, name) {
         ("torch._utils", "_rebuild_tensor_v2") | ("torch._utils", "_rebuild_tensor") => {
-            // Args: (storage_ref, storage_offset, size, stride, requires_grad, backward_hooks)
-            if args.len() < 3 {
+            // Args: (storage_ref, storage_offset, size, stride, …). The
+            // trailing `requires_grad` and `backward_hooks` are ignored.
+            if args.len() < 4 {
                 return Err(Error::ModelError {
-                    reason: format!("_rebuild_tensor_v2 expects ≥3 args, got {}", args.len()),
+                    reason: format!(
+                        "torch._utils.{name} expects at least 4 args (storage, offset, size, \
+                         stride), got {}; the .pt file is malformed",
+                        args.len()
+                    ),
                 });
             }
             let storage_ref = args[0].clone();
-            let storage_offset = as_i64(&args[1])? as usize;
+            let storage_offset = as_usize(&args[1])?;
             let size = as_usize_tuple(&args[2])?;
+            let strides = as_usize_tuple(&args[3])?;
+            if strides.len() != size.len() {
+                return Err(Error::ModelError {
+                    reason: format!(
+                        "torch._utils.{name}: stride {strides:?} has {} dims but size \
+                         {size:?} has {}; the .pt file is malformed",
+                        strides.len(),
+                        size.len()
+                    ),
+                });
+            }
 
             let (dtype, storage_id, numel) = match storage_ref {
                 PValue::PersistentRef {
@@ -48,6 +63,7 @@ pub(super) fn apply_reduce(func: PValue, args: Vec<PValue>) -> Result<PValue> {
             Ok(PValue::Tensor(PtTensorMeta {
                 dtype,
                 shape: size,
+                strides,
                 storage_id,
                 storage_offset,
                 storage_numel: numel,
@@ -96,7 +112,7 @@ pub(super) fn resolve_persistent_id(pid: PValue) -> Result<PValue> {
             });
         }
     };
-    let numel = as_i64(&items[4])? as usize;
+    let numel = as_usize(&items[4])?;
     let dtype = dtype_from_global(dtype_global)?;
     Ok(PValue::PersistentRef {
         dtype,
@@ -127,6 +143,14 @@ pub(super) fn dtype_from_global(v: &PValue) -> Result<DType> {
         "LongStorage" | "int64" => Ok(DType::I64),
         "IntStorage" | "int32" => Ok(DType::I32),
         "BoolStorage" | "bool" => Ok(DType::Bool),
+        // `torch.save` writes a tensor's storage typed (`torch.HalfStorage`,
+        // …). An `UntypedStorage` is a bare byte buffer with no element
+        // type, so it cannot back a tensor read here.
+        "UntypedStorage" => Err(Error::ModelError {
+            reason: "storage torch.UntypedStorage has no element type, so no tensor can be \
+                     read from it; re-save the tensors with torch.save"
+                .into(),
+        }),
         other => Err(Error::ModelError {
             reason: format!("unsupported torch dtype: torch.{other}"),
         }),
@@ -143,12 +167,17 @@ pub(super) fn as_i64(v: &PValue) -> Result<i64> {
     }
 }
 
+/// A non-negative pickle int: a size, stride, offset or element count.
+pub(super) fn as_usize(v: &PValue) -> Result<usize> {
+    let i = as_i64(v)?;
+    usize::try_from(i).map_err(|_| Error::ModelError {
+        reason: format!("expected a non-negative size, stride or offset, got {i}"),
+    })
+}
+
 pub(super) fn as_usize_tuple(v: &PValue) -> Result<Vec<usize>> {
     match v {
-        PValue::Tuple(items) | PValue::List(items) => items
-            .iter()
-            .map(|it| as_i64(it).map(|i| i as usize))
-            .collect(),
+        PValue::Tuple(items) | PValue::List(items) => items.iter().map(as_usize).collect(),
         other => Err(Error::ModelError {
             reason: format!("expected shape tuple, got {other:?}"),
         }),

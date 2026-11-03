@@ -5,40 +5,10 @@ use super::reader::{
     read_u16, read_u32, read_u64,
 };
 use super::reduce::{apply_reduce, finalize_root, resolve_persistent_id};
-use super::types::{PtContents, PtTensorMeta};
+use super::types::{PValue, PtContents};
 use crate::error::{Error, Result};
-use numr::dtype::DType;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
-
-#[derive(Debug, Clone)]
-pub(super) enum PValue {
-    None,
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    Str(String),
-    Tuple(Vec<PValue>),
-    List(Vec<PValue>),
-    Dict(Vec<(PValue, PValue)>),
-    /// `(module, qualname)` reference to a Python callable; used to intercept
-    /// `torch._utils._rebuild_tensor_v2`, dtype objects, etc.
-    Global(String, String),
-    /// `persistent_load(pid)` — for tensors this is `("storage", dtype_global,
-    /// storage_id, device, numel)` where storage_id is the filename in
-    /// `data/*`.
-    PersistentRef {
-        dtype: DType,
-        storage_id: String,
-        numel: usize,
-    },
-    /// A `REDUCE`d tensor. Fully resolved; holds the metadata we care about.
-    Tensor(PtTensorMeta),
-    /// Placeholder for things we don't interpret (e.g. OrderedDict, Size,
-    /// DeviceObj).
-    #[allow(dead_code)]
-    Opaque(String, String),
-}
 
 pub(super) fn parse_pickle(bytes: &[u8]) -> Result<PtContents> {
     let mut cur = Cursor::new(bytes);
@@ -300,6 +270,7 @@ mod tests {
     use super::super::reduce::{as_usize_tuple, dtype_from_global};
     use super::super::types::PtScalar;
     use super::*;
+    use numr::dtype::DType;
 
     #[test]
     fn rejects_non_zip() {
@@ -328,6 +299,19 @@ mod tests {
         assert_eq!(dtype_from_global(&f64).unwrap(), DType::F64);
         let bad = PValue::Global("torch".into(), "NewFangledStorage".into());
         assert!(dtype_from_global(&bad).is_err());
+        let half = PValue::Global("torch".into(), "HalfStorage".into());
+        assert_eq!(dtype_from_global(&half).unwrap(), DType::F16);
+        let bf16 = PValue::Global("torch".into(), "BFloat16Storage".into());
+        assert_eq!(dtype_from_global(&bf16).unwrap(), DType::BF16);
+        let untyped = PValue::Global("torch".into(), "UntypedStorage".into());
+        let e = dtype_from_global(&untyped).unwrap_err().to_string();
+        assert!(e.contains("torch.UntypedStorage"), "{e}");
+    }
+
+    #[test]
+    fn negative_sizes_are_an_error() {
+        let shape = PValue::Tuple(vec![PValue::Int(2), PValue::Int(-1)]);
+        assert!(as_usize_tuple(&shape).is_err());
     }
 
     #[test]

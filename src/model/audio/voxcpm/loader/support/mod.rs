@@ -15,4 +15,4 @@ mod torch_pth;
 
 pub use crate::format::weight_source::{DenseWeightSource, TcfSource, WeightSource};
 pub(crate) use tensor_loader::TensorLoader;
-pub use torch_pth::TorchPthSource;
+pub use torch_pth::WeightNormPthSource;

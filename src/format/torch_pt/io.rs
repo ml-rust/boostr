@@ -5,6 +5,7 @@ use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 use std::io::Read;
+use std::path::Path;
 
 pub(super) fn find_archive_layout(
     archive: &zip::ZipArchive<std::fs::File>,
@@ -37,20 +38,55 @@ pub(super) fn read_zip_entry(
     let mut entry = archive.by_name(name).map_err(|e| Error::ModelError {
         reason: format!("zip entry {name} missing: {e}"),
     })?;
-    let mut buf = Vec::with_capacity(entry.size() as usize);
+    // The declared size comes from the file, so it is only a hint: cap the
+    // up-front allocation and let `read_to_end` grow with the real data.
+    const MAX_PREALLOC: u64 = 1 << 28;
+    let mut buf = Vec::with_capacity(entry.size().min(MAX_PREALLOC) as usize);
     entry.read_to_end(&mut buf).map_err(|e| Error::ModelError {
         reason: format!("reading zip entry {name}: {e}"),
     })?;
     Ok(buf)
 }
 
+/// Decode the little-endian elements of tensor `key` of the file at `path`
+/// into a tensor on `device`.
 pub(super) fn build_tensor_from_bytes<R: Runtime<DType = DType>>(
+    path: &Path,
+    key: &str,
     dtype: DType,
     shape: &[usize],
     bytes: &[u8],
     device: &R::Device,
 ) -> Result<Tensor<R>> {
     match dtype {
+        #[cfg(feature = "f16")]
+        DType::F16 => {
+            let data: Vec<half::f16> = bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| half::f16::from_le_bytes(*c))
+                .collect();
+            Ok(Tensor::<R>::from_slice(&data, shape, device)?)
+        }
+        #[cfg(feature = "f16")]
+        DType::BF16 => {
+            let data: Vec<half::bf16> = bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| half::bf16::from_le_bytes(*c))
+                .collect();
+            Ok(Tensor::<R>::from_slice(&data, shape, device)?)
+        }
+        #[cfg(not(feature = "f16"))]
+        DType::F16 | DType::BF16 => Err(Error::ModelError {
+            reason: format!(
+                "{}: tensor {key:?} is {dtype:?}; build boostr with the `f16` feature to \
+                 read F16 and BF16 tensors",
+                path.display()
+            ),
+        }),
         DType::F32 => {
             let data: Vec<f32> = bytes
                 .as_chunks::<4>()
@@ -92,7 +128,9 @@ pub(super) fn build_tensor_from_bytes<R: Runtime<DType = DType>>(
         }
         other => Err(Error::ModelError {
             reason: format!(
-                "reading {other:?} tensors from .pt is not yet supported — convert to .safetensors"
+                "{}: tensor {key:?} is {other:?}, which the .pt reader does not decode; \
+                 convert the file to .safetensors",
+                path.display()
             ),
         }),
     }

@@ -1,6 +1,6 @@
 //! Pickle stream primitive readers and the value stack helpers.
 
-use super::pickle::PValue;
+use super::types::PValue;
 use crate::error::{Error, Result};
 use std::collections::HashMap;
 use std::io::{Cursor, Read};

@@ -3,6 +3,7 @@
 use super::io::{build_tensor_from_bytes, find_archive_layout, read_zip_entry};
 use super::pickle::parse_pickle;
 use super::types::{PtScalar, PtTensorMeta};
+use super::view::tensor_view;
 use crate::error::{Error, Result};
 use numr::dtype::DType;
 use numr::runtime::Runtime;
@@ -51,8 +52,8 @@ pub fn load_tensor_pt<R: Runtime<DType = DType>>(
     let storage_path = format!("{data_prefix}/{}", meta.storage_id);
     let storage_bytes = read_zip_entry(&mut archive, &storage_path)?;
 
-    let view = tensor_view(meta, &storage_bytes, &storage_path)?;
-    build_tensor_from_bytes::<R>(meta.dtype, &meta.shape, view, device)
+    let view = tensor_view(path, wanted_key, meta, &storage_bytes, &storage_path)?;
+    build_tensor_from_bytes::<R>(path, wanted_key, meta.dtype, &meta.shape, view, device)
 }
 
 /// Convenience wrapper for Kokoro voice files. Tries the bare-tensor form
@@ -66,41 +67,6 @@ pub fn load_voice_pt<R: Runtime<DType = DType>>(
         Ok(t) => Ok(t),
         Err(_) => load_tensor_pt::<R>(path, Some("style"), device),
     }
-}
-
-/// Slice the in-storage byte view for `meta`, validating the storage length
-/// and that the view lies within bounds.
-fn tensor_view<'a>(
-    meta: &PtTensorMeta,
-    storage_bytes: &'a [u8],
-    storage_path: &str,
-) -> Result<&'a [u8]> {
-    let expected_bytes = meta.storage_numel * meta.storage_elem_size;
-    if storage_bytes.len() != expected_bytes {
-        return Err(Error::ModelError {
-            reason: format!(
-                "storage {storage_path} size mismatch: expected {expected_bytes} bytes \
-                 ({} elements × {} B), got {}",
-                meta.storage_numel,
-                meta.storage_elem_size,
-                storage_bytes.len()
-            ),
-        });
-    }
-
-    let view_numel: usize = meta.shape.iter().product();
-    let dtype_bytes = meta.dtype.size_in_bytes();
-    let byte_offset = meta.storage_offset * dtype_bytes;
-    let byte_len = view_numel * dtype_bytes;
-    if byte_offset + byte_len > storage_bytes.len() {
-        return Err(Error::ModelError {
-            reason: format!(
-                "tensor view exceeds storage: offset={byte_offset} len={byte_len} storage_bytes={}",
-                storage_bytes.len()
-            ),
-        });
-    }
-    Ok(&storage_bytes[byte_offset..byte_offset + byte_len])
 }
 
 /// Whole-state-dict reader: opens a `.pth` once, returns a lazy handle that
@@ -189,7 +155,7 @@ impl TorchStateDict {
         let storage_path = format!("{}/{}", self.data_prefix, meta.storage_id);
         let storage_bytes = read_zip_entry(&mut archive, &storage_path)?;
 
-        let view = tensor_view(meta, &storage_bytes, &storage_path)?;
-        build_tensor_from_bytes::<R>(meta.dtype, &meta.shape, view, device)
+        let view = tensor_view(&self.path, name, meta, &storage_bytes, &storage_path)?;
+        build_tensor_from_bytes::<R>(&self.path, name, meta.dtype, &meta.shape, view, device)
     }
 }

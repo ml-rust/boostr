@@ -9,6 +9,20 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- **`WeightNormPthSource`** — the VoxCPM2 `weight_norm`-folding `.pth` source in `model::audio::voxcpm::loader::support` is renamed from `TorchPthSource`. It reads the same keys and folds the same pairs. `format::TorchPthSource` is now the model-agnostic source.
+- **Strided `.pth` tensors** — `TorchStateDict::load_tensor` and `load_tensor_pt` refuse a tensor whose strides are not row-major for its shape. Before, they read the storage in row-major order and returned wrong elements. The error names the key, shape and strides. Re-save such a tensor with `.contiguous()`.
+
+### Added
+
+- **`format::TorchPthSource`** — a `.pt` / `.pth` state dict as a `WeightSource` for any model, with no feature gate. `open` detects the root prefix: `params_ema.`, then `params.`, then `state_dict.`, else the root. `open_with_root` and `from_state_dict` take an explicit root. `root`, `names`, `stored_key` and `state_dict` expose the prefix, the names under it and keys outside it such as `metadata.in_nc`. `torch_pt::detect_root` and `torch_pt::ROOT_PREFIXES` expose the rule.
+- **F16 and BF16 `.pth` tensors** — `torch.HalfStorage` and `torch.BFloat16Storage` load as `DType::F16` and `DType::BF16` with the `f16` feature. Without it the error names the key and the `f16` feature.
+
+### Fixed
+
+- **`.pth` integer fields** — a negative size, stride, offset or element count in the pickle is an error. Before, it wrapped to a huge `usize`.
+
 ---
 
 ## [0.10.0] - 2026-11-01

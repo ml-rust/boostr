@@ -131,9 +131,10 @@ clap = ["audio"]
 spacy-tagger = []
 
 # Image super-resolution networks (`model::super_resolution`): the
-# SRVGGNetCompact network of Real-ESRGAN's `realesr-general-x4v3` and its
-# fused-conv building blocks. Image tensors only. Implies no other gate. Half
-# precision needs `f16` as well.
+# SRVGGNetCompact network of Real-ESRGAN's `realesr-general-x4v3`, the x2
+# RRDBNet of `RealESRGAN_x2plus` and `2x_PureVision`, and their fused-conv
+# building blocks. Image tensors only. Implies no other gate. Half precision
+# needs `f16` as well.
 super-resolution = []
 
 # Backend features (passed through to numr)
@@ -271,6 +272,14 @@ required-features = ["super-resolution"]
 
 [[test]]
 name = "super_resolution_compact_reference"
+required-features = ["super-resolution"]
+
+[[test]]
+name = "super_resolution_rrdb_parity"
+required-features = ["super-resolution"]
+
+[[test]]
+name = "super_resolution_rrdb_reference"
 required-features = ["super-resolution"]
 
 [[test]]

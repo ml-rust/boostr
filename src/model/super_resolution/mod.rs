@@ -6,5 +6,6 @@ pub mod conv;
 pub mod layout;
 pub mod loader;
 mod reexports;
+pub mod rrdb;
 
 pub use reexports::*;

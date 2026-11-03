@@ -3,7 +3,7 @@
 //!
 //! Fixtures are checked in under `tests/fixtures/super_resolution/compact/`.
 //! Regenerate with
-//! `python3 tests/tools/sr_blocks_oracle/sr_blocks_oracle.py tests/fixtures/super_resolution/compact`
+//! `python3 tests/tools/sr_blocks_oracle/sr_blocks_oracle.py compact tests/fixtures/super_resolution/compact`
 //! (requires torch and safetensors).
 //!
 //! Run with:
@@ -16,7 +16,6 @@
 //! `weights.safetensors` + `from_varbuilder` path and the `.pth` +
 //! `load_compact` path load the same weights.
 
-use boostr::format::SafeTensors;
 use boostr::model::super_resolution::{
     SrExecution, SrVggCompact, SrVggCompactConfig, load_compact,
 };
@@ -25,11 +24,14 @@ use numr::dtype::DType;
 use numr::ops::ConvLayout;
 use numr::runtime::Runtime;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
-use numr::tensor::Tensor;
-use std::path::{Path, PathBuf};
 
 mod common;
-use common::super_resolution::{max_abs_diff, sr_input, sr_output_nchw};
+use common::super_resolution::{
+    fixtures_dir, golden, golden_values, load_config, max_abs_diff, sr_input, sr_output_nchw,
+};
+
+/// Fixture set under `tests/fixtures/super_resolution/`.
+const FIXTURE: &str = "compact";
 
 /// F32 bound: the same arithmetic in another summation order.
 const F32_TOL: f32 = 1e-5;
@@ -45,15 +47,8 @@ struct Config {
     upscale: usize,
 }
 
-fn fixtures_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/super_resolution/compact")
-}
-
 fn config() -> SrVggCompactConfig {
-    let path = fixtures_dir().join("config.json");
-    let text =
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let c: Config = serde_json::from_str(&text).expect("parse config.json");
+    let c: Config = load_config(FIXTURE);
     SrVggCompactConfig {
         num_in_ch: c.num_in_ch,
         num_out_ch: c.num_out_ch,
@@ -61,18 +56,6 @@ fn config() -> SrVggCompactConfig {
         num_conv: c.num_conv,
         upscale: c.upscale,
     }
-}
-
-fn golden<R: Runtime<DType = DType>>(name: &str, device: &R::Device) -> Tensor<R> {
-    let mut io =
-        SafeTensors::open(fixtures_dir().join("io.safetensors")).expect("open io.safetensors");
-    io.load_tensor::<R>(name, device)
-        .unwrap_or_else(|e| panic!("golden tensor '{name}': {e}"))
-}
-
-fn golden_values(name: &str) -> (Vec<usize>, Vec<f32>) {
-    let t = golden::<CpuRuntime>(name, &CpuDevice::new());
-    (t.shape().to_vec(), t.to_vec::<f32>())
 }
 
 /// Run both cases through `forward_raw` and `forward_resized` and hold each
@@ -91,7 +74,7 @@ fn check_against_golden<R>(
     for case in CASES {
         let input = sr_input(
             client,
-            &golden::<R>(&format!("input_{case}"), device),
+            &golden::<R>(FIXTURE, &format!("input_{case}"), device),
             &exec,
         );
         let (_, _, h, w) = exec.image_dims(input.shape()).expect("input dims");
@@ -103,7 +86,7 @@ fn check_against_golden<R>(
 
         for (kind, out) in [("raw", &raw), ("resized", &resized)] {
             let (shape, got) = sr_output_nchw(client, out, &exec);
-            let (want_shape, want) = golden_values(&format!("{kind}_{case}"));
+            let (want_shape, want) = golden_values(FIXTURE, &format!("{kind}_{case}"));
             assert_eq!(shape, want_shape, "{label} {kind}_{case}: shape");
             let (diff, at) = max_abs_diff(&got, &want);
             eprintln!("{label} {kind}_{case}: max abs diff {diff:e} at {at}");
@@ -127,9 +110,11 @@ fn cpu() -> (CpuDevice, CpuClient) {
 fn cpu_f32_nchw_safetensors_matches_torch() {
     let (device, client) = cpu();
     let exec = SrExecution::new(DType::F32, ConvLayout::Nchw);
-    let mut map =
-        VarMap::<CpuRuntime>::from_safetensors(fixtures_dir().join("weights.safetensors"), &device)
-            .expect("load weights.safetensors");
+    let mut map = VarMap::<CpuRuntime>::from_safetensors(
+        fixtures_dir(FIXTURE).join("weights.safetensors"),
+        &device,
+    )
+    .expect("load weights.safetensors");
     let mut vb = VarBuilder::new(&mut map, &device);
     let model = SrVggCompact::from_varbuilder(&client, &mut vb, &config(), exec)
         .expect("build SrVggCompact from safetensors");
@@ -148,7 +133,7 @@ fn cpu_f32_both_layouts_pth_match_torch() {
     for layout in [ConvLayout::Nchw, ConvLayout::Nhwc] {
         let exec = SrExecution::new(DType::F32, layout);
         let model = load_compact::<CpuRuntime>(
-            fixtures_dir().join("weights.pth"),
+            fixtures_dir(FIXTURE).join("weights.pth"),
             &device,
             &config(),
             exec,
@@ -172,7 +157,7 @@ fn load_rejects_missing_keys() {
         ..config()
     };
     let err = load_compact::<CpuRuntime>(
-        fixtures_dir().join("weights.pth"),
+        fixtures_dir(FIXTURE).join("weights.pth"),
         &device,
         &wrong,
         SrExecution::new(DType::F32, ConvLayout::Nchw),
@@ -195,7 +180,7 @@ fn load_rejects_unexpected_keys() {
         ..config()
     };
     let err = load_compact::<CpuRuntime>(
-        fixtures_dir().join("weights.pth"),
+        fixtures_dir(FIXTURE).join("weights.pth"),
         &device,
         &wrong,
         SrExecution::new(DType::F32, ConvLayout::Nchw),
@@ -217,7 +202,7 @@ fn load_rejects_shape_mismatch() {
         ..config()
     };
     let err = load_compact::<CpuRuntime>(
-        fixtures_dir().join("weights.pth"),
+        fixtures_dir(FIXTURE).join("weights.pth"),
         &device,
         &wrong,
         SrExecution::new(DType::F32, ConvLayout::Nchw),
@@ -235,11 +220,15 @@ fn load_rejects_shape_mismatch() {
 fn forward_rejects_wrong_layout_and_dtype() {
     let (device, client) = cpu();
     let exec = SrExecution::new(DType::F32, ConvLayout::Nhwc);
-    let model =
-        load_compact::<CpuRuntime>(fixtures_dir().join("weights.pth"), &device, &config(), exec)
-            .expect("load_compact weights.pth");
+    let model = load_compact::<CpuRuntime>(
+        fixtures_dir(FIXTURE).join("weights.pth"),
+        &device,
+        &config(),
+        exec,
+    )
+    .expect("load_compact weights.pth");
     // An NCHW [1, 3, 13, 11] tensor read as NHWC has 11 channels.
-    let nchw = golden::<CpuRuntime>("input_a", &device);
+    let nchw = golden::<CpuRuntime>(FIXTURE, "input_a", &device);
     let err = model
         .forward_raw(&client, &nchw)
         .err()
@@ -273,7 +262,7 @@ mod cuda {
         let device = CudaDevice::new(0);
         let client = CudaRuntime::default_client(&device);
         let model = load_compact::<CudaRuntime>(
-            fixtures_dir().join("weights.pth"),
+            fixtures_dir(FIXTURE).join("weights.pth"),
             &device,
             &config(),
             exec,

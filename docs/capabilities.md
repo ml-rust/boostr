@@ -133,6 +133,7 @@ boostr holds tensor code only. Audio decoding, resampling, grapheme-to-phoneme, 
 The `super-resolution` feature gates image networks on numr's fused conv. It implies no other gate. Half precision also needs `f16`.
 
 - **SRVGGNetCompact**: the network of Real-ESRGAN's `realesr-general-x4v3`, loaded from its `.pth`. The load fails on a missing key, an unexpected key or a shape mismatch.
+- **RRDBNet ×2**: the network of `RealESRGAN_x2plus` (modern keys) and `2x_PureVision` (legacy ESRGAN `model.*` keys plus `metadata.*`), loaded from its `.pth`. An odd height or width is replicate-padded to even, and the output is cropped to twice the input size. The load fails on a missing, unexpected or unknown legacy key, on two legacy keys with one target, on metadata that disagrees with the config, and on a shape mismatch. Only ×2 runs.
 - **Layouts**: NHWC for the CUDA F16 and BF16 path, NCHW for the CPU and F32 path. The load fixes the layout and permutes each weight once.
 
 ## Design Notes

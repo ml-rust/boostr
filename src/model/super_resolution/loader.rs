@@ -8,11 +8,13 @@ use crate::format::TorchPthSource;
 use crate::model::super_resolution::client::SrClient;
 use crate::model::super_resolution::compact::{SrVggCompact, SrVggCompactConfig};
 use crate::model::super_resolution::layout::SrExecution;
+use crate::model::super_resolution::rrdb::{
+    RrdbConfig, RrdbNet, check_esrgan_metadata, is_legacy_esrgan, legacy_esrgan_renames,
+};
 use crate::nn::{VarBuilder, VarMap};
 use numr::dtype::DType;
-use numr::ops::ShapeOps;
 use numr::runtime::Runtime;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 /// Keys listed per category in a key-set error before the count of the rest.
@@ -41,7 +43,7 @@ pub fn load_compact<R>(
 ) -> Result<SrVggCompact<R>>
 where
     R: Runtime<DType = DType>,
-    R::Client: SrClient<R> + ShapeOps<R>,
+    R::Client: SrClient<R>,
 {
     let path = path.as_ref();
     config.validate()?;
@@ -49,15 +51,101 @@ where
     let expected = config.expected_keys();
     check_key_set(path, source.root(), &expected, source.names())?;
 
-    let mut map = VarMap::<R>::from_weight_source(&mut source, &expected, str::to_string, device)
-        .map_err(|e| Error::ModelError {
-        reason: format!("{}: reading weights: {e}", path.display()),
-    })?;
+    let mut map = read_weights::<R>(path, &mut source, &expected, &HashMap::new(), device)?;
     let client = R::default_client(device);
     let mut vb = VarBuilder::new(&mut map, device);
-    SrVggCompact::from_varbuilder(&client, &mut vb, config, exec).map_err(|e| Error::ModelError {
-        reason: format!("{}: {e}", path.display()),
+    SrVggCompact::from_varbuilder(&client, &mut vb, config, exec).map_err(|e| in_file(path, e))
+}
+
+/// Load an RRDBNet x2 `.pth`, such as `RealESRGAN_x2plus.pth` or
+/// `2x_PureVision.pth`.
+///
+/// [`TorchPthSource::open`] detects the `params_ema.`, `params.` or
+/// `state_dict.` root. A state dict that holds
+/// [`crate::model::super_resolution::rrdb::LEGACY_ESRGAN_MARKER`] reads
+/// through the legacy ESRGAN key remap of
+/// [`crate::model::super_resolution::rrdb::keys`]. The tensor keys under the
+/// root, after any remap, must equal [`RrdbConfig::expected_keys`]. The
+/// `metadata.*` scalars, when present, must agree with `config`. Weights
+/// load onto `device`, cast to `exec.dtype`, and permute to `exec.layout`
+/// once.
+///
+/// # Errors
+///
+/// - The config is invalid, or its scale is not 2.
+/// - The file does not open or parse. The error names the path.
+/// - A `metadata.*` field disagrees with `config`. The error names the path
+///   and the field.
+/// - A legacy key is unknown, or two legacy keys map to one name. The error
+///   names the path and the keys.
+/// - A key is missing or unexpected. The error names the path, the root and
+///   the keys.
+/// - A weight has the wrong shape. The error names the path, the key and
+///   both shapes.
+pub fn load_rrdb<R>(
+    path: impl AsRef<Path>,
+    device: &R::Device,
+    config: &RrdbConfig,
+    exec: SrExecution,
+) -> Result<RrdbNet<R>>
+where
+    R: Runtime<DType = DType>,
+    R::Client: SrClient<R>,
+{
+    let path = path.as_ref();
+    config.validate()?;
+    let mut source = TorchPthSource::open(path)?;
+    check_esrgan_metadata(source.state_dict(), config).map_err(|e| in_file(path, e))?;
+    let expected = config.expected_keys();
+
+    let (stored, renames) = if is_legacy_esrgan(source.names()) {
+        let renames = legacy_esrgan_renames(source.names(), config.num_block)
+            .map_err(|e| in_file(path, e))?;
+        let root = format!("{} (legacy ESRGAN keys, remapped)", source.root());
+        check_key_set(path, &root, &expected, renames.values().map(String::as_str))?;
+        let mut stored: Vec<String> = renames.keys().cloned().collect();
+        stored.sort_unstable();
+        (stored, renames)
+    } else {
+        check_key_set(path, source.root(), &expected, source.names())?;
+        (expected, HashMap::new())
+    };
+
+    let mut map = read_weights::<R>(path, &mut source, &stored, &renames, device)?;
+    let client = R::default_client(device);
+    let mut vb = VarBuilder::new(&mut map, device);
+    RrdbNet::from_varbuilder(&client, &mut vb, config, exec).map_err(|e| in_file(path, e))
+}
+
+/// Read every key of `stored` from `source` into a [`VarMap`], under its
+/// name in `renames`, else under its own name.
+fn read_weights<R>(
+    path: &Path,
+    source: &mut TorchPthSource,
+    stored: &[String],
+    renames: &HashMap<String, String>,
+    device: &R::Device,
+) -> Result<VarMap<R>>
+where
+    R: Runtime<DType = DType>,
+    R::Client: SrClient<R>,
+{
+    let rename = |name: &str| {
+        renames
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    };
+    VarMap::<R>::from_weight_source(source, stored, rename, device).map_err(|e| Error::ModelError {
+        reason: format!("{}: reading weights: {e}", path.display()),
     })
+}
+
+/// `e` with the checkpoint path in front.
+fn in_file(path: &Path, e: Error) -> Error {
+    Error::ModelError {
+        reason: format!("{}: {e}", path.display()),
+    }
 }
 
 /// Fail unless `found` holds exactly the `expected` keys.

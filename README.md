@@ -200,7 +200,7 @@ cache.update(&k, &v, &slots, &client)?;
 | `silero-vad`   | Silero voice activity detection (implies `audio`)         | —                       |
 | `clap`         | CLAP audio and text towers (implies `audio`)              | —                       |
 | `spacy-tagger` | spaCy CNN part-of-speech tagger                           | —                       |
-| `super-resolution` | SRVGGNetCompact image super-resolution (`realesr-general-x4v3`) | —           |
+| `super-resolution` | Image super-resolution: SRVGGNetCompact (`realesr-general-x4v3`), RRDBNet ×2 (`RealESRGAN_x2plus`, `2x_PureVision`) | — |
 | `vocab-*`      | One bundled splintr vocabulary each (see [docs/capabilities.md](docs/capabilities.md#bundled-tokenizer-vocabularies)) | splintr |
 | `vocabs`       | Every bundled splintr vocabulary                          | splintr                 |
 

@@ -21,7 +21,10 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `SrVggCompact`: Real-ESRGAN's SRVGGNetCompact with PReLU, the `realesr-general-x4v3` network. `forward_raw` returns the ×4 image. `forward_resized` adds an antialiased bicubic resize in F32, casting half outputs to F32 and back.
   - `load_compact` reads a `.pth` through `format::TorchPthSource`. It fails on a missing key, an unexpected key or a shape mismatch, and names the path and the keys.
   - `SrExecution` fixes dtype, layout and conv accumulation at load. NHWC is the CUDA F16 and BF16 path. NCHW is the CPU and F32 path. The load permutes each OIHW weight to OHWI once for NHWC.
-  - `SrConv` is one stride-1 conv with bias and an optional PReLU slope, with `forward` and `forward_into` over `conv2d_fused`. `SrClient` bounds the client of every network in the module.
+  - `RrdbNet`: BasicSR's RRDBNet at ×2, the network of `RealESRGAN_x2plus` and `2x_PureVision`. `forward` replicate-pads an odd height or width, runs the pixel-unshuffle head, the RRDB body, two nearest ×2 upsamples and the tail, then crops to twice the input size. `RrdbConfig::realesrgan_x2plus` gives the 23-block shape. Any scale other than 2 is refused with an error that names scale 2.
+  - The dense blocks run without a concat. Each `conv1..conv4` writes its channel slice of one feature buffer and reads the slices before it. `conv5` adds the scaled block residual in its epilogue. The body ping-pongs between two buffers allocated once per forward.
+  - `load_rrdb` reads a `.pth` with modern keys or with the legacy ESRGAN `model.*` keys, detected by `model.0.weight`. The legacy remap fails on an unknown key or on two keys that map to one name. `metadata.*` scalars, when present, must match the config. A missing key, an unexpected key or a shape mismatch is an error that names the path and the keys.
+  - `SrConv` is one stride-1 conv with bias and an optional PReLU slope, with `forward` and `forward_into` over `conv2d_fused`. `SrClient` bounds the client of every network in the module. It includes `ScalarOps` and `ShapeOps`.
 - **F16 and BF16 `.pth` tensors** — `torch.HalfStorage` and `torch.BFloat16Storage` load as `DType::F16` and `DType::BF16` with the `f16` feature. Without it the error names the key and the `f16` feature.
 
 ### Fixed

@@ -21,6 +21,8 @@ pub mod qwen35_cuda;
 pub mod qwen35_graph;
 pub mod qwen35_lanes;
 pub mod qwen35_tiny;
+#[cfg(feature = "super-resolution")]
+pub mod super_resolution;
 
 pub use blocks::*;
 pub use fixtures::*;

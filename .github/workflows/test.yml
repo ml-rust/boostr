@@ -42,7 +42,7 @@ jobs:
       - name: Build docs (docs.rs feature set)
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --no-deps --features cpu,whisper,kokoro,neucodec,voxcpm,silero-vad,vits,clap,spacy-tagger,f16,fp8,distributed
+        run: cargo doc --no-deps --features cpu,whisper,kokoro,neucodec,voxcpm,silero-vad,vits,clap,spacy-tagger,super-resolution,f16,fp8,distributed
 
       - name: Run doctests
         run: cargo test --doc --features f16
@@ -55,7 +55,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     env:
-      GATES: whisper,kokoro,neucodec,voxcpm,silero-vad,vits,clap,spacy-tagger,fp8,distributed
+      GATES: whisper,kokoro,neucodec,voxcpm,silero-vad,vits,clap,spacy-tagger,super-resolution,fp8,distributed
     steps:
       - uses: actions/checkout@v7
 

@@ -128,6 +128,13 @@ Audio support is gated per model. `audio` provides the tensor-level signal ops: 
 
 boostr holds tensor code only. Audio decoding, resampling, grapheme-to-phoneme, voices, and the TTS, ASR, and VAD pipelines live in the [voxr](https://github.com/ml-rust/voxr) crate.
 
+## Image super-resolution
+
+The `super-resolution` feature gates image networks on numr's fused conv. It implies no other gate. Half precision also needs `f16`.
+
+- **SRVGGNetCompact**: the network of Real-ESRGAN's `realesr-general-x4v3`, loaded from its `.pth`. The load fails on a missing key, an unexpected key or a shape mismatch.
+- **Layouts**: NHWC for the CUDA F16 and BF16 path, NCHW for the CPU and F32 path. The load fixes the layout and permutes each weight once.
+
 ## Design Notes
 
 - **Fused ops**: fused QKV projection, a fused distributed optimizer (`distributed/training/fused_optimizer.rs`), and fused CUDA attention kernels.

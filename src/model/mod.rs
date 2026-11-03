@@ -15,6 +15,8 @@ mod reexports;
 pub mod registry;
 pub mod registry_inference;
 pub mod speech_lm;
+#[cfg(feature = "super-resolution")]
+pub mod super_resolution;
 pub mod text;
 pub mod traits;
 pub mod vision;

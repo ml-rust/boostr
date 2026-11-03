@@ -17,6 +17,11 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **`format::TorchPthSource`** — a `.pt` / `.pth` state dict as a `WeightSource` for any model, with no feature gate. `open` detects the root prefix: `params_ema.`, then `params.`, then `state_dict.`, else the root. `open_with_root` and `from_state_dict` take an explicit root. `root`, `names`, `stored_key` and `state_dict` expose the prefix, the names under it and keys outside it such as `metadata.in_nc`. `torch_pt::detect_root` and `torch_pt::ROOT_PREFIXES` expose the rule.
+- **`super-resolution` feature** — `model::super_resolution` holds image super-resolution networks on numr's fused conv. The gate implies no other gate. Half precision also needs `f16`.
+  - `SrVggCompact`: Real-ESRGAN's SRVGGNetCompact with PReLU, the `realesr-general-x4v3` network. `forward_raw` returns the ×4 image. `forward_resized` adds an antialiased bicubic resize in F32, casting half outputs to F32 and back.
+  - `load_compact` reads a `.pth` through `format::TorchPthSource`. It fails on a missing key, an unexpected key or a shape mismatch, and names the path and the keys.
+  - `SrExecution` fixes dtype, layout and conv accumulation at load. NHWC is the CUDA F16 and BF16 path. NCHW is the CPU and F32 path. The load permutes each OIHW weight to OHWI once for NHWC.
+  - `SrConv` is one stride-1 conv with bias and an optional PReLU slope, with `forward` and `forward_into` over `conv2d_fused`. `SrClient` bounds the client of every network in the module.
 - **F16 and BF16 `.pth` tensors** — `torch.HalfStorage` and `torch.BFloat16Storage` load as `DType::F16` and `DType::BF16` with the `f16` feature. Without it the error names the key and the `f16` feature.
 
 ### Fixed

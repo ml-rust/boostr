@@ -130,6 +130,12 @@ clap = ["audio"]
 # voxr.
 spacy-tagger = []
 
+# Image super-resolution networks (`model::super_resolution`): the
+# SRVGGNetCompact network of Real-ESRGAN's `realesr-general-x4v3` and its
+# fused-conv building blocks. Image tensors only. Implies no other gate. Half
+# precision needs `f16` as well.
+super-resolution = []
+
 # Backend features (passed through to numr)
 cpu = []
 cuda = ["numr/cuda", "dep:cudarc"]
@@ -190,6 +196,7 @@ features = [
   "vits",
   "clap",
   "spacy-tagger",
+  "super-resolution",
   "f16",
   "fp8",
   "distributed",
@@ -257,6 +264,14 @@ required-features = ["vits"]
 [[test]]
 name = "vits_synthesis_cuda"
 required-features = ["vits"]
+
+[[test]]
+name = "super_resolution_compact_parity"
+required-features = ["super-resolution"]
+
+[[test]]
+name = "super_resolution_compact_reference"
+required-features = ["super-resolution"]
 
 [[test]]
 name = "swarm_pipeline"

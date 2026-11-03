@@ -200,6 +200,7 @@ cache.update(&k, &v, &slots, &client)?;
 | `silero-vad`   | Silero voice activity detection (implies `audio`)         | —                       |
 | `clap`         | CLAP audio and text towers (implies `audio`)              | —                       |
 | `spacy-tagger` | spaCy CNN part-of-speech tagger                           | —                       |
+| `super-resolution` | SRVGGNetCompact image super-resolution (`realesr-general-x4v3`) | —           |
 | `vocab-*`      | One bundled splintr vocabulary each (see [docs/capabilities.md](docs/capabilities.md#bundled-tokenizer-vocabularies)) | splintr |
 | `vocabs`       | Every bundled splintr vocabulary                          | splintr                 |
 
@@ -210,7 +211,7 @@ cache.update(&k, &v, &slots, &client)?;
 cargo test
 
 # Every model gate on the CPU backend
-cargo test --features whisper,kokoro,neucodec,voxcpm,silero-vad,vits,clap,spacy-tagger,f16
+cargo test --features whisper,kokoro,neucodec,voxcpm,silero-vad,vits,clap,spacy-tagger,super-resolution,f16
 
 # CUDA tests
 cargo test --features cuda,f16

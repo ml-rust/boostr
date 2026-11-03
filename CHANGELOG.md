@@ -31,6 +31,10 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`.pth` integer fields** — a negative size, stride, offset or element count in the pickle is an error. Before, it wrapped to a huge `usize`.
 
+### Changed
+
+- **Dependencies** — boostr requires numr 0.15.
+
 ---
 
 ## [0.10.0] - 2026-11-01

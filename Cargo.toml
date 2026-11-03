@@ -31,7 +31,7 @@ exclude = [
 bench = false
 
 [dependencies]
-numr = "0.14"
+numr = "0.15"
 half = { version = "2", features = ["bytemuck"] }
 thiserror = "2.0"
 serde = { version = "1", features = ["derive"] }

@@ -5,12 +5,13 @@ use crate::nn::Activation;
 use numr::dtype::DType;
 use serde::{Deserialize, Serialize};
 
-/// Maximum number of packed tokens per varlen forward pass.
+/// Maximum number of tokens per embedding forward pass.
 ///
-/// Bounds peak memory for `embed_texts_varlen` by splitting large document
-/// batches into sub-batches whose total token count does not exceed this
-/// value.  A single document that is longer than this limit is still
-/// processed in one forward (documents cannot be split).
+/// Bounds peak memory for `embed_texts` by splitting large document batches
+/// into sub-batches whose token count does not exceed this value. The varlen
+/// path counts packed tokens; the padded path counts rows times padded length.
+/// A single document that is longer than this limit is still processed in one
+/// forward (documents cannot be split).
 ///
 /// Sized for an encoder with hidden_size ≤ 768 and up to 12 layers.
 /// Reduce to 8 192 on smaller GPUs or larger models.
@@ -182,7 +183,7 @@ pub struct EncoderConfig {
     #[serde(default)]
     pub embed_scale: bool,
 
-    /// Maximum number of packed tokens per varlen forward pass.
+    /// Maximum number of tokens per embedding forward pass, varlen or padded.
     ///
     /// `None` resolves to [`DEFAULT_MAX_TOKENS_PER_FORWARD`] (16 384).
     #[serde(default)]

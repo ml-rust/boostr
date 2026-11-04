@@ -339,7 +339,7 @@ mod wgpu {
         check_against_golden(&model, &client, &device, WGPU_F32_TOL, "wgpu f32 nchw");
     }
 
-    /// The same goldens in F32 NHWC, the layout WebGPU runs fastest.
+    /// The same goldens in F32 NHWC, which runs the `vec4` conv kernel.
     #[test]
     fn wgpu_f32_nhwc_matches_torch() {
         let Some((device, client)) = wgpu_setup() else {

@@ -337,7 +337,7 @@ mod wgpu {
         }
     }
 
-    /// The same goldens in F32 NHWC, the layout WebGPU runs fastest. The dense
+    /// The same goldens in F32 NHWC, which runs the `vec4` conv kernel. The dense
     /// blocks write strided channel slices here.
     #[test]
     fn wgpu_f32_nhwc_both_key_sets_match_torch() {

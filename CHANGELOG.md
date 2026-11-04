@@ -9,6 +9,12 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.11.0] - 2026-11-04
+
+Adds image super-resolution networks, a model-agnostic `.pth` source, and a directory loader over both networks.
+
 ### Breaking
 
 - **`WeightNormPthSource`** — the VoxCPM2 `weight_norm`-folding `.pth` source in `model::audio::voxcpm::loader::support` is renamed from `TorchPthSource`. It reads the same keys and folds the same pairs. `format::TorchPthSource` is now the model-agnostic source.
@@ -24,6 +30,8 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `RrdbNet`: BasicSR's RRDBNet at ×2, the network of `RealESRGAN_x2plus` and `2x_PureVision`. `forward` replicate-pads an odd height or width, runs the pixel-unshuffle head, the RRDB body, two nearest ×2 upsamples and the tail, then crops to twice the input size. `RrdbConfig::realesrgan_x2plus` gives the 23-block shape. Any scale other than 2 is refused with an error that names scale 2.
   - The dense blocks run without a concat. Each `conv1..conv4` writes its channel slice of one feature buffer and reads the slices before it. `conv5` adds the scaled block residual in its epilogue. The body ping-pongs between two buffers allocated once per forward.
   - `load_rrdb` reads a `.pth` with modern keys or with the legacy ESRGAN `model.*` keys, detected by `model.0.weight`. The legacy remap fails on an unknown key or on two keys that map to one name. `metadata.*` scalars, when present, must match the config. A missing key, an unexpected key or a shape mismatch is an error that names the path and the keys.
+  - `load_sr_dir` loads the one `.pth` in a directory as an `SrModel`. No `.pth` or several is an error that names the directory and the files found. The key set picks SRVGGNetCompact, RRDBNet with current keys, or RRDBNet with legacy `model.N` keys, and an unknown key set is an error that names sample keys. The config comes from tensor shapes in the pickle metadata, with no weights read. Compact takes `num_out_ch` equal to `num_in_ch`. RRDBNet takes scale 2.
+  - `SrModel` is `Compact(SrVggCompact)` or `Rrdb(RrdbNet)`. `native_scale` returns 4 for the `realesr-general-x4v3` network and 2 for RRDBNet. `forward_native` runs `forward_raw` for compact and `forward` for RRDBNet.
   - `SrConv` is one stride-1 conv with bias and an optional PReLU slope, with `forward` and `forward_into` over `conv2d_fused`. `SrClient` bounds the client of every network in the module. It includes `ScalarOps` and `ShapeOps`.
 - **F16 and BF16 `.pth` tensors** — `torch.HalfStorage` and `torch.BFloat16Storage` load as `DType::F16` and `DType::BF16` with the `f16` feature. Without it the error names the key and the `f16` feature.
 

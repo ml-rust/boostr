@@ -15,9 +15,9 @@ use numr::tensor::Tensor;
 /// - [`ConvLayout::Nhwc`] is the CUDA F16 and BF16 path. The native CUDA
 ///   kernel reads NHWC input with OHWI weights. The load permutes each
 ///   weight once, so no forward call relayouts a weight.
-/// - [`ConvLayout::Nchw`] is the CPU and F32 path. The weights stay in
-///   PyTorch's OIHW order, and a frame in PyTorch's `[N, C, H, W]` order
-///   needs no permute copy.
+/// - [`ConvLayout::Nchw`] is the CPU and F32 path, WebGPU included. The
+///   weights stay in PyTorch's OIHW order, and a frame in PyTorch's
+///   `[N, C, H, W]` order needs no permute copy.
 /// - Both layouts compute the same values within float tolerance. Only the
 ///   dimension order of input, output and weights differs.
 ///

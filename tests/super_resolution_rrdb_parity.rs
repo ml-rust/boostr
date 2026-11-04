@@ -336,4 +336,24 @@ mod wgpu {
             );
         }
     }
+
+    /// The same goldens in F32 NHWC, the layout WebGPU runs fastest. The dense
+    /// blocks write strided channel slices here.
+    #[test]
+    fn wgpu_f32_nhwc_both_key_sets_match_torch() {
+        let Some((device, _)) = wgpu_setup() else {
+            return;
+        };
+        for file in WEIGHTS {
+            let exec = SrExecution::new(DType::F32, ConvLayout::Nhwc);
+            let model = load::<WgpuRuntime>(file, &device, &config(), exec)
+                .unwrap_or_else(|e| panic!("load_rrdb {file} on WebGPU: {e}"));
+            check_against_golden(
+                &model,
+                &device,
+                WGPU_F32_TOL,
+                &format!("wgpu f32 nhwc {file}"),
+            );
+        }
+    }
 }

@@ -10,7 +10,8 @@ use numr::runtime::{Runtime, RuntimeClient};
 /// exists to keep the network signatures short.
 ///
 /// F16 and BF16 are unavailable on WebGPU, because numr's WebGPU backend
-/// computes in F32 only. Load with `SrExecution::new(DType::F32, ..)` there.
+/// computes in F32 only. Load with `SrExecution::new(DType::F32, ConvLayout::Nchw)`
+/// there. NHWC also runs there, and it ran slower on the GPU measured.
 pub trait SrClient<R: Runtime>:
     RuntimeClient<R>
     + BinaryOps<R>

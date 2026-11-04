@@ -338,4 +338,20 @@ mod wgpu {
         .expect("load_compact weights.pth on WebGPU");
         check_against_golden(&model, &client, &device, WGPU_F32_TOL, "wgpu f32 nchw");
     }
+
+    /// The same goldens in F32 NHWC, the layout WebGPU runs fastest.
+    #[test]
+    fn wgpu_f32_nhwc_matches_torch() {
+        let Some((device, client)) = wgpu_setup() else {
+            return;
+        };
+        let model = load_compact::<WgpuRuntime>(
+            fixtures_dir(FIXTURE).join("weights.pth"),
+            &device,
+            &config(),
+            SrExecution::new(DType::F32, ConvLayout::Nhwc),
+        )
+        .expect("load_compact weights.pth on WebGPU");
+        check_against_golden(&model, &client, &device, WGPU_F32_TOL, "wgpu f32 nhwc");
+    }
 }

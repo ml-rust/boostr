@@ -9,12 +9,14 @@
 //! Run with:
 //!   `cargo test --features super-resolution --test super_resolution_compact_parity`
 //!   `cargo test --features cuda,f16,super-resolution --test super_resolution_compact_parity`
+//!   `cargo test --features wgpu,super-resolution --test super_resolution_compact_parity`
 //!
 //! What this pins: the `body.N` key schedule, per-channel PReLU slopes, the
 //! OIHW → OHWI permute, pixel-shuffle channel order, the nearest-upsampled
 //! residual, and the antialiased bicubic resize to 2×. Both the
 //! `weights.safetensors` + `from_varbuilder` path and the `.pth` +
-//! `load_compact` path load the same weights.
+//! `load_compact` path load the same weights. The WebGPU case runs F32 NCHW
+//! only, because numr's WebGPU backend computes in F32.
 
 use boostr::model::super_resolution::{
     SrExecution, SrVggCompact, SrVggCompactConfig, load_compact,
@@ -310,5 +312,30 @@ mod cuda {
     fn cuda_bf16_nhwc_matches_torch() {
         let (device, client, model) = load(SrExecution::new(DType::BF16, ConvLayout::Nhwc));
         check_against_golden(&model, &client, &device, BF16_TOL, "cuda bf16 nhwc");
+    }
+}
+
+#[cfg(feature = "wgpu")]
+mod wgpu {
+    use super::*;
+    use crate::common::super_resolution::{WGPU_F32_TOL, wgpu_setup};
+    use numr::runtime::wgpu::WgpuRuntime;
+
+    /// The `.pth` weights on WebGPU in F32 NCHW match the torch goldens
+    /// that CPU uses, for `forward_raw` and the antialiased bicubic
+    /// `forward_resized`, within [`WGPU_F32_TOL`].
+    #[test]
+    fn wgpu_f32_nchw_matches_torch() {
+        let Some((device, client)) = wgpu_setup() else {
+            return;
+        };
+        let model = load_compact::<WgpuRuntime>(
+            fixtures_dir(FIXTURE).join("weights.pth"),
+            &device,
+            &config(),
+            SrExecution::new(DType::F32, ConvLayout::Nchw),
+        )
+        .expect("load_compact weights.pth on WebGPU");
+        check_against_golden(&model, &client, &device, WGPU_F32_TOL, "wgpu f32 nchw");
     }
 }

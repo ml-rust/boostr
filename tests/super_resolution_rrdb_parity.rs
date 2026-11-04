@@ -9,12 +9,16 @@
 //! Run with:
 //!   `cargo test --features super-resolution --test super_resolution_rrdb_parity`
 //!   `cargo test --features cuda,f16,super-resolution --test super_resolution_rrdb_parity`
+//!   `cargo test --features wgpu,super-resolution --test super_resolution_rrdb_parity`
 //!
 //! What this pins: the replicate pad and crop of an odd input (13×11), the
 //! pixel-unshuffle head, the dense-block channel slices, both residual
 //! scales, the trunk residual, the two nearest upsamples, the OIHW → OHWI
 //! permute, and the legacy ESRGAN key remap with `metadata.*`. The modern
 //! `weights.pth` and the legacy `weights_legacy.pth` hold the same weights.
+//! The WebGPU case runs F32 NCHW only, because numr's WebGPU backend
+//! computes in F32. It also covers the dense blocks' channel-slice views,
+//! which two feature buffers swap between.
 
 use boostr::model::super_resolution::{RrdbConfig, RrdbNet, SrClient, SrExecution, load_rrdb};
 use numr::dtype::DType;
@@ -302,5 +306,34 @@ mod cuda {
             SrExecution::new(DType::BF16, ConvLayout::Nhwc),
         );
         check_against_golden(&model, &device, BF16_TOL, "cuda bf16 nhwc");
+    }
+}
+
+#[cfg(feature = "wgpu")]
+mod wgpu {
+    use super::*;
+    use crate::common::super_resolution::{WGPU_F32_TOL, wgpu_setup};
+    use numr::runtime::wgpu::WgpuRuntime;
+
+    /// Both key sets on WebGPU in F32 NCHW match the torch goldens that CPU
+    /// uses, within [`WGPU_F32_TOL`]. The 13×11 case runs the replicate pad
+    /// and the crop. The dense blocks write conv outputs into channel
+    /// slices of the ping-pong buffers.
+    #[test]
+    fn wgpu_f32_nchw_both_key_sets_match_torch() {
+        let Some((device, _)) = wgpu_setup() else {
+            return;
+        };
+        for file in WEIGHTS {
+            let exec = SrExecution::new(DType::F32, ConvLayout::Nchw);
+            let model = load::<WgpuRuntime>(file, &device, &config(), exec)
+                .unwrap_or_else(|e| panic!("load_rrdb {file} on WebGPU: {e}"));
+            check_against_golden(
+                &model,
+                &device,
+                WGPU_F32_TOL,
+                &format!("wgpu f32 nchw {file}"),
+            );
+        }
     }
 }

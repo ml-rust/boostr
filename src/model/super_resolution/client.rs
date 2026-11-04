@@ -5,9 +5,12 @@ use numr::runtime::{Runtime, RuntimeClient};
 
 /// The numr op traits a super-resolution forward pass and load use.
 ///
-/// `CpuClient` and `CudaClient` implement every one of them. The blanket
-/// impl below makes any such client an `SrClient`. The trait exists to keep
-/// the network signatures short.
+/// `CpuClient`, `CudaClient` and `WgpuClient` implement every one of them.
+/// The blanket impl below makes any such client an `SrClient`. The trait
+/// exists to keep the network signatures short.
+///
+/// F16 and BF16 are unavailable on WebGPU, because numr's WebGPU backend
+/// computes in F32 only. Load with `SrExecution::new(DType::F32, ..)` there.
 pub trait SrClient<R: Runtime>:
     RuntimeClient<R>
     + BinaryOps<R>

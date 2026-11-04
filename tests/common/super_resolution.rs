@@ -197,3 +197,27 @@ pub fn assert_within(label: &str, got: &[f32], want: &[f32], bounds: &Bounds) {
         bounds.max_u8_diff
     );
 }
+
+/// F32 bound against the torch CPU golden on WebGPU: the same arithmetic in
+/// the GPU's summation order, with no fused-multiply-add guarantee.
+///
+/// A layout, channel-order or view-offset error moves outputs by 1e-2 or
+/// more, so this bound still catches it.
+#[cfg(feature = "wgpu")]
+pub const WGPU_F32_TOL: f32 = 1e-4;
+
+/// The WebGPU device and client, or `None` after one skip line.
+#[cfg(feature = "wgpu")]
+pub fn wgpu_setup() -> Option<(
+    numr::runtime::wgpu::WgpuDevice,
+    numr::runtime::wgpu::WgpuClient,
+)> {
+    let device = numr::runtime::wgpu::WgpuDevice::new(0);
+    match numr::runtime::wgpu::WgpuClient::new(device.clone()) {
+        Ok(client) => Some((device, client)),
+        Err(e) => {
+            println!("skip: no WebGPU adapter: {e}");
+            None
+        }
+    }
+}

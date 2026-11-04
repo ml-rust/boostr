@@ -185,8 +185,8 @@ impl<R: Runtime<DType = DType>> SrConv<R> {
     }
 
     fn forward_error(&self, x: &Tensor<R>, e: numr::error::Error) -> Error {
-        Error::ModelError {
-            reason: format!(
+        Error::model_op(
+            format!(
                 "conv '{}' ({} -> {} channels, {:?}) on input {:?} {:?}: {e}",
                 self.name,
                 self.in_channels,
@@ -195,7 +195,8 @@ impl<R: Runtime<DType = DType>> SrConv<R> {
                 x.shape(),
                 x.dtype()
             ),
-        }
+            e,
+        )
     }
 }
 

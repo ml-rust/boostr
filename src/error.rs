@@ -7,6 +7,27 @@ use crate::quant::contract::ActivationContractMismatchDetail;
 /// boostr result type
 pub type Result<T> = std::result::Result<T, Error>;
 
+impl Error {
+    /// Returns `true` when numr reports an allocation that fails for lack of
+    /// memory. A caller can then name the next action, such as a smaller input.
+    pub fn is_out_of_memory(&self) -> bool {
+        matches!(self, Self::Numr(source) if source.is_out_of_memory())
+    }
+
+    /// The error of a failed numr call inside a model.
+    ///
+    /// `reason` names the op and its input. An out-of-memory `source` stays
+    /// [`Error::Numr`], so [`Error::is_out_of_memory`] still finds it.
+    /// Any other `source` becomes [`Error::ModelError`] with `reason`.
+    pub fn model_op(reason: String, source: numr::error::Error) -> Self {
+        if source.is_out_of_memory() {
+            Self::Numr(source)
+        } else {
+            Self::ModelError { reason }
+        }
+    }
+}
+
 /// boostr errors
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -119,4 +140,29 @@ pub enum Error {
     /// IO error
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_op_keeps_out_of_memory_visible() {
+        let source = numr::error::Error::AllocFailed {
+            shape: vec![1, 2],
+            dtype: "f16".to_string(),
+            device: "cuda:0".to_string(),
+            source: Box::new(numr::error::Error::OutOfMemory { size: 4 }),
+        };
+        let error = Error::model_op("conv 'body.0'".to_string(), source);
+        assert!(error.is_out_of_memory(), "{error}");
+    }
+
+    #[test]
+    fn model_op_keeps_the_reason_for_other_errors() {
+        let source = numr::error::Error::Backend("capture".to_string());
+        let error = Error::model_op("conv 'body.0'".to_string(), source);
+        assert!(!error.is_out_of_memory(), "{error}");
+        assert!(error.to_string().contains("conv 'body.0'"), "{error}");
+    }
 }

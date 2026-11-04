@@ -96,13 +96,14 @@ impl<R: Runtime<DType = DType>> RrdbBlock<R> {
     }
 
     fn op_error(&self, op: &str, x: &Tensor<R>, e: numr::error::Error) -> Error {
-        Error::ModelError {
-            reason: format!(
+        Error::model_op(
+            format!(
                 "RRDB '{}' {op} on input {:?} {:?}: {e}",
                 self.name,
                 x.shape(),
                 x.dtype()
             ),
-        }
+            e,
+        )
     }
 }

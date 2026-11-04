@@ -184,12 +184,15 @@ impl<R: Runtime<DType = DType>> SrVggCompact<R> {
         let features = self
             .last
             .forward(client, &buffers[current], ConvActivation::None, None)?;
-        let image_error = |op: &str, e: numr::error::Error| Error::ModelError {
-            reason: format!(
-                "SRVGGNetCompact {op} on input {:?} {:?}: {e}",
-                x.shape(),
-                x.dtype()
-            ),
+        let image_error = |op: &str, e: numr::error::Error| {
+            Error::model_op(
+                format!(
+                    "SRVGGNetCompact {op} on input {:?} {:?}: {e}",
+                    x.shape(),
+                    x.dtype()
+                ),
+                e,
+            )
         };
         let shuffled = client
             .pixel_shuffle(&features, self.config.upscale, layout)
@@ -217,11 +220,14 @@ impl<R: Runtime<DType = DType>> SrVggCompact<R> {
     ) -> Result<Tensor<R>> {
         let raw = self.forward_raw(client, x)?;
         let config = ResizeConfig::new(size, ResizeFilter::Bicubic).with_antialias(true);
-        let resize_error = |e: numr::error::Error| Error::ModelError {
-            reason: format!(
-                "SRVGGNetCompact bicubic resize of {:?} to {size:?}: {e}",
-                raw.shape()
-            ),
+        let resize_error = |e: numr::error::Error| {
+            Error::model_op(
+                format!(
+                    "SRVGGNetCompact bicubic resize of {:?} to {size:?}: {e}",
+                    raw.shape()
+                ),
+                e,
+            )
         };
         if self.exec.dtype == DType::F32 {
             return client

@@ -112,8 +112,11 @@ impl<R: Runtime<DType = DType>> RrdbNet<R> {
     pub fn forward<C: SrClient<R>>(&self, client: &C, x: &Tensor<R>) -> Result<Tensor<R>> {
         let (n, _, h, w) = self.check_input(x)?;
         let layout = self.exec.layout;
-        let image_error = |op: &str, e: numr::error::Error| Error::ModelError {
-            reason: format!("RRDBNet {op} on input {:?} {:?}: {e}", x.shape(), x.dtype()),
+        let image_error = |op: &str, e: numr::error::Error| {
+            Error::model_op(
+                format!("RRDBNet {op} on input {:?} {:?}: {e}", x.shape(), x.dtype()),
+                e,
+            )
         };
 
         let (pad_h, pad_w) = (h % RRDB_UNSHUFFLE_FACTOR, w % RRDB_UNSHUFFLE_FACTOR);

@@ -135,6 +135,7 @@ fn assert_native_equals_direct(dir: &Path, scale: usize, is_compact: bool) {
             .unwrap_or_else(|e| panic!("load_sr_dir {}: {e}", dir.display()));
         assert_eq!(matches!(model, SrModel::Compact(_)), is_compact);
         assert_eq!(model.native_scale(), scale);
+        assert_eq!(model.execution(), &exec);
         let input = sr_input(&client, &image(&device, 13, 11), &exec);
         let native = model
             .forward_native(&client, &input)

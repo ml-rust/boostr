@@ -3,6 +3,7 @@
 use crate::error::Result;
 use crate::model::super_resolution::client::SrClient;
 use crate::model::super_resolution::compact::SrVggCompact;
+use crate::model::super_resolution::layout::SrExecution;
 use crate::model::super_resolution::rrdb::RrdbNet;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
@@ -25,6 +26,15 @@ impl<R: Runtime<DType = DType>> SrModel<R> {
         match self {
             Self::Compact(net) => net.config().upscale,
             Self::Rrdb(net) => net.config().scale,
+        }
+    }
+
+    /// The dtype, layout and accumulation the model loaded with. Every input
+    /// of [`SrModel::forward_native`] follows them.
+    pub fn execution(&self) -> &SrExecution {
+        match self {
+            Self::Compact(net) => net.execution(),
+            Self::Rrdb(net) => net.execution(),
         }
     }
 

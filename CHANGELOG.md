@@ -9,6 +9,11 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`SrModel::execution`** returns the dtype, layout and accumulation a loaded super-resolution model runs with.
+- **`Error::is_out_of_memory`** and **`Error::model_op`**. A super-resolution op that runs out of memory now stays `Error::Numr`, so a caller can name the next action without reading the message.
+
 ---
 
 ## [0.11.0] - 2026-11-04

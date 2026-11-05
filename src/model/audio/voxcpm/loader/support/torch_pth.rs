@@ -58,7 +58,7 @@ pub struct WeightNormPthSource {
 impl WeightNormPthSource {
     /// Open `path` and check every `weight_norm` pair is complete.
     ///
-    /// The root is [`STATE_DICT_ROOT`] when some key starts with it, else
+    /// The root is `STATE_DICT_ROOT` when some key starts with it, else
     /// empty.
     ///
     /// The completeness check runs here, over the whole key set, rather than

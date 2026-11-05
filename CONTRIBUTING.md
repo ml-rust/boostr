@@ -4,14 +4,59 @@ Thanks for contributing to [boostr](https://crates.io/crates/boostr). This guide
 
 ## Before you start
 
-- Rust 1.95 or newer (edition 2024).
-- For CUDA work: CUDA 12.8+ or 13.x with `nvcc` on `PATH`.
-- For WebGPU work: platform GPU drivers (Vulkan, Metal, or DX12).
-- A clean working tree before you open a pull request.
+| Need | For |
+| --- | --- |
+| Rust 1.95 or newer (edition 2024) | Every build |
+| CUDA toolkit 12.8 or newer, `nvcc` on `PATH` | `--features cuda` |
+| Vulkan, Metal, or DX12 driver | `--features wgpu` tests |
 
-Useful contributions:
+## Set up
 
-- **New ML primitives**: attention variants, position encodings, quantization formats, model architectures, or inference and training machinery.
+Clone numr, splintr, regexr, and nexar beside boostr, then copy the local config:
+
+```bash
+cp .cargo/config.toml.example .cargo/config.toml
+```
+
+- Sibling checkouts: without this file, cargo resolves them from crates.io, and the build fails on APIs the published versions lack.
+- Models: set `BOOSTR_MODELS_DIR` in that file to your checkpoint directory.
+- Skipped tests: a test that needs a real model skips when the variable is unset. Such a run reports success without testing the model.
+
+## Build and test
+
+Run these from the repository root before you open a pull request. They match the commands in `.github/workflows/test.yml`.
+
+```bash
+cargo fmt --all --check
+cargo clippy --all-targets --features f16 -- -D warnings
+cargo clippy --all-targets --features whisper,kokoro,neucodec,voxcpm,silero-vad,vits,clap,spacy-tagger,super-resolution,fp8,distributed -- -D warnings
+cargo test
+cargo test --features f16
+cargo test backend_parity --features f16
+cargo test --doc --features f16
+```
+
+CI has no GPU. When you touch a GPU backend, also run:
+
+```bash
+cargo clippy --all-targets --features cuda -- -D warnings
+cargo clippy --all-targets --features wgpu -- -D warnings
+cargo test --features cuda
+cargo test --features wgpu
+```
+
+Do not run `cargo test --all-features`. It enables `cuda` and `nccl`, which need a CUDA toolkit. CI does not run it.
+
+CI also runs:
+
+- `cargo doc --no-deps` with `RUSTDOCFLAGS=-D warnings` and the docs.rs feature set listed in `test.yml`.
+- `cargo test` and `cargo test --features f16` on Linux, macOS, and Windows.
+- `cargo check --all-targets` and clippy for the model gates on Linux and Windows.
+- `cargo check` for `--no-default-features --features cpu`, `f16`, and `wgpu,f16`, and a test compile for `cpu` and `wgpu,f16`.
+
+## Useful contributions
+
+- New ML primitives: attention variants, position encodings, quantization formats, model architectures, or inference and training machinery.
 - Bug fixes and numerical-accuracy improvements.
 - Backend coverage (CPU SIMD, CUDA PTX, WebGPU WGSL) for ops that run on some backends only.
 
@@ -58,7 +103,7 @@ impl AttentionOps<CpuRuntime> for numr::runtime::cpu::CpuClient {
 }
 ```
 
-boostr never reimplements tensors, storage, or the runtime. It never wraps numr runtimes, such as a `BoostrCpuRuntime`. It never defines its own `DType` for standard types. Run `rg "fn softmax" ../numr/src/` before you write an op. If numr has it, use it.
+boostr never reimplements tensors, storage, or the runtime. It never wraps numr runtimes, such as a `BoostrCpuRuntime`. It never defines its own `DType` for standard types. Search numr before you write an op, for example `rg "fn softmax" ../numr/src/` in a sibling checkout. If numr has it, use it.
 
 ### Two kinds of ops
 
@@ -113,46 +158,20 @@ Keep state in `Tensor<R>`. Keep loops on the device.
 
 Prefer many small, focused files over few large ones.
 
-## Build
-
-```bash
-cargo build --release                  # CPU (default)
-cargo build --release --features cuda  # CUDA (requires CUDA 12.8+ or 13.x)
-cargo build --release --features wgpu  # WebGPU
-```
-
 ## Testing
 
 - Put unit tests in the same file as the code, in `#[cfg(test)] mod tests`. Put public-API behavior tests under `tests/`.
 - For composite ops, assert numerical correctness against a reference result. Check that a fused kernel matches its `impl_generic` output, not only that it returns `Ok`.
 - A backend-specific test skips gracefully when no device is available.
 
-```bash
-cargo test                             # CPU
-cargo test --features cuda             # CUDA
-cargo test --features wgpu             # WebGPU
-cargo test --all-features
-```
-
-## Quality checks
-
-Run these before you submit. CI runs clippy with `-D warnings`, so treat a warning as an error.
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-```
-
-If you touch GPU backends, also run clippy with `--features cuda` and `--features wgpu`.
-
 ## Pull requests
 
+- Start from a clean working tree.
 - Keep each pull request focused and scoped.
 - Keep the module structure, domain subdirectories, and `impl_generic` pattern.
 - Include tests for behavioral changes. Check parity across backends, and check fused kernels against `impl_generic`.
 - Update docs when public APIs or features change.
-- **No `.unwrap()` or `.expect()` in library code.** Return a typed error with context.
+- No `.unwrap()` or `.expect()` in library code. Return a typed error with context.
 - Do not add reimplemented numr ops, runtime wrappers, GPU↔CPU transfers in hot paths, or vendor libraries (cuBLAS, cuDNN, MKL).
 
 ## Commit messages

@@ -101,12 +101,17 @@ fn stage(name: &str, files: &[(PathBuf, &str)]) -> PathBuf {
     dir
 }
 
-/// A directory `name` holding a symlink to the real checkpoint `source`.
+/// A directory `name` holding the real checkpoint `source`: a symlink on Unix,
+/// a copy elsewhere, because a Windows symlink needs a privilege.
 fn stage_link(name: &str, source: &Path) -> PathBuf {
     let dir = fresh_dir(name);
     let file = source.file_name().expect("checkpoint file name");
+    #[cfg(unix)]
     std::os::unix::fs::symlink(source, dir.join(file))
         .unwrap_or_else(|e| panic!("link {}: {e}", source.display()));
+    #[cfg(not(unix))]
+    std::fs::copy(source, dir.join(file))
+        .unwrap_or_else(|e| panic!("copy {}: {e}", source.display()));
     dir
 }
 

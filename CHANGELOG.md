@@ -9,44 +9,35 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
-
-- **`SrModel::execution`** returns the dtype, layout and accumulation a loaded super-resolution model runs with.
-- **`Error::is_out_of_memory`** and **`Error::model_op`**. A super-resolution op that runs out of memory now stays `Error::Numr`, so a caller can name the next action without reading the message.
-
 ---
 
-## [0.11.0] - 2026-11-04
+## [0.11.0] - 2026-11-05
 
 Adds image super-resolution networks, a model-agnostic `.pth` source, and a directory loader over both networks.
 
 ### Breaking
 
-- **`WeightNormPthSource`** — the VoxCPM2 `weight_norm`-folding `.pth` source in `model::audio::voxcpm::loader::support` is renamed from `TorchPthSource`. It reads the same keys and folds the same pairs. `format::TorchPthSource` is now the model-agnostic source.
-- **Strided `.pth` tensors** — `TorchStateDict::load_tensor` and `load_tensor_pt` refuse a tensor whose strides are not row-major for its shape. Before, they read the storage in row-major order and returned wrong elements. The error names the key, shape and strides. Re-save such a tensor with `.contiguous()`.
+- `TorchPthSource` in `model::audio::voxcpm::loader::support`: renamed to `WeightNormPthSource`. Update imports of the VoxCPM2 source.
+- `format::TorchPthSource`: is now the model-agnostic source.
+- `TorchStateDict::load_tensor`, `load_tensor_pt`: refuse strides that are not row-major, which returned wrong elements. Re-save such a tensor with `.contiguous()`.
 
 ### Added
 
-- **`format::TorchPthSource`** — a `.pt` / `.pth` state dict as a `WeightSource` for any model, with no feature gate. `open` detects the root prefix: `params_ema.`, then `params.`, then `state_dict.`, else the root. `open_with_root` and `from_state_dict` take an explicit root. `root`, `names`, `stored_key` and `state_dict` expose the prefix, the names under it and keys outside it such as `metadata.in_nc`. `torch_pt::detect_root` and `torch_pt::ROOT_PREFIXES` expose the rule.
-- **`super-resolution` feature** — `model::super_resolution` holds image super-resolution networks on numr's fused conv. The gate implies no other gate. Half precision also needs `f16`.
-  - `SrVggCompact`: Real-ESRGAN's SRVGGNetCompact with PReLU, the `realesr-general-x4v3` network. `forward_raw` returns the ×4 image. `forward_resized` adds an antialiased bicubic resize in F32, casting half outputs to F32 and back.
-  - `load_compact` reads a `.pth` through `format::TorchPthSource`. It fails on a missing key, an unexpected key or a shape mismatch, and names the path and the keys.
-  - `SrExecution` fixes dtype, layout and conv accumulation at load. NHWC is the CUDA F16 and BF16 path. NCHW is the CPU and F32 path. The load permutes each OIHW weight to OHWI once for NHWC.
-  - `RrdbNet`: BasicSR's RRDBNet at ×2, the network of `RealESRGAN_x2plus` and `2x_PureVision`. `forward` replicate-pads an odd height or width, runs the pixel-unshuffle head, the RRDB body, two nearest ×2 upsamples and the tail, then crops to twice the input size. `RrdbConfig::realesrgan_x2plus` gives the 23-block shape. Any scale other than 2 is refused with an error that names scale 2.
-  - The dense blocks run without a concat. Each `conv1..conv4` writes its channel slice of one feature buffer and reads the slices before it. `conv5` adds the scaled block residual in its epilogue. The body ping-pongs between two buffers allocated once per forward.
-  - `load_rrdb` reads a `.pth` with modern keys or with the legacy ESRGAN `model.*` keys, detected by `model.0.weight`. The legacy remap fails on an unknown key or on two keys that map to one name. `metadata.*` scalars, when present, must match the config. A missing key, an unexpected key or a shape mismatch is an error that names the path and the keys.
-  - `load_sr_dir` loads the one `.pth` in a directory as an `SrModel`. No `.pth` or several is an error that names the directory and the files found. The key set picks SRVGGNetCompact, RRDBNet with current keys, or RRDBNet with legacy `model.N` keys, and an unknown key set is an error that names sample keys. The config comes from tensor shapes in the pickle metadata, with no weights read. Compact takes `num_out_ch` equal to `num_in_ch`. RRDBNet takes scale 2.
-  - `SrModel` is `Compact(SrVggCompact)` or `Rrdb(RrdbNet)`. `native_scale` returns 4 for the `realesr-general-x4v3` network and 2 for RRDBNet. `forward_native` runs `forward_raw` for compact and `forward` for RRDBNet.
-  - `SrConv` is one stride-1 conv with bias and an optional PReLU slope, with `forward` and `forward_into` over `conv2d_fused`. `SrClient` bounds the client of every network in the module. It includes `ScalarOps` and `ShapeOps`.
-- **F16 and BF16 `.pth` tensors** — `torch.HalfStorage` and `torch.BFloat16Storage` load as `DType::F16` and `DType::BF16` with the `f16` feature. Without it the error names the key and the `f16` feature.
-
-### Fixed
-
-- **`.pth` integer fields** — a negative size, stride, offset or element count in the pickle is an error. Before, it wrapped to a huge `usize`.
+- `super-resolution` feature: `SrVggCompact` (`realesr-general-x4v3`) and `RrdbNet` (`RealESRGAN_x2plus`, `2x_PureVision`) on numr's fused conv. Half precision also needs `f16`.
+- `load_compact`, `load_rrdb`, `load_sr_dir`: read `.pth` files for those networks.
+- `SrExecution`: fixes dtype, layout, and accumulation at load. NHWC is the CUDA F16 and BF16 path. NCHW is the CPU and F32 path, WebGPU included.
+- `format::TorchPthSource`: a `.pt` or `.pth` state dict as a `WeightSource` for any model, with no feature gate.
+- F16 and BF16 `.pth` tensors: load with the `f16` feature.
+- `Error::is_out_of_memory`: reports whether the error is a numr out-of-memory error.
+- `Error::model_op`: wraps a numr error raised inside a model op. `reason` names the op and its input. An out-of-memory source stays `Error::Numr`, so `Error::is_out_of_memory` still finds it. Any other source becomes `Error::ModelError` with `reason`.
 
 ### Changed
 
-- **Dependencies** — boostr requires numr 0.15.
+- numr dependency: boostr requires numr 0.15.
+
+### Fixed
+
+- `.pth` integer fields: a negative size, stride, offset, or element count is an error. It no longer wraps to a huge `usize`.
 
 ---
 

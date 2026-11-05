@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "boostr"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1303,9 +1303,9 @@ dependencies = [
 
 [[package]]
 name = "numr"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "539990e81dc7946f5bcf60f13d273f180c46bce497f8f487869adc93fb1819fb"
+checksum = "9747c5a258c8fa57c26926a5620b5b365c861b365c147c673ff9be97b292513c"
 dependencies = [
  "bytemuck",
  "cudarc",

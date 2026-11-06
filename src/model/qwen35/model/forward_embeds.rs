@@ -121,6 +121,26 @@ where
             + DequantOps<R>
             + MatmulOps<R>,
     {
+        self.check_embeds(embeds, positions)?;
+        let hidden = Var::new(embeds.clone(), false);
+        let hidden = self.forward_layers(
+            client,
+            hidden,
+            positions,
+            kv_cache,
+            gdn_state,
+            &AttentionStep::Shared,
+        )?;
+        self.logits_from_hidden(client, &hidden)
+    }
+
+    /// `embeds` is `[batch, seq, hidden_size]` and `positions` is `[4, seq]`
+    /// i32.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ModelError`] naming the shape or dtype that differs.
+    pub(super) fn check_embeds(&self, embeds: &Tensor<R>, positions: &Tensor<R>) -> Result<()> {
         let hidden_size = self.config.hidden_size;
         let shape = embeds.shape();
         if shape.len() != 3 || shape[2] != hidden_size {
@@ -140,16 +160,7 @@ where
                 ),
             });
         }
-        let hidden = Var::new(embeds.clone(), false);
-        let hidden = self.forward_layers(
-            client,
-            hidden,
-            positions,
-            kv_cache,
-            gdn_state,
-            &AttentionStep::Shared,
-        )?;
-        self.logits_from_hidden(client, &hidden)
+        Ok(())
     }
 }
 

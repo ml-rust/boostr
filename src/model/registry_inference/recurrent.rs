@@ -224,4 +224,120 @@ where
             }),
         }
     }
+
+    /// [`Self::forward_qwen35`], returning the logits of the last token only.
+    /// See `Qwen35Model::forward_qwen35_last`.
+    pub fn forward_qwen35_last(
+        &self,
+        input_ids: &Tensor<R>,
+        kv_cache: &mut LayeredKvCache<R>,
+        gdn_state: &mut LayeredGdnState<R>,
+        rope_pos: usize,
+    ) -> Result<Tensor<R>>
+    where
+        R::Client: ModelClient<R> + BinaryOps<R> + ShapeOps<R> + TensorOps<R> + ScalarOps<R>,
+    {
+        let client = R::default_client(input_ids.device());
+        match self {
+            LoadedModel::Qwen35(m) => {
+                m.forward_qwen35_last(&client, input_ids, kv_cache, gdn_state, rope_pos)
+            }
+            LoadedModel::Multimodal(m) => m
+                .llm()
+                .forward_qwen35_last(input_ids, kv_cache, gdn_state, rope_pos),
+            _ => Err(Error::ModelError {
+                reason: format!(
+                    "{} does not support forward_qwen35_last. Load a qwen35 model.",
+                    self.model_type()
+                ),
+            }),
+        }
+    }
+
+    /// [`Self::forward_qwen35_embeds`], returning the logits of the last row
+    /// only. See `Qwen35Model::forward_qwen35_embeds_last`.
+    pub fn forward_qwen35_embeds_last(
+        &self,
+        embeds: &Tensor<R>,
+        positions: &Tensor<R>,
+        kv_cache: &mut LayeredKvCache<R>,
+        gdn_state: &mut LayeredGdnState<R>,
+    ) -> Result<Tensor<R>>
+    where
+        R::Client: ModelClient<R> + BinaryOps<R> + ShapeOps<R> + TensorOps<R> + ScalarOps<R>,
+    {
+        let client = R::default_client(embeds.device());
+        match self {
+            LoadedModel::Qwen35(m) => {
+                m.forward_qwen35_embeds_last(&client, embeds, positions, kv_cache, gdn_state)
+            }
+            LoadedModel::Multimodal(m) => m
+                .llm()
+                .forward_qwen35_embeds_last(embeds, positions, kv_cache, gdn_state),
+            _ => Err(Error::ModelError {
+                reason: format!(
+                    "{} does not support forward_qwen35_embeds_last. Load a qwen35 model.",
+                    self.model_type()
+                ),
+            }),
+        }
+    }
+
+    /// Advance `kv_cache` and `gdn_state` over `input_ids`, computing no
+    /// logits. See `Qwen35Model::advance_qwen35`.
+    pub fn advance_qwen35(
+        &self,
+        input_ids: &Tensor<R>,
+        kv_cache: &mut LayeredKvCache<R>,
+        gdn_state: &mut LayeredGdnState<R>,
+        rope_pos: usize,
+    ) -> Result<()>
+    where
+        R::Client: ModelClient<R> + BinaryOps<R> + ShapeOps<R> + TensorOps<R> + ScalarOps<R>,
+    {
+        let client = R::default_client(input_ids.device());
+        match self {
+            LoadedModel::Qwen35(m) => {
+                m.advance_qwen35(&client, input_ids, kv_cache, gdn_state, rope_pos)
+            }
+            LoadedModel::Multimodal(m) => m
+                .llm()
+                .advance_qwen35(input_ids, kv_cache, gdn_state, rope_pos),
+            _ => Err(Error::ModelError {
+                reason: format!(
+                    "{} does not support advance_qwen35. Load a qwen35 model.",
+                    self.model_type()
+                ),
+            }),
+        }
+    }
+
+    /// [`Self::advance_qwen35`] over input embeddings. See
+    /// `Qwen35Model::advance_qwen35_embeds`.
+    pub fn advance_qwen35_embeds(
+        &self,
+        embeds: &Tensor<R>,
+        positions: &Tensor<R>,
+        kv_cache: &mut LayeredKvCache<R>,
+        gdn_state: &mut LayeredGdnState<R>,
+    ) -> Result<()>
+    where
+        R::Client: ModelClient<R> + BinaryOps<R> + ShapeOps<R> + TensorOps<R> + ScalarOps<R>,
+    {
+        let client = R::default_client(embeds.device());
+        match self {
+            LoadedModel::Qwen35(m) => {
+                m.advance_qwen35_embeds(&client, embeds, positions, kv_cache, gdn_state)
+            }
+            LoadedModel::Multimodal(m) => m
+                .llm()
+                .advance_qwen35_embeds(embeds, positions, kv_cache, gdn_state),
+            _ => Err(Error::ModelError {
+                reason: format!(
+                    "{} does not support advance_qwen35_embeds. Load a qwen35 model.",
+                    self.model_type()
+                ),
+            }),
+        }
+    }
 }

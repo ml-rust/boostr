@@ -19,6 +19,7 @@ mod forward_embeds;
 mod forward_gather;
 mod forward_graph;
 mod forward_layers;
+mod forward_prefill;
 mod forward_train;
 mod gguf;
 mod gguf_layers;

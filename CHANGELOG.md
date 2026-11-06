@@ -9,6 +9,15 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `forward_qwen35_last`, `forward_qwen35_embeds_last`: compute logits for the last row only. Call them in a prefill that samples one token.
+- `advance_qwen35`, `advance_qwen35_embeds`: advance the KV cache and GDN state with no logits. Call them for the earlier chunks of a prefill.
+
+### Changed
+
+- `numr`: boostr requires numr 0.15.1. A library user moves to that version.
+
 ### Fixed
 
 - `restructure_hf_checkpoint`: each part of a split `qkv_proj`, `query_key_value` or `gate_up_proj` owns its storage, so the fused tensor frees.

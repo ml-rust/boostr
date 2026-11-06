@@ -3,15 +3,15 @@ name = "boostr"
 version = "0.11.1"
 edition = "2024"
 rust-version = "1.95"
-description = "ML framework built on numr - attention, quantization, model architectures"
+description = "ML framework for Rust on numr: build LLM apps, run inference and train models, with attention, quantization, model architectures and distributed training"
 license = "Apache-2.0"
 repository = "https://github.com/ml-rust/boostr"
 documentation = "https://docs.rs/boostr"
 keywords = [
   "machine-learning",
-  "deep-learning",
-  "transformer",
+  "llm",
   "inference",
+  "training",
   "quantization",
 ]
 categories = ["science", "mathematics"]

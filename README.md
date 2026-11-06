@@ -50,9 +50,15 @@ Attention, quantization, model architectures, training, and inference built on <
 
 </div>
 
+boostr is an ML framework for Rust. Use it to build LLM apps, run inference, and train models, with the role PyTorch and Hugging Face Transformers have in Python.
+It runs on CPU, CUDA, and WebGPU. The code is Rust. No Python is needed.
+
 boostr extends [numr](https://github.com/ml-rust/numr) with ML operations and adds no tensor type or runtime wrapper.
 Its `Tensor`, `Runtime`, and client types come from numr.
 ML operations attach to numr's clients as extension traits.
+
+- Used to build: [oxidizr](https://github.com/ml-rust/oxidizr) (training), [blazr](https://github.com/ml-rust/blazr) (inference server), [compressr](https://github.com/ml-rust/compressr) (quantization), and [voxr](https://github.com/ml-rust/voxr) (audio and speech).
+- Not supported yet: WebGPU computes in `F32` only. Flash attention v3 needs a Hopper GPU. ROCm is not implemented.
 
 ## What works
 
@@ -69,6 +75,10 @@ ML operations attach to numr's clients as extension traits.
 | Text tagging | spaCy `en_core_web_sm` part-of-speech tagger | `spacy-tagger` |
 | Image models | `SrVggCompact`, `RrdbNet` | `super-resolution` |
 | Quantization | Simple blocks, K-quants, IQ, ternary, and low-bit formats | None |
+| LLM apps | Build an app on your own models with no separate server: model loading, sampling, KV and prefix caches, speculative decoding, a sequence scheduler with batching, and GBNF or JSON schema output | None |
+| Training | Optimizers, gradient scaling, and exact resume | None |
+| Distributed training | ZeRO stages 1, 2 and 3, tensor parallelism, and pipeline parallelism with GPipe, 1F1B and ZeroBubble schedules. Trainers wire these in themselves | `nccl` for GPUs |
+| Distributed inference | Disaggregated prefill and decode, pipeline stages, and KV transfer over nexar | `distributed` |
 
 CI has no GPU. Some ops run on some backends only. [docs/capabilities.md](docs/capabilities.md) lists every capability, and [docs/architecture.md](docs/architecture.md) holds the layout and design rules.
 

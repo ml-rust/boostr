@@ -56,6 +56,9 @@ pub(super) fn take_dense<R: Runtime<DType = DType>>(
 
 /// `[rows, rest..]` → `[a, b, c, rest..]`, then rows `start..start+len` of
 /// axis 1, back to `[a * len * c, rest..]`.
+///
+/// The part owns its storage. A view of the front of the fused tensor keeps
+/// the whole fused buffer on the device for the model's life.
 fn take_rows<R: Runtime<DType = DType>>(
     t: &Tensor<R>,
     groups: (usize, usize, usize),
@@ -70,7 +73,7 @@ fn take_rows<R: Runtime<DType = DType>>(
         .contiguous()?
         .reshape(&grouped)?
         .narrow(1, start, len)?
-        .contiguous()?;
+        .compact()?;
     let mut flat = vec![a * len * c];
     flat.extend_from_slice(&rest);
     Ok(part.reshape(&flat)?)
@@ -152,11 +155,11 @@ pub(super) fn split_fused_attention<R: Runtime<DType = DType>>(
             let half = rows / 2;
             map.insert(
                 format!("model.layers.{layer}.mlp.gate_proj.{suffix}"),
-                t.narrow(0, 0, half)?.contiguous()?,
+                t.narrow(0, 0, half)?.compact()?,
             );
             map.insert(
                 format!("model.layers.{layer}.mlp.up_proj.{suffix}"),
-                t.narrow(0, half, half)?.contiguous()?,
+                t.narrow(0, half, half)?.compact()?,
             );
         }
     }
@@ -196,6 +199,38 @@ mod tests {
         assert_eq!(rows(q), vec![0.0, 1.0, 6.0, 7.0]);
         assert_eq!(rows(k), vec![2.0, 3.0, 8.0, 9.0]);
         assert_eq!(rows(v), vec![4.0, 5.0, 10.0, 11.0]);
+    }
+
+    /// Each part holds only its own elements. A first part that shares the
+    /// fused storage keeps all of it alive.
+    #[test]
+    fn split_parts_do_not_keep_the_fused_buffer_alive() {
+        let device = CpuDevice::new();
+        let c = config(
+            r#"{"model_type": "phi3", "vocab_size": 4, "hidden_size": 4,
+                "num_hidden_layers": 1, "num_attention_heads": 2,
+                "num_key_value_heads": 1}"#,
+        );
+        let mut map = VarMap::<CpuRuntime>::new();
+        map.insert(
+            "model.layers.0.self_attn.qkv_proj.weight".into(),
+            tagged(8, &device),
+        );
+        map.insert(
+            "model.layers.0.mlp.gate_up_proj.weight".into(),
+            tagged(6, &device),
+        );
+        restructure_hf_checkpoint(&mut map, &c, &device).unwrap();
+        for name in [
+            "model.layers.0.self_attn.q_proj.weight",
+            "model.layers.0.self_attn.k_proj.weight",
+            "model.layers.0.self_attn.v_proj.weight",
+            "model.layers.0.mlp.gate_proj.weight",
+            "model.layers.0.mlp.up_proj.weight",
+        ] {
+            let part = map.get_tensor(name).unwrap();
+            assert_eq!(part.storage().len(), part.numel(), "{name}");
+        }
     }
 
     #[test]

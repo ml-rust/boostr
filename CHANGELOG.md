@@ -9,6 +9,10 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `restructure_hf_checkpoint`: each part of a split `qkv_proj`, `query_key_value` or `gate_up_proj` owns its storage, so the fused tensor frees.
+
 ---
 
 ## [0.11.0] - 2026-11-05

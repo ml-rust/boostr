@@ -9,6 +9,12 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.11.1] - 2026-11-06
+
+Qwen3.5 prefill computes logits for its last token only, and split fused checkpoints free the fused tensor.
+
 ### Added
 
 - `forward_qwen35_last`, `forward_qwen35_embeds_last`: compute logits for the last row only. Call them in a prefill that samples one token.

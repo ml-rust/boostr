@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "boostr"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1303,9 +1303,9 @@ dependencies = [
 
 [[package]]
 name = "numr"
-version = "0.15.0"
+version = "0.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9747c5a258c8fa57c26926a5620b5b365c861b365c147c673ff9be97b292513c"
+checksum = "f11a3624a6fe8b9a086b37d00bf5e7e6c3b4942bf50eb25d95a727e535ae4373"
 dependencies = [
  "bytemuck",
  "cudarc",
@@ -2223,9 +2223,9 @@ dependencies = [
 
 [[package]]
 name = "splintr"
-version = "0.22.0"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21a0cca20510b5fad3a3fdd55557839da2b839b2ac38e776726379f7c2ad54ea"
+checksum = "4edf1189e7aceeacc2a7c2b678bc30c0a9b39471c5fa477997ba3b5fbc1e4296"
 dependencies = [
  "aho-corasick",
  "base64",

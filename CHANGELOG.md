@@ -11,6 +11,14 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.11.2] - 2026-11-06
+
+### Changed
+
+- `README`, crate description: state what the crate does.
+
+---
+
 ## [0.11.1] - 2026-11-06
 
 Qwen3.5 prefill computes logits for its last token only, and split fused checkpoints free the fused tensor.

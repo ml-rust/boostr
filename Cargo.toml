@@ -1,6 +1,6 @@
 [package]
 name = "boostr"
-version = "0.11.1"
+version = "0.11.2"
 edition = "2024"
 rust-version = "1.95"
 description = "ML framework for Rust on numr: build LLM apps, run inference and train models, with attention, quantization, model architectures and distributed training"
